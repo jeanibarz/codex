@@ -1425,6 +1425,7 @@ pub enum HookEventName {
     SessionStart,
     UserPromptSubmit,
     Stop,
+    PermissionRequest,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]

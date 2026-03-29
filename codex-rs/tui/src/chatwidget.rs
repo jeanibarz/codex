@@ -9644,6 +9644,7 @@ fn hook_event_label(event_name: codex_protocol::protocol::HookEventName) -> &'st
         codex_protocol::protocol::HookEventName::SessionStart => "SessionStart",
         codex_protocol::protocol::HookEventName::UserPromptSubmit => "UserPromptSubmit",
         codex_protocol::protocol::HookEventName::Stop => "Stop",
+        codex_protocol::protocol::HookEventName::PermissionRequest => "PermissionRequest",
     }
 }
 

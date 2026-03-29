@@ -16,6 +16,8 @@ use crate::events::pre_tool_use::PreToolUseOutcome;
 use crate::events::pre_tool_use::PreToolUseRequest;
 use crate::events::session_start::SessionStartOutcome;
 use crate::events::session_start::SessionStartRequest;
+use crate::events::permission_request::PermissionRequestOutcome;
+use crate::events::permission_request::PermissionRequestRequest;
 use crate::events::stop::StopOutcome;
 use crate::events::stop::StopRequest;
 use crate::events::user_prompt_submit::UserPromptSubmitOutcome;
@@ -55,6 +57,7 @@ impl ConfiguredHandler {
             codex_protocol::protocol::HookEventName::SessionStart => "session-start",
             codex_protocol::protocol::HookEventName::UserPromptSubmit => "user-prompt-submit",
             codex_protocol::protocol::HookEventName::Stop => "stop",
+            codex_protocol::protocol::HookEventName::PermissionRequest => "permission-request",
         }
     }
 }
@@ -71,6 +74,7 @@ impl ClaudeHooksEngine {
         enabled: bool,
         config_layer_stack: Option<&ConfigLayerStack>,
         shell: CommandShell,
+        settings_file: Option<std::path::PathBuf>,
     ) -> Self {
         if !enabled {
             return Self {
@@ -92,7 +96,7 @@ impl ClaudeHooksEngine {
         }
 
         let _ = schema_loader::generated_hook_schemas();
-        let discovered = discovery::discover_handlers(config_layer_stack);
+        let discovered = discovery::discover_handlers(config_layer_stack, settings_file.as_deref());
         Self {
             handlers: discovered.handlers,
             warnings: discovered.warnings,
@@ -161,5 +165,19 @@ impl ClaudeHooksEngine {
 
     pub(crate) async fn run_stop(&self, request: StopRequest) -> StopOutcome {
         crate::events::stop::run(&self.handlers, &self.shell, request).await
+    }
+
+    pub(crate) fn preview_permission_request(
+        &self,
+        request: &PermissionRequestRequest,
+    ) -> Vec<HookRunSummary> {
+        crate::events::permission_request::preview(&self.handlers, request)
+    }
+
+    pub(crate) async fn run_permission_request(
+        &self,
+        request: PermissionRequestRequest,
+    ) -> PermissionRequestOutcome {
+        crate::events::permission_request::run(&self.handlers, &self.shell, request).await
     }
 }

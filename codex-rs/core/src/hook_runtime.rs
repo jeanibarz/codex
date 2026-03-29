@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::sync::Arc;
 
+use codex_hooks::PermissionRequestRequest;
 use codex_hooks::PostToolUseOutcome;
 use codex_hooks::PostToolUseRequest;
 use codex_hooks::PreToolUseOutcome;
@@ -171,6 +172,30 @@ pub(crate) async fn run_post_tool_use_hooks(
     outcome
 }
 
+#[allow(dead_code)]
+pub(crate) async fn run_permission_request_hooks(
+    sess: &Arc<Session>,
+    turn_context: &Arc<TurnContext>,
+    tool_name: String,
+    tool_input: String,
+) {
+    let request = PermissionRequestRequest {
+        session_id: sess.conversation_id,
+        turn_id: turn_context.sub_id.clone(),
+        cwd: turn_context.cwd.to_path_buf(),
+        transcript_path: sess.hook_transcript_path().await,
+        model: turn_context.model_info.slug.clone(),
+        permission_mode: hook_permission_mode(turn_context),
+        tool_name,
+        tool_input,
+    };
+    let preview_runs = sess.hooks().preview_permission_request(&request);
+    emit_hook_started_events(sess, turn_context, preview_runs).await;
+
+    let outcome = sess.hooks().run_permission_request(request).await;
+    emit_hook_completed_events(sess, turn_context, outcome.hook_events).await;
+}
+
 pub(crate) async fn run_user_prompt_submit_hooks(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
@@ -326,7 +351,7 @@ async fn emit_hook_completed_events(
     }
 }
 
-fn hook_permission_mode(turn_context: &TurnContext) -> String {
+pub(crate) fn hook_permission_mode(turn_context: &TurnContext) -> String {
     match turn_context.approval_policy.value() {
         AskForApproval::Never => "bypassPermissions",
         AskForApproval::UnlessTrusted

@@ -18,6 +18,8 @@ pub(crate) struct HookEvents {
     pub user_prompt_submit: Vec<MatcherGroup>,
     #[serde(rename = "Stop", default)]
     pub stop: Vec<MatcherGroup>,
+    #[serde(rename = "PermissionRequest", default)]
+    pub permission_request: Vec<MatcherGroup>,
 }
 
 #[derive(Debug, Default, Deserialize)]

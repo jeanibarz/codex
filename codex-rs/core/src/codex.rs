@@ -1827,6 +1827,7 @@ impl Session {
             config_layer_stack: Some(config.config_layer_stack.clone()),
             shell_program: Some(hook_shell_program),
             shell_args: hook_shell_argv,
+            settings_file: config.settings_file.clone(),
         });
         for warning in hooks.startup_warnings() {
             post_session_configured_events.push(Event {
@@ -2938,6 +2939,20 @@ impl Session {
                 additional_permissions.as_ref(),
             )
         });
+        // Fire PermissionRequest hook so external supervisors (e.g. Looper)
+        // can detect that the agent is blocked waiting for human approval.
+        let perm_request = codex_hooks::PermissionRequestRequest {
+            session_id: self.conversation_id,
+            turn_id: turn_context.sub_id.clone(),
+            cwd: turn_context.cwd.to_path_buf(),
+            transcript_path: self.hook_transcript_path().await,
+            model: turn_context.model_info.slug.clone(),
+            permission_mode: crate::hook_runtime::hook_permission_mode(turn_context),
+            tool_name: "Bash".to_string(),
+            tool_input: command.join(" "),
+        };
+        let _perm_outcome = self.hooks().run_permission_request(perm_request).await;
+
         let event = EventMsg::ExecApprovalRequest(ExecApprovalRequestEvent {
             call_id,
             approval_id,
