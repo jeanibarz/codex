@@ -192,6 +192,7 @@ mod tests {
     fn canonicalizes_use_legacy_landlock_alias() {
         let overrides = CliConfigOverrides {
             raw_overrides: vec!["use_legacy_landlock=true".to_string()],
+            settings_file: None,
         };
         let parsed = overrides.parse_overrides().expect("parse_overrides");
         assert_eq!(parsed[0].0.as_str(), "features.use_legacy_landlock");
