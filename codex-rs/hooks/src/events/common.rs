@@ -74,9 +74,10 @@ pub(crate) fn matcher_pattern_for_event(
     matcher: Option<&str>,
 ) -> Option<&str> {
     match event_name {
-        HookEventName::PreToolUse | HookEventName::PostToolUse | HookEventName::SessionStart => {
-            matcher
-        }
+        HookEventName::PreToolUse
+        | HookEventName::PostToolUse
+        | HookEventName::SessionStart
+        | HookEventName::PermissionRequest => matcher,
         HookEventName::UserPromptSubmit | HookEventName::Stop => None,
     }
 }

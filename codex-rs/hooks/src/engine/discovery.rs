@@ -16,17 +16,26 @@ pub(crate) struct DiscoveryResult {
     pub warnings: Vec<String>,
 }
 
-pub(crate) fn discover_handlers(config_layer_stack: Option<&ConfigLayerStack>) -> DiscoveryResult {
-    let Some(config_layer_stack) = config_layer_stack else {
-        return DiscoveryResult {
-            handlers: Vec::new(),
-            warnings: Vec::new(),
-        };
-    };
-
+pub(crate) fn discover_handlers(
+    config_layer_stack: Option<&ConfigLayerStack>,
+    settings_file: Option<&Path>,
+) -> DiscoveryResult {
     let mut handlers = Vec::new();
     let mut warnings = Vec::new();
     let mut display_order = 0_i64;
+
+    // Load hooks from the config layer stack (e.g. ~/.codex/hooks.json, ./.codex/hooks.json).
+    let Some(config_layer_stack) = config_layer_stack else {
+        if let Some(settings_file) = settings_file {
+            load_hooks_from_file(
+                settings_file,
+                &mut handlers,
+                &mut warnings,
+                &mut display_order,
+            );
+        }
+        return DiscoveryResult { handlers, warnings };
+    };
 
     for layer in config_layer_stack.get_layers(
         ConfigLayerStackOrdering::LowestPrecedenceFirst,
@@ -77,6 +86,7 @@ pub(crate) fn discover_handlers(config_layer_stack: Option<&ConfigLayerStack>) -
             session_start,
             user_prompt_submit,
             stop,
+            permission_request,
         } = parsed.hooks;
 
         for (event_name, groups) in [
@@ -97,6 +107,10 @@ pub(crate) fn discover_handlers(config_layer_stack: Option<&ConfigLayerStack>) -
                 user_prompt_submit,
             ),
             (codex_protocol::protocol::HookEventName::Stop, stop),
+            (
+                codex_protocol::protocol::HookEventName::PermissionRequest,
+                permission_request,
+            ),
         ] {
             append_matcher_groups(
                 &mut handlers,
@@ -109,7 +123,97 @@ pub(crate) fn discover_handlers(config_layer_stack: Option<&ConfigLayerStack>) -
         }
     }
 
+    // Load hooks from the per-session settings file (e.g. --settings <path>),
+    // merged additively after all config layer hooks.
+    if let Some(settings_file) = settings_file {
+        load_hooks_from_file(
+            settings_file,
+            &mut handlers,
+            &mut warnings,
+            &mut display_order,
+        );
+    }
+
     DiscoveryResult { handlers, warnings }
+}
+
+fn load_hooks_from_file(
+    source_path: &Path,
+    handlers: &mut Vec<ConfiguredHandler>,
+    warnings: &mut Vec<String>,
+    display_order: &mut i64,
+) {
+    if !source_path.is_file() {
+        warnings.push(format!(
+            "settings file not found: {}",
+            source_path.display()
+        ));
+        return;
+    }
+
+    let contents = match fs::read_to_string(source_path) {
+        Ok(contents) => contents,
+        Err(err) => {
+            warnings.push(format!(
+                "failed to read settings file {}: {err}",
+                source_path.display()
+            ));
+            return;
+        }
+    };
+
+    let parsed: HooksFile = match serde_json::from_str(&contents) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            warnings.push(format!(
+                "failed to parse settings file {}: {err}",
+                source_path.display()
+            ));
+            return;
+        }
+    };
+
+    let super::config::HookEvents {
+        pre_tool_use,
+        post_tool_use,
+        session_start,
+        user_prompt_submit,
+        stop,
+        permission_request,
+    } = parsed.hooks;
+
+    for (event_name, groups) in [
+        (
+            codex_protocol::protocol::HookEventName::PreToolUse,
+            pre_tool_use,
+        ),
+        (
+            codex_protocol::protocol::HookEventName::PostToolUse,
+            post_tool_use,
+        ),
+        (
+            codex_protocol::protocol::HookEventName::SessionStart,
+            session_start,
+        ),
+        (
+            codex_protocol::protocol::HookEventName::UserPromptSubmit,
+            user_prompt_submit,
+        ),
+        (codex_protocol::protocol::HookEventName::Stop, stop),
+        (
+            codex_protocol::protocol::HookEventName::PermissionRequest,
+            permission_request,
+        ),
+    ] {
+        append_matcher_groups(
+            handlers,
+            warnings,
+            display_order,
+            source_path,
+            event_name,
+            groups,
+        );
+    }
 }
 
 fn append_group_handlers(

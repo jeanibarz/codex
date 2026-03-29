@@ -81,6 +81,12 @@ struct MultitoolCli {
     #[clap(flatten)]
     interactive: TuiCli,
 
+    /// Path to a JSON settings file containing additional hook definitions.
+    /// Hooks are merged additively with existing config. Used by external
+    /// supervisors (e.g. Looper) to inject per-agent hooks.
+    #[arg(long = "settings", value_name = "FILE", global = true)]
+    settings_file: Option<PathBuf>,
+
     #[clap(subcommand)]
     subcommand: Option<Subcommand>,
 }
@@ -605,12 +611,15 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
         feature_toggles,
         remote,
         mut interactive,
+        settings_file,
         subcommand,
     } = MultitoolCli::parse();
 
     // Fold --enable/--disable into config overrides so they flow to all subcommands.
     let toggle_overrides = feature_toggles.to_overrides()?;
     root_config_overrides.raw_overrides.extend(toggle_overrides);
+    // Thread --settings through to all subcommands via CliConfigOverrides.
+    root_config_overrides.settings_file = settings_file;
     let root_remote = remote.remote;
     let root_remote_auth_token_env = remote.remote_auth_token_env;
 
@@ -1141,6 +1150,9 @@ fn prepend_config_flags(
     subcommand_config_overrides
         .raw_overrides
         .splice(0..0, cli_config_overrides.raw_overrides);
+    if subcommand_config_overrides.settings_file.is_none() {
+        subcommand_config_overrides.settings_file = cli_config_overrides.settings_file;
+    }
 }
 
 fn reject_remote_mode_for_subcommand(

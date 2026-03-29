@@ -14,7 +14,8 @@
         "PostToolUse",
         "SessionStart",
         "UserPromptSubmit",
-        "Stop"
+        "Stop",
+        "PermissionRequest"
       ],
       "type": "string"
     },

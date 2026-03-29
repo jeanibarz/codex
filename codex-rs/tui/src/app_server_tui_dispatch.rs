@@ -13,13 +13,17 @@ pub(crate) fn app_server_tui_config_inputs(
         raw_overrides.push("web_search=\"live\"".to_string());
     }
 
-    let cli_kv_overrides = codex_utils_cli::CliConfigOverrides { raw_overrides }
-        .parse_overrides()
-        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+    let cli_kv_overrides = codex_utils_cli::CliConfigOverrides {
+        raw_overrides,
+        settings_file: cli.config_overrides.settings_file.clone(),
+    }
+    .parse_overrides()
+    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
 
     let config_overrides = ConfigOverrides {
         cwd: cli.cwd.clone(),
         config_profile: cli.config_profile.clone(),
+        settings_file: cli.config_overrides.settings_file.clone(),
         ..Default::default()
     };
 

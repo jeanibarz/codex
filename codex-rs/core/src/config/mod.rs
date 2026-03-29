@@ -575,6 +575,10 @@ pub struct Config {
     /// Configured discoverable tools for tool suggestions.
     pub tool_suggest: ToolSuggestConfig,
 
+    /// Optional path to a settings file containing additional hook definitions.
+    /// Used by external supervisors (e.g. Looper) to inject per-session hooks.
+    pub settings_file: Option<PathBuf>,
+
     /// OTEL configuration (exporter type, endpoint, headers, etc.).
     pub otel: crate::config::types::OtelConfig,
 }
@@ -1810,6 +1814,10 @@ pub struct ConfigOverrides {
     pub ephemeral: Option<bool>,
     /// Additional directories that should be treated as writable roots for this session.
     pub additional_writable_roots: Vec<PathBuf>,
+    /// Optional path to a settings file containing additional hook definitions,
+    /// merged additively with existing config. Used by external supervisors
+    /// (e.g. Looper) to inject per-agent hooks.
+    pub settings_file: Option<PathBuf>,
 }
 
 fn validate_reserved_model_provider_ids(
@@ -2008,6 +2016,7 @@ impl Config {
             tools_web_search_request: override_tools_web_search_request,
             ephemeral,
             additional_writable_roots,
+            settings_file,
         } = overrides;
 
         let active_profile_name = config_profile_key
@@ -2699,6 +2708,7 @@ impl Config {
             tui_status_line: cfg.tui.as_ref().and_then(|t| t.status_line.clone()),
             tui_terminal_title: cfg.tui.as_ref().and_then(|t| t.terminal_title.clone()),
             tui_theme: cfg.tui.as_ref().and_then(|t| t.theme.clone()),
+            settings_file,
             otel: {
                 let t: OtelConfigToml = cfg.otel.unwrap_or_default();
                 let log_user_prompt = t.log_user_prompt.unwrap_or(false);
