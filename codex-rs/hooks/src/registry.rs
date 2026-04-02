@@ -116,6 +116,13 @@ impl Hooks {
         self.engine.preview_post_tool_use(request)
     }
 
+    pub fn preview_permission_request(
+        &self,
+        request: &PermissionRequestRequest,
+    ) -> Vec<codex_protocol::protocol::HookRunSummary> {
+        self.engine.preview_permission_request(request)
+    }
+
     pub async fn run_session_start(
         &self,
         request: SessionStartRequest,
@@ -155,13 +162,6 @@ impl Hooks {
 
     pub async fn run_stop(&self, request: StopRequest) -> StopOutcome {
         self.engine.run_stop(request).await
-    }
-
-    pub fn preview_permission_request(
-        &self,
-        request: &PermissionRequestRequest,
-    ) -> Vec<codex_protocol::protocol::HookRunSummary> {
-        self.engine.preview_permission_request(request)
     }
 
     pub async fn run_permission_request(

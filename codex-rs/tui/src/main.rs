@@ -22,6 +22,9 @@ fn main() -> anyhow::Result<()> {
             .config_overrides
             .raw_overrides
             .splice(0..0, top_cli.config_overrides.raw_overrides);
+        if inner.config_overrides.settings_file.is_none() {
+            inner.config_overrides.settings_file = top_cli.config_overrides.settings_file;
+        }
         let exit_info = run_main(
             inner,
             arg0_paths,

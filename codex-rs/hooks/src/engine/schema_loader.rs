@@ -15,6 +15,7 @@ pub(crate) struct GeneratedHookSchemas {
     pub stop_command_input: Value,
     pub stop_command_output: Value,
     pub permission_request_command_input: Value,
+    pub permission_request_command_output: Value,
 }
 
 pub(crate) fn generated_hook_schemas() -> &'static GeneratedHookSchemas {
@@ -64,6 +65,10 @@ pub(crate) fn generated_hook_schemas() -> &'static GeneratedHookSchemas {
             "permission-request.command.input",
             include_str!("../../schema/generated/permission-request.command.input.schema.json"),
         ),
+        permission_request_command_output: parse_json_schema(
+            "permission-request.command.output",
+            include_str!("../../schema/generated/permission-request.command.output.schema.json"),
+        ),
     })
 }
 
@@ -91,9 +96,7 @@ mod tests {
         assert_eq!(schemas.user_prompt_submit_command_output["type"], "object");
         assert_eq!(schemas.stop_command_input["type"], "object");
         assert_eq!(schemas.stop_command_output["type"], "object");
-        assert_eq!(
-            schemas.permission_request_command_input["type"],
-            "object"
-        );
+        assert_eq!(schemas.permission_request_command_input["type"], "object");
+        assert_eq!(schemas.permission_request_command_output["type"], "object");
     }
 }

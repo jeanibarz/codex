@@ -7,14 +7,17 @@ use codex_protocol::protocol::HookOutputEntry;
 use codex_protocol::protocol::HookOutputEntryKind;
 use codex_protocol::protocol::HookRunStatus;
 use codex_protocol::protocol::HookRunSummary;
+use serde_json::Map;
+use serde_json::Value;
 
 use super::common;
-use crate::engine::CommandShell;
-use crate::engine::ConfiguredHandler;
 use crate::engine::command_runner::CommandRunResult;
 use crate::engine::dispatcher;
+use crate::engine::output_parser;
+use crate::engine::CommandShell;
+use crate::engine::ConfiguredHandler;
+use crate::schema::NullableString;
 use crate::schema::PermissionRequestCommandInput;
-use crate::schema::PermissionRequestToolInput;
 
 #[derive(Debug, Clone)]
 pub struct PermissionRequestRequest {
@@ -25,16 +28,14 @@ pub struct PermissionRequestRequest {
     pub model: String,
     pub permission_mode: String,
     pub tool_name: String,
-    pub tool_input: String,
+    pub tool_input: Map<String, Value>,
+    pub permission_suggestions: Vec<Map<String, Value>>,
 }
 
 #[derive(Debug)]
 pub struct PermissionRequestOutcome {
     pub hook_events: Vec<HookCompletedEvent>,
 }
-
-#[derive(Debug, Default)]
-struct PermissionRequestHandlerData;
 
 pub(crate) fn preview(
     handlers: &[ConfiguredHandler],
@@ -69,15 +70,14 @@ pub(crate) async fn run(
     let input_json = match serde_json::to_string(&PermissionRequestCommandInput {
         session_id: request.session_id.to_string(),
         turn_id: request.turn_id.clone(),
-        transcript_path: crate::schema::NullableString::from_path(request.transcript_path.clone()),
+        transcript_path: NullableString::from_path(request.transcript_path.clone()),
         cwd: request.cwd.display().to_string(),
         hook_event_name: "PermissionRequest".to_string(),
         model: request.model.clone(),
         permission_mode: request.permission_mode.clone(),
         tool_name: request.tool_name.clone(),
-        tool_input: PermissionRequestToolInput {
-            command: request.tool_input.clone(),
-        },
+        tool_input: request.tool_input.clone(),
+        permission_suggestions: request.permission_suggestions.clone(),
     }) {
         Ok(input_json) => input_json,
         Err(error) => {
@@ -110,7 +110,7 @@ fn parse_completed(
     handler: &ConfiguredHandler,
     run_result: CommandRunResult,
     turn_id: Option<String>,
-) -> dispatcher::ParsedHandler<PermissionRequestHandlerData> {
+) -> dispatcher::ParsedHandler<()> {
     let mut entries = Vec::new();
     let mut status = HookRunStatus::Completed;
 
@@ -124,8 +124,45 @@ fn parse_completed(
         }
         None => match run_result.exit_code {
             Some(0) => {
-                // PermissionRequest is a notification-only hook.
-                // We do not parse stdout — any output is silently ignored.
+                let trimmed_stdout = run_result.stdout.trim();
+                if trimmed_stdout.is_empty() {
+                } else if let Some(parsed) =
+                    output_parser::parse_permission_request(&run_result.stdout)
+                {
+                    if let Some(system_message) = parsed.universal.system_message {
+                        entries.push(HookOutputEntry {
+                            kind: HookOutputEntryKind::Warning,
+                            text: system_message,
+                        });
+                    }
+                    if let Some(additional_context) = parsed.additional_context {
+                        entries.push(HookOutputEntry {
+                            kind: HookOutputEntryKind::Context,
+                            text: additional_context,
+                        });
+                    }
+                    let _ = parsed.universal.suppress_output;
+                    if !parsed.universal.continue_processing {
+                        status = HookRunStatus::Stopped;
+                        if let Some(stop_reason_text) = parsed.universal.stop_reason {
+                            entries.push(HookOutputEntry {
+                                kind: HookOutputEntryKind::Stop,
+                                text: stop_reason_text,
+                            });
+                        }
+                    }
+                } else if trimmed_stdout.starts_with('{') || trimmed_stdout.starts_with('[') {
+                    status = HookRunStatus::Failed;
+                    entries.push(HookOutputEntry {
+                        kind: HookOutputEntryKind::Error,
+                        text: "hook returned invalid permission request JSON output".to_string(),
+                    });
+                } else {
+                    entries.push(HookOutputEntry {
+                        kind: HookOutputEntryKind::Context,
+                        text: trimmed_stdout.to_string(),
+                    });
+                }
             }
             Some(exit_code) => {
                 status = HookRunStatus::Failed;
@@ -144,12 +181,14 @@ fn parse_completed(
         },
     }
 
+    let completed = HookCompletedEvent {
+        turn_id,
+        run: dispatcher::completed_summary(handler, &run_result, status, entries),
+    };
+
     dispatcher::ParsedHandler {
-        completed: HookCompletedEvent {
-            turn_id,
-            run: dispatcher::completed_summary(handler, &run_result, status, entries),
-        },
-        data: PermissionRequestHandlerData,
+        completed,
+        data: (),
     }
 }
 
@@ -158,23 +197,53 @@ mod tests {
     use std::path::PathBuf;
 
     use codex_protocol::protocol::HookEventName;
+    use codex_protocol::protocol::HookOutputEntry;
+    use codex_protocol::protocol::HookOutputEntryKind;
     use codex_protocol::protocol::HookRunStatus;
     use pretty_assertions::assert_eq;
 
     use super::parse_completed;
-    use crate::engine::ConfiguredHandler;
     use crate::engine::command_runner::CommandRunResult;
+    use crate::engine::ConfiguredHandler;
 
     #[test]
-    fn successful_hook_completes() {
+    fn plain_stdout_becomes_context_entry() {
         let parsed = parse_completed(
             &handler(),
-            run_result(Some(0), "", ""),
-            Some("turn-1".to_string()),
+            run_result(Some(0), "needs attention\n", ""),
+            None,
         );
 
         assert_eq!(parsed.completed.run.status, HookRunStatus::Completed);
-        assert_eq!(parsed.completed.run.entries, vec![]);
+        assert_eq!(
+            parsed.completed.run.entries,
+            vec![HookOutputEntry {
+                kind: HookOutputEntryKind::Context,
+                text: "needs attention".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn invalid_json_like_stdout_fails() {
+        let parsed = parse_completed(
+            &handler(),
+            run_result(
+                Some(0),
+                r#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest""#,
+                "",
+            ),
+            None,
+        );
+
+        assert_eq!(parsed.completed.run.status, HookRunStatus::Failed);
+        assert_eq!(
+            parsed.completed.run.entries,
+            vec![HookOutputEntry {
+                kind: HookOutputEntryKind::Error,
+                text: "hook returned invalid permission request JSON output".to_string(),
+            }]
+        );
     }
 
     #[test]
@@ -194,7 +263,7 @@ mod tests {
             event_name: HookEventName::PermissionRequest,
             matcher: None,
             command: "echo hook".to_string(),
-            timeout_sec: 5,
+            timeout_sec: 600,
             status_message: None,
             source_path: PathBuf::from("/tmp/hooks.json"),
             display_order: 0,

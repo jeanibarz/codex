@@ -13,6 +13,12 @@ pub(crate) struct SessionStartOutput {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct PermissionRequestOutput {
+    pub universal: UniversalOutput,
+    pub additional_context: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct PreToolUseOutput {
     pub universal: UniversalOutput,
     pub block_reason: Option<String>,
@@ -48,6 +54,7 @@ pub(crate) struct StopOutput {
 
 use crate::schema::BlockDecisionWire;
 use crate::schema::HookUniversalOutputWire;
+use crate::schema::PermissionRequestCommandOutputWire;
 use crate::schema::PostToolUseCommandOutputWire;
 use crate::schema::PreToolUseCommandOutputWire;
 use crate::schema::PreToolUseDecisionWire;
@@ -62,6 +69,17 @@ pub(crate) fn parse_session_start(stdout: &str) -> Option<SessionStartOutput> {
         .hook_specific_output
         .and_then(|output| output.additional_context);
     Some(SessionStartOutput {
+        universal: UniversalOutput::from(wire.universal),
+        additional_context,
+    })
+}
+
+pub(crate) fn parse_permission_request(stdout: &str) -> Option<PermissionRequestOutput> {
+    let wire: PermissionRequestCommandOutputWire = parse_json(stdout)?;
+    let additional_context = wire
+        .hook_specific_output
+        .and_then(|output| output.additional_context);
+    Some(PermissionRequestOutput {
         universal: UniversalOutput::from(wire.universal),
         additional_context,
     })

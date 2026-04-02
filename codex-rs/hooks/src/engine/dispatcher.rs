@@ -10,10 +10,10 @@ use codex_protocol::protocol::HookRunStatus;
 use codex_protocol::protocol::HookRunSummary;
 use codex_protocol::protocol::HookScope;
 
+use super::command_runner::run_command;
+use super::command_runner::CommandRunResult;
 use super::CommandShell;
 use super::ConfiguredHandler;
-use super::command_runner::CommandRunResult;
-use super::command_runner::run_command;
 use crate::events::common::matches_matcher;
 
 #[derive(Debug)]
@@ -111,9 +111,9 @@ fn scope_for_event(event_name: HookEventName) -> HookScope {
         HookEventName::SessionStart => HookScope::Thread,
         HookEventName::PreToolUse
         | HookEventName::PostToolUse
+        | HookEventName::PermissionRequest
         | HookEventName::UserPromptSubmit
-        | HookEventName::Stop
-        | HookEventName::PermissionRequest => HookScope::Turn,
+        | HookEventName::Stop => HookScope::Turn,
     }
 }
 
@@ -123,8 +123,8 @@ mod tests {
 
     use codex_protocol::protocol::HookEventName;
 
-    use super::ConfiguredHandler;
     use super::select_handlers;
+    use super::ConfiguredHandler;
 
     fn make_handler(
         event_name: HookEventName,
@@ -232,6 +232,33 @@ mod tests {
         ];
 
         let selected = select_handlers(&handlers, HookEventName::PostToolUse, Some("Bash"));
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].display_order, 0);
+    }
+
+    #[test]
+    fn permission_request_matches_tool_name() {
+        let handlers = vec![
+            make_handler(
+                HookEventName::PermissionRequest,
+                Some("^WorkspaceTrust$"),
+                "echo same",
+                0,
+            ),
+            make_handler(
+                HookEventName::PermissionRequest,
+                Some("^Bash$"),
+                "echo same",
+                1,
+            ),
+        ];
+
+        let selected = select_handlers(
+            &handlers,
+            HookEventName::PermissionRequest,
+            Some("WorkspaceTrust"),
+        );
 
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].display_order, 0);

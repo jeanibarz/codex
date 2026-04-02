@@ -1173,3 +1173,64 @@ async fn reasoning_raw_content_delta_respects_flag() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+/// Regression test for openai/codex#15720: when OutputTextDelta arrives before
+/// OutputItemAdded (as observed with gpt-5.4), the delta must still be forwarded
+/// to the UI instead of being silently dropped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn output_text_delta_without_item_added_creates_synthetic_item() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+
+    let TestCodex { codex, .. } = test_codex().build(&server).await?;
+
+    // Simulate a stream where OutputTextDelta arrives with NO preceding
+    // OutputItemAdded event — only OutputItemDone at the end.
+    let stream = sse(vec![
+        ev_response_created("resp-1"),
+        // No ev_message_item_added here — this is the bug trigger.
+        ev_output_text_delta("hello from gpt-5.4"),
+        ev_assistant_message("msg-1", "hello from gpt-5.4"),
+        ev_completed("resp-1"),
+    ]);
+    mount_sse_once(&server, stream).await;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::text("test")],
+        })
+        .await?;
+
+    // The fix should create a synthetic AgentMessage item, so ItemStarted
+    // must still be emitted.
+    wait_for_event_match(&codex, |ev| match ev {
+        EventMsg::ItemStarted(ItemStartedEvent {
+            item: TurnItem::AgentMessage(_),
+            ..
+        }) => Some(()),
+        _ => None,
+    })
+    .await;
+
+    // The text delta must be forwarded to the UI, not dropped.
+    let delta_event = wait_for_event_match(&codex, |ev| match ev {
+        EventMsg::AgentMessageContentDelta(event) => Some(event.clone()),
+        _ => None,
+    })
+    .await;
+
+    assert_eq!(delta_event.delta, "hello from gpt-5.4");
+
+    // The completed item should also arrive.
+    wait_for_event_match(&codex, |ev| match ev {
+        EventMsg::ItemCompleted(ItemCompletedEvent {
+            item: TurnItem::AgentMessage(_),
+            ..
+        }) => Some(()),
+        _ => None,
+    })
+    .await;
+
+    Ok(())
+}
