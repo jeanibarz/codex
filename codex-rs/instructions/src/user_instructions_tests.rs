@@ -26,14 +26,14 @@ fn test_user_instructions() {
 
     assert_eq!(
         text,
-        "# AGENTS.md instructions for test_directory\n\n<INSTRUCTIONS>\ntest_text\n</INSTRUCTIONS>",
+        "# CLAUDE.md instructions for test_directory\n\n<INSTRUCTIONS>\ntest_text\n</INSTRUCTIONS>",
     );
 }
 
 #[test]
 fn test_is_user_instructions() {
     assert!(AGENTS_MD_FRAGMENT.matches_text(
-        "# AGENTS.md instructions for test_directory\n\n<INSTRUCTIONS>\ntest_text\n</INSTRUCTIONS>"
+        "# CLAUDE.md instructions for test_directory\n\n<INSTRUCTIONS>\ntest_text\n</INSTRUCTIONS>"
     ));
     assert!(!AGENTS_MD_FRAGMENT.matches_text("test_text"));
 }

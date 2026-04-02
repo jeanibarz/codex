@@ -45,12 +45,6 @@ impl ExternalAgentConfigApi {
                         CoreMigrationItemType::Config => {
                             ExternalAgentConfigMigrationItemType::Config
                         }
-                        CoreMigrationItemType::Skills => {
-                            ExternalAgentConfigMigrationItemType::Skills
-                        }
-                        CoreMigrationItemType::AgentsMd => {
-                            ExternalAgentConfigMigrationItemType::AgentsMd
-                        }
                         CoreMigrationItemType::McpServerConfig => {
                             ExternalAgentConfigMigrationItemType::McpServerConfig
                         }
@@ -75,12 +69,6 @@ impl ExternalAgentConfigApi {
                         item_type: match migration_item.item_type {
                             ExternalAgentConfigMigrationItemType::Config => {
                                 CoreMigrationItemType::Config
-                            }
-                            ExternalAgentConfigMigrationItemType::Skills => {
-                                CoreMigrationItemType::Skills
-                            }
-                            ExternalAgentConfigMigrationItemType::AgentsMd => {
-                                CoreMigrationItemType::AgentsMd
                             }
                             ExternalAgentConfigMigrationItemType::McpServerConfig => {
                                 CoreMigrationItemType::McpServerConfig

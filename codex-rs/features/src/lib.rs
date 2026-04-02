@@ -130,7 +130,7 @@ pub enum Feature {
     Sqlite,
     /// Enable startup memory extraction and file-backed memory consolidation.
     MemoryTool,
-    /// Append additional AGENTS.md guidance to user instructions.
+    /// Append additional CLAUDE.md guidance to user instructions.
     ChildAgentsMd,
     /// Allow the model to request `detail: "original"` image outputs on supported models.
     ImageDetailOriginal,

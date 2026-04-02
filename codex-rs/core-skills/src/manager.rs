@@ -71,7 +71,8 @@ impl SkillsManager {
             cache_by_config: RwLock::new(HashMap::new()),
         };
         if !bundled_skills_enabled {
-            // The loader caches bundled skills under `skills/.system`. Clearing that directory is
+            // The loader caches bundled skills under `~/.claude/skills/.system`. Clearing that
+            // directory is
             // best-effort cleanup; root selection still enforces the config even if removal fails.
             uninstall_system_skills(&manager.codex_home);
         } else if let Err(err) = install_system_skills(&manager.codex_home) {

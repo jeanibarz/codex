@@ -15,7 +15,7 @@ fn serializes_memory_rollout_with_agents_removed_but_environment_kept() {
         role: "user".to_string(),
         content: vec![
             ContentItem::InputText {
-                text: "# AGENTS.md instructions for /tmp\n\n<INSTRUCTIONS>\nbody\n</INSTRUCTIONS>"
+                text: "# CLAUDE.md instructions for /tmp\n\n<INSTRUCTIONS>\nbody\n</INSTRUCTIONS>"
                     .to_string(),
             },
             ContentItem::InputText {

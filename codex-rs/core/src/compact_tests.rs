@@ -86,7 +86,7 @@ fn collect_user_messages_filters_session_prefix_entries() {
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
-                text: r#"# AGENTS.md instructions for project
+                text: r#"# CLAUDE.md instructions for project
 
 <INSTRUCTIONS>
 do things
@@ -268,7 +268,7 @@ async fn process_compacted_history_drops_non_user_content_messages() {
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
-                text: r#"# AGENTS.md instructions for /repo
+                text: r#"# CLAUDE.md instructions for /repo
 
 <INSTRUCTIONS>
 keep me updated

@@ -1868,6 +1868,7 @@ dependencies = [
  "codex-secrets",
  "codex-shell-command",
  "codex-shell-escalation",
+ "codex-skills",
  "codex-state",
  "codex-terminal-detection",
  "codex-tools",
