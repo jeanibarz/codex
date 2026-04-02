@@ -84,6 +84,7 @@ use codex_protocol::config_types::Settings;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::dynamic_tools::DynamicToolResponse;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
+use codex_protocol::items::AgentMessageItem;
 use codex_protocol::items::PlanItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
@@ -2949,7 +2950,11 @@ impl Session {
             model: turn_context.model_info.slug.clone(),
             permission_mode: crate::hook_runtime::hook_permission_mode(turn_context),
             tool_name: "Bash".to_string(),
-            tool_input: command.join(" "),
+            tool_input: serde_json::from_value(serde_json::json!({
+                "command": command.join(" "),
+            }))
+            .expect("permission request tool input should serialize"),
+            permission_suggestions: Vec::new(),
         };
         let _perm_outcome = self.hooks().run_permission_request(perm_request).await;
 
@@ -7412,32 +7417,41 @@ async fn try_run_sampling_request(
                 });
             }
             ResponseEvent::OutputTextDelta(delta) => {
-                // In review child threads, suppress assistant text deltas; the
-                // UI will show a selection popup from the final ReviewOutput.
-                if let Some(active) = active_item.as_ref() {
-                    let item_id = active.id();
-                    if matches!(active, TurnItem::AgentMessage(_)) {
-                        let parsed = assistant_message_stream_parsers.parse_delta(&item_id, &delta);
-                        emit_streamed_assistant_text_delta(
-                            &sess,
-                            &turn_context,
-                            plan_mode_state.as_mut(),
-                            &item_id,
-                            parsed,
-                        )
-                        .await;
-                    } else {
-                        let event = AgentMessageContentDeltaEvent {
-                            thread_id: sess.conversation_id.to_string(),
-                            turn_id: turn_context.sub_id.clone(),
-                            item_id,
-                            delta,
-                        };
-                        sess.send_event(&turn_context, EventMsg::AgentMessageContentDelta(event))
-                            .await;
+                // Lazily initialize active_item if missing. This can happen
+                // when the API sends OutputTextDelta before OutputItemAdded
+                // (observed with certain models like gpt-5.4), or when the
+                // OutputItemAdded event fails to deserialize.
+                let active = match active_item.as_ref() {
+                    Some(item) => item,
+                    None => {
+                        warn!(
+                            "OutputTextDelta without active item — creating synthetic AgentMessage"
+                        );
+                        let synthetic = TurnItem::AgentMessage(AgentMessageItem::new(&[]));
+                        sess.emit_turn_item_started(&turn_context, &synthetic).await;
+                        active_item.insert(synthetic)
                     }
+                };
+                let item_id = active.id();
+                if matches!(active, TurnItem::AgentMessage(_)) {
+                    let parsed = assistant_message_stream_parsers.parse_delta(&item_id, &delta);
+                    emit_streamed_assistant_text_delta(
+                        &sess,
+                        &turn_context,
+                        plan_mode_state.as_mut(),
+                        &item_id,
+                        parsed,
+                    )
+                    .await;
                 } else {
-                    error_or_panic("OutputTextDelta without active item".to_string());
+                    let event = AgentMessageContentDeltaEvent {
+                        thread_id: sess.conversation_id.to_string(),
+                        turn_id: turn_context.sub_id.clone(),
+                        item_id,
+                        delta,
+                    };
+                    sess.send_event(&turn_context, EventMsg::AgentMessageContentDelta(event))
+                        .await;
                 }
             }
             ResponseEvent::ReasoningSummaryDelta {

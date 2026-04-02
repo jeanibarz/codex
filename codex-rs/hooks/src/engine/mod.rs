@@ -10,14 +10,14 @@ use std::path::PathBuf;
 use codex_config::ConfigLayerStack;
 use codex_protocol::protocol::HookRunSummary;
 
+use crate::events::permission_request::PermissionRequestOutcome;
+use crate::events::permission_request::PermissionRequestRequest;
 use crate::events::post_tool_use::PostToolUseOutcome;
 use crate::events::post_tool_use::PostToolUseRequest;
 use crate::events::pre_tool_use::PreToolUseOutcome;
 use crate::events::pre_tool_use::PreToolUseRequest;
 use crate::events::session_start::SessionStartOutcome;
 use crate::events::session_start::SessionStartRequest;
-use crate::events::permission_request::PermissionRequestOutcome;
-use crate::events::permission_request::PermissionRequestRequest;
 use crate::events::stop::StopOutcome;
 use crate::events::stop::StopRequest;
 use crate::events::user_prompt_submit::UserPromptSubmitOutcome;
@@ -126,6 +126,13 @@ impl ClaudeHooksEngine {
         crate::events::post_tool_use::preview(&self.handlers, request)
     }
 
+    pub(crate) fn preview_permission_request(
+        &self,
+        request: &PermissionRequestRequest,
+    ) -> Vec<HookRunSummary> {
+        crate::events::permission_request::preview(&self.handlers, request)
+    }
+
     pub(crate) async fn run_session_start(
         &self,
         request: SessionStartRequest,
@@ -165,13 +172,6 @@ impl ClaudeHooksEngine {
 
     pub(crate) async fn run_stop(&self, request: StopRequest) -> StopOutcome {
         crate::events::stop::run(&self.handlers, &self.shell, request).await
-    }
-
-    pub(crate) fn preview_permission_request(
-        &self,
-        request: &PermissionRequestRequest,
-    ) -> Vec<HookRunSummary> {
-        crate::events::permission_request::preview(&self.handlers, request)
     }
 
     pub(crate) async fn run_permission_request(

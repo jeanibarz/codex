@@ -1,10 +1,10 @@
-use schemars::JsonSchema;
 use schemars::r#gen::SchemaGenerator;
 use schemars::r#gen::SchemaSettings;
 use schemars::schema::InstanceType;
 use schemars::schema::RootSchema;
 use schemars::schema::Schema;
 use schemars::schema::SchemaObject;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Map;
@@ -15,6 +15,8 @@ use std::path::PathBuf;
 const GENERATED_DIR: &str = "generated";
 const POST_TOOL_USE_INPUT_FIXTURE: &str = "post-tool-use.command.input.schema.json";
 const POST_TOOL_USE_OUTPUT_FIXTURE: &str = "post-tool-use.command.output.schema.json";
+const PERMISSION_REQUEST_INPUT_FIXTURE: &str = "permission-request.command.input.schema.json";
+const PERMISSION_REQUEST_OUTPUT_FIXTURE: &str = "permission-request.command.output.schema.json";
 const PRE_TOOL_USE_INPUT_FIXTURE: &str = "pre-tool-use.command.input.schema.json";
 const PRE_TOOL_USE_OUTPUT_FIXTURE: &str = "pre-tool-use.command.output.schema.json";
 const SESSION_START_INPUT_FIXTURE: &str = "session-start.command.input.schema.json";
@@ -23,7 +25,6 @@ const USER_PROMPT_SUBMIT_INPUT_FIXTURE: &str = "user-prompt-submit.command.input
 const USER_PROMPT_SUBMIT_OUTPUT_FIXTURE: &str = "user-prompt-submit.command.output.schema.json";
 const STOP_INPUT_FIXTURE: &str = "stop.command.input.schema.json";
 const STOP_OUTPUT_FIXTURE: &str = "stop.command.output.schema.json";
-const PERMISSION_REQUEST_INPUT_FIXTURE: &str = "permission-request.command.input.schema.json";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(transparent)]
@@ -235,6 +236,26 @@ pub(crate) struct SessionStartHookSpecificOutputWire {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[serde(deny_unknown_fields)]
+#[schemars(rename = "permission-request.command.output")]
+pub(crate) struct PermissionRequestCommandOutputWire {
+    #[serde(flatten)]
+    pub universal: HookUniversalOutputWire,
+    #[serde(default)]
+    pub hook_specific_output: Option<PermissionRequestHookSpecificOutputWire>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PermissionRequestHookSpecificOutputWire {
+    pub hook_event_name: HookEventNameWire,
+    #[serde(default)]
+    pub additional_context: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 #[schemars(rename = "user-prompt-submit.command.output")]
 pub(crate) struct UserPromptSubmitCommandOutputWire {
     #[serde(flatten)]
@@ -364,13 +385,8 @@ pub(crate) struct PermissionRequestCommandInput {
     #[schemars(schema_with = "permission_mode_schema")]
     pub permission_mode: String,
     pub tool_name: String,
-    pub tool_input: PermissionRequestToolInput,
-}
-
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct PermissionRequestToolInput {
-    pub command: String,
+    pub tool_input: Map<String, Value>,
+    pub permission_suggestions: Vec<Map<String, Value>>,
 }
 
 pub fn write_schema_fixtures(schema_root: &Path) -> anyhow::Result<()> {
@@ -384,6 +400,14 @@ pub fn write_schema_fixtures(schema_root: &Path) -> anyhow::Result<()> {
     write_schema(
         &generated_dir.join(POST_TOOL_USE_OUTPUT_FIXTURE),
         schema_json::<PostToolUseCommandOutputWire>()?,
+    )?;
+    write_schema(
+        &generated_dir.join(PERMISSION_REQUEST_INPUT_FIXTURE),
+        schema_json::<PermissionRequestCommandInput>()?,
+    )?;
+    write_schema(
+        &generated_dir.join(PERMISSION_REQUEST_OUTPUT_FIXTURE),
+        schema_json::<PermissionRequestCommandOutputWire>()?,
     )?;
     write_schema(
         &generated_dir.join(PRE_TOOL_USE_INPUT_FIXTURE),
@@ -416,10 +440,6 @@ pub fn write_schema_fixtures(schema_root: &Path) -> anyhow::Result<()> {
     write_schema(
         &generated_dir.join(STOP_OUTPUT_FIXTURE),
         schema_json::<StopCommandOutputWire>()?,
-    )?;
-    write_schema(
-        &generated_dir.join(PERMISSION_REQUEST_INPUT_FIXTURE),
-        schema_json::<PermissionRequestCommandInput>()?,
     )?;
 
     Ok(())
@@ -551,24 +571,25 @@ fn default_continue() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::schema_json;
+    use super::write_schema_fixtures;
+    use super::PermissionRequestCommandInput;
+    use super::PostToolUseCommandInput;
+    use super::PreToolUseCommandInput;
+    use super::StopCommandInput;
+    use super::UserPromptSubmitCommandInput;
     use super::PERMISSION_REQUEST_INPUT_FIXTURE;
+    use super::PERMISSION_REQUEST_OUTPUT_FIXTURE;
     use super::POST_TOOL_USE_INPUT_FIXTURE;
     use super::POST_TOOL_USE_OUTPUT_FIXTURE;
     use super::PRE_TOOL_USE_INPUT_FIXTURE;
     use super::PRE_TOOL_USE_OUTPUT_FIXTURE;
-    use super::PermissionRequestCommandInput;
-    use super::PostToolUseCommandInput;
-    use super::PreToolUseCommandInput;
     use super::SESSION_START_INPUT_FIXTURE;
     use super::SESSION_START_OUTPUT_FIXTURE;
     use super::STOP_INPUT_FIXTURE;
     use super::STOP_OUTPUT_FIXTURE;
-    use super::StopCommandInput;
     use super::USER_PROMPT_SUBMIT_INPUT_FIXTURE;
     use super::USER_PROMPT_SUBMIT_OUTPUT_FIXTURE;
-    use super::UserPromptSubmitCommandInput;
-    use super::schema_json;
-    use super::write_schema_fixtures;
     use pretty_assertions::assert_eq;
     use serde_json::Value;
     use tempfile::TempDir;
@@ -580,6 +601,12 @@ mod tests {
             }
             POST_TOOL_USE_OUTPUT_FIXTURE => {
                 include_str!("../schema/generated/post-tool-use.command.output.schema.json")
+            }
+            PERMISSION_REQUEST_INPUT_FIXTURE => {
+                include_str!("../schema/generated/permission-request.command.input.schema.json")
+            }
+            PERMISSION_REQUEST_OUTPUT_FIXTURE => {
+                include_str!("../schema/generated/permission-request.command.output.schema.json")
             }
             PRE_TOOL_USE_INPUT_FIXTURE => {
                 include_str!("../schema/generated/pre-tool-use.command.input.schema.json")
@@ -605,11 +632,6 @@ mod tests {
             STOP_OUTPUT_FIXTURE => {
                 include_str!("../schema/generated/stop.command.output.schema.json")
             }
-            PERMISSION_REQUEST_INPUT_FIXTURE => {
-                include_str!(
-                    "../schema/generated/permission-request.command.input.schema.json"
-                )
-            }
             _ => panic!("unexpected fixture name: {name}"),
         }
     }
@@ -627,6 +649,8 @@ mod tests {
         for fixture in [
             POST_TOOL_USE_INPUT_FIXTURE,
             POST_TOOL_USE_OUTPUT_FIXTURE,
+            PERMISSION_REQUEST_INPUT_FIXTURE,
+            PERMISSION_REQUEST_OUTPUT_FIXTURE,
             PRE_TOOL_USE_INPUT_FIXTURE,
             PRE_TOOL_USE_OUTPUT_FIXTURE,
             SESSION_START_INPUT_FIXTURE,
@@ -635,7 +659,6 @@ mod tests {
             USER_PROMPT_SUBMIT_OUTPUT_FIXTURE,
             STOP_INPUT_FIXTURE,
             STOP_OUTPUT_FIXTURE,
-            PERMISSION_REQUEST_INPUT_FIXTURE,
         ] {
             let expected = normalize_newlines(expected_fixture(fixture));
             let actual = std::fs::read_to_string(schema_root.join("generated").join(fixture))
@@ -681,12 +704,36 @@ mod tests {
             &permission_request,
         ] {
             assert_eq!(schema["properties"]["turn_id"]["type"], "string");
-            assert!(
-                schema["required"]
-                    .as_array()
-                    .expect("schema required fields")
-                    .contains(&Value::String("turn_id".to_string()))
-            );
+            assert!(schema["required"]
+                .as_array()
+                .expect("schema required fields")
+                .contains(&Value::String("turn_id".to_string())));
         }
+    }
+
+    #[test]
+    fn permission_request_schema_matches_claude_style_payload_shape() {
+        let permission_request: Value = serde_json::from_slice(
+            &schema_json::<PermissionRequestCommandInput>()
+                .expect("serialize permission request input schema"),
+        )
+        .expect("parse permission request input schema");
+
+        assert_eq!(
+            permission_request["properties"]["hook_event_name"]["const"],
+            "PermissionRequest"
+        );
+        assert_eq!(
+            permission_request["properties"]["permission_suggestions"]["type"],
+            "array"
+        );
+        assert_eq!(
+            permission_request["properties"]["tool_name"]["type"],
+            "string"
+        );
+        assert_eq!(
+            permission_request["properties"]["tool_input"]["type"],
+            "object"
+        );
     }
 }
