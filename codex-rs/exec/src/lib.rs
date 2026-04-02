@@ -51,8 +51,6 @@ use codex_arg0::Arg0DispatchPaths;
 use codex_cloud_requirements::cloud_requirements_loader_for_storage;
 use codex_core::LMSTUDIO_OSS_PROVIDER_ID;
 use codex_core::OLLAMA_OSS_PROVIDER_ID;
-use codex_core::auth::AuthConfig;
-use codex_core::auth::enforce_login_restrictions;
 use codex_core::check_execpolicy_for_warnings;
 use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
@@ -67,6 +65,10 @@ use codex_core::format_exec_policy_error_with_source;
 use codex_core::path_utils;
 use codex_feedback::CodexFeedback;
 use codex_git_utils::get_git_repo_root;
+use codex_login::AuthConfig;
+use codex_login::default_client::set_default_client_residency_requirement;
+use codex_login::default_client::set_default_originator;
+use codex_login::enforce_login_restrictions;
 use codex_otel::set_parent_from_context;
 use codex_otel::traceparent_context_from_env;
 use codex_protocol::config_types::SandboxMode;
@@ -105,8 +107,6 @@ use uuid::Uuid;
 use crate::cli::Command as ExecCommand;
 use crate::event_processor::CodexStatus;
 use crate::event_processor::EventProcessor;
-use codex_core::default_client::set_default_client_residency_requirement;
-use codex_core::default_client::set_default_originator;
 
 const DEFAULT_ANALYTICS_ENABLED: bool = true;
 
@@ -118,6 +118,18 @@ enum InitialOperation {
     Review {
         review_request: ReviewRequest,
     },
+}
+
+enum StdinPromptBehavior {
+    /// Read stdin only when there is no positional prompt, which is the legacy
+    /// `codex exec` behavior for `codex exec` with piped input.
+    RequiredIfPiped,
+    /// Always treat stdin as the prompt, used for the explicit `codex exec -`
+    /// sentinel and similar forced-stdin call sites.
+    Forced,
+    /// If stdin is piped alongside a positional prompt, treat stdin as
+    /// additional context to append rather than as the primary prompt.
+    OptionalAppend,
 }
 
 struct RequestIdSequencer {
@@ -429,7 +441,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         config_warnings,
         session_source: SessionSource::Exec,
         enable_codex_api_key_env: true,
-        client_name: "codex-exec".to_string(),
+        client_name: "codex_exec".to_string(),
         client_version: env!("CARGO_PKG_VERSION").to_string(),
         experimental_api: true,
         opt_out_notification_methods: Vec::new(),
@@ -616,7 +628,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
             )
         }
         (None, root_prompt, imgs) => {
-            let prompt_text = resolve_prompt(root_prompt);
+            let prompt_text = resolve_root_prompt(root_prompt);
             let mut items: Vec<UserInput> = imgs
                 .into_iter()
                 .map(|path| UserInput::LocalImage { path })
@@ -1529,43 +1541,89 @@ fn decode_utf16(
     String::from_utf16(&units).map_err(|_| PromptDecodeError::InvalidUtf16 { encoding })
 }
 
+fn read_prompt_from_stdin(behavior: StdinPromptBehavior) -> Option<String> {
+    let stdin_is_terminal = std::io::stdin().is_terminal();
+
+    match behavior {
+        StdinPromptBehavior::RequiredIfPiped if stdin_is_terminal => {
+            eprintln!(
+                "No prompt provided. Either specify one as an argument or pipe the prompt into stdin."
+            );
+            std::process::exit(1);
+        }
+        StdinPromptBehavior::RequiredIfPiped => {
+            eprintln!("Reading prompt from stdin...");
+        }
+        StdinPromptBehavior::Forced => {}
+        StdinPromptBehavior::OptionalAppend if stdin_is_terminal => return None,
+        StdinPromptBehavior::OptionalAppend => {
+            eprintln!("Reading additional input from stdin...");
+        }
+    }
+
+    let mut bytes = Vec::new();
+    if let Err(e) = std::io::stdin().read_to_end(&mut bytes) {
+        eprintln!("Failed to read prompt from stdin: {e}");
+        std::process::exit(1);
+    }
+
+    let buffer = match decode_prompt_bytes(&bytes) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to read prompt from stdin: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    if buffer.trim().is_empty() {
+        match behavior {
+            StdinPromptBehavior::OptionalAppend => None,
+            StdinPromptBehavior::RequiredIfPiped | StdinPromptBehavior::Forced => {
+                eprintln!("No prompt provided via stdin.");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        Some(buffer)
+    }
+}
+
+fn prompt_with_stdin_context(prompt: &str, stdin_text: &str) -> String {
+    let mut combined = format!("{prompt}\n\n<stdin>\n{stdin_text}");
+    if !stdin_text.ends_with('\n') {
+        combined.push('\n');
+    }
+    combined.push_str("</stdin>");
+    combined
+}
+
 fn resolve_prompt(prompt_arg: Option<String>) -> String {
     match prompt_arg {
         Some(p) if p != "-" => p,
         maybe_dash => {
-            let force_stdin = matches!(maybe_dash.as_deref(), Some("-"));
-
-            if std::io::stdin().is_terminal() && !force_stdin {
-                eprintln!(
-                    "No prompt provided. Either specify one as an argument or pipe the prompt into stdin."
-                );
-                std::process::exit(1);
-            }
-
-            if !force_stdin {
-                eprintln!("Reading prompt from stdin...");
-            }
-
-            let mut bytes = Vec::new();
-            if let Err(e) = std::io::stdin().read_to_end(&mut bytes) {
-                eprintln!("Failed to read prompt from stdin: {e}");
-                std::process::exit(1);
-            }
-
-            let buffer = match decode_prompt_bytes(&bytes) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("Failed to read prompt from stdin: {e}");
-                    std::process::exit(1);
-                }
+            let behavior = if matches!(maybe_dash.as_deref(), Some("-")) {
+                StdinPromptBehavior::Forced
+            } else {
+                StdinPromptBehavior::RequiredIfPiped
             };
-
-            if buffer.trim().is_empty() {
-                eprintln!("No prompt provided via stdin.");
-                std::process::exit(1);
-            }
-            buffer
+            let Some(prompt) = read_prompt_from_stdin(behavior) else {
+                unreachable!("required stdin prompt should produce content");
+            };
+            prompt
         }
+    }
+}
+
+fn resolve_root_prompt(prompt_arg: Option<String>) -> String {
+    match prompt_arg {
+        Some(prompt) if prompt != "-" => {
+            if let Some(stdin_text) = read_prompt_from_stdin(StdinPromptBehavior::OptionalAppend) {
+                prompt_with_stdin_context(&prompt, &stdin_text)
+            } else {
+                prompt
+            }
+        }
+        maybe_dash => resolve_prompt(maybe_dash),
     }
 }
 
@@ -1780,9 +1838,29 @@ mod tests {
     }
 
     #[test]
+    fn prompt_with_stdin_context_wraps_stdin_block() {
+        let combined = prompt_with_stdin_context("Summarize this concisely", "my output");
+
+        assert_eq!(
+            combined,
+            "Summarize this concisely\n\n<stdin>\nmy output\n</stdin>"
+        );
+    }
+
+    #[test]
+    fn prompt_with_stdin_context_preserves_trailing_newline() {
+        let combined = prompt_with_stdin_context("Summarize this concisely", "my output\n");
+
+        assert_eq!(
+            combined,
+            "Summarize this concisely\n\n<stdin>\nmy output\n</stdin>"
+        );
+    }
+
+    #[test]
     fn lagged_event_warning_message_is_explicit() {
         assert_eq!(
-            lagged_event_warning_message(7),
+            lagged_event_warning_message(/*skipped*/ 7),
             "in-process app-server event stream lagged; dropped 7 events".to_string()
         );
     }
@@ -1898,10 +1976,14 @@ mod tests {
         let cwd = tempdir().expect("create temp cwd");
         let config = ConfigBuilder::default()
             .codex_home(codex_home.path().to_path_buf())
+            .harness_overrides(ConfigOverrides {
+                approvals_reviewer: Some(ApprovalsReviewer::User),
+                ..Default::default()
+            })
             .fallback_cwd(Some(cwd.path().to_path_buf()))
             .build()
             .await
-            .expect("build default config");
+            .expect("build config with manual-only review policy");
 
         let params = thread_start_params_from_config(&config);
 
@@ -1915,17 +1997,16 @@ mod tests {
     async fn thread_start_params_include_review_policy_when_auto_review_is_enabled() {
         let codex_home = tempdir().expect("create temp codex home");
         let cwd = tempdir().expect("create temp cwd");
-        std::fs::write(
-            codex_home.path().join("config.toml"),
-            "approvals_reviewer = \"guardian_subagent\"\n",
-        )
-        .expect("write auto-review config");
         let config = ConfigBuilder::default()
             .codex_home(codex_home.path().to_path_buf())
+            .harness_overrides(ConfigOverrides {
+                approvals_reviewer: Some(ApprovalsReviewer::GuardianSubagent),
+                ..Default::default()
+            })
             .fallback_cwd(Some(cwd.path().to_path_buf()))
             .build()
             .await
-            .expect("build auto-review config");
+            .expect("build config with guardian review policy");
 
         let params = thread_start_params_from_config(&config);
 

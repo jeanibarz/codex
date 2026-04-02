@@ -1,22 +1,23 @@
 use crate::config::edit::ConfigEdit;
 use crate::config::edit::ConfigEditsBuilder;
 use crate::config::edit::apply_blocking;
-use crate::config::types::AppToolApproval;
-use crate::config::types::ApprovalsReviewer;
-use crate::config::types::BundledSkillsConfig;
-use crate::config::types::FeedbackConfigToml;
-use crate::config::types::HistoryPersistence;
-use crate::config::types::McpServerToolConfig;
-use crate::config::types::McpServerTransportConfig;
-use crate::config::types::MemoriesConfig;
-use crate::config::types::MemoriesToml;
-use crate::config::types::ModelAvailabilityNuxConfig;
-use crate::config::types::NotificationMethod;
-use crate::config::types::Notifications;
-use crate::config::types::ToolSuggestDiscoverableType;
 use crate::config_loader::RequirementSource;
+use crate::plugins::PluginsManager;
 use assert_matches::assert_matches;
 use codex_config::CONFIG_TOML_FILE;
+use codex_config::types::AppToolApproval;
+use codex_config::types::ApprovalsReviewer;
+use codex_config::types::BundledSkillsConfig;
+use codex_config::types::FeedbackConfigToml;
+use codex_config::types::HistoryPersistence;
+use codex_config::types::McpServerToolConfig;
+use codex_config::types::McpServerTransportConfig;
+use codex_config::types::MemoriesConfig;
+use codex_config::types::MemoriesToml;
+use codex_config::types::ModelAvailabilityNuxConfig;
+use codex_config::types::NotificationMethod;
+use codex_config::types::Notifications;
+use codex_config::types::ToolSuggestDiscoverableType;
 use codex_features::Feature;
 use codex_features::FeaturesToml;
 use codex_protocol::permissions::FileSystemAccessMode;
@@ -244,6 +245,26 @@ web_search = false
 }
 
 #[test]
+fn rejects_provider_auth_with_env_key() {
+    let err = toml::from_str::<ConfigToml>(
+        r#"
+[model_providers.corp]
+name = "Corp"
+env_key = "CORP_TOKEN"
+
+[model_providers.corp.auth]
+command = "print-token"
+"#,
+    )
+    .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("model_providers.corp: provider auth cannot be combined with env_key")
+    );
+}
+
+#[test]
 fn config_toml_deserializes_model_availability_nux() {
     let toml = r#"
 [tui.model_availability_nux]
@@ -306,7 +327,9 @@ enabled = true
 proxy_url = "http://127.0.0.1:43128"
 enable_socks5 = false
 allow_upstream_proxy = false
-allowed_domains = ["openai.com"]
+
+[permissions.workspace.network.domains]
+"openai.com" = "allow"
 "#;
     let cfg: ConfigToml =
         toml::from_str(toml).expect("TOML deserialization should succeed for permissions profiles");
@@ -343,9 +366,13 @@ allowed_domains = ["openai.com"]
                         dangerously_allow_non_loopback_proxy: None,
                         dangerously_allow_all_unix_sockets: None,
                         mode: None,
-                        allowed_domains: Some(vec!["openai.com".to_string()]),
-                        denied_domains: None,
-                        allow_unix_sockets: None,
+                        domains: Some(NetworkDomainPermissionsToml {
+                            entries: BTreeMap::from([(
+                                "openai.com".to_string(),
+                                NetworkDomainPermissionToml::Allow,
+                            )]),
+                        }),
+                        unix_sockets: None,
                         allow_local_binding: None,
                     }),
                 },
@@ -421,7 +448,12 @@ fn permissions_profiles_network_disabled_by_default_does_not_start_proxy() -> st
                             )]),
                         }),
                         network: Some(NetworkToml {
-                            allowed_domains: Some(vec!["openai.com".to_string()]),
+                            domains: Some(NetworkDomainPermissionsToml {
+                                entries: BTreeMap::from([(
+                                    "openai.com".to_string(),
+                                    NetworkDomainPermissionToml::Allow,
+                                )]),
+                            }),
                             ..Default::default()
                         }),
                     },
@@ -496,7 +528,7 @@ fn default_permissions_profile_populates_runtime_sandbox_policy() -> std::io::Re
             },
             FileSystemSandboxEntry {
                 path: FileSystemPath::Special {
-                    value: FileSystemSpecialPath::project_roots(None),
+                    value: FileSystemSpecialPath::project_roots(/*subpath*/ None),
                 },
                 access: FileSystemAccessMode::Write,
             },
@@ -698,7 +730,10 @@ fn permissions_profiles_allow_unknown_special_paths() -> std::io::Result<()> {
         config.permissions.file_system_sandbox_policy,
         FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry {
             path: FileSystemPath::Special {
-                value: FileSystemSpecialPath::unknown(":future_special_path", None),
+                value: FileSystemSpecialPath::unknown(
+                    ":future_special_path",
+                    /*subpath*/ None
+                ),
             },
             access: FileSystemAccessMode::Read,
         }]),
@@ -965,10 +1000,10 @@ network_access = false  # This should be ignored.
     let sandbox_mode_override = None;
     let resolution = sandbox_full_access_cfg.derive_sandbox_policy(
         sandbox_mode_override,
-        None,
+        /*profile_sandbox_mode*/ None,
         WindowsSandboxLevel::Disabled,
         &PathBuf::from("/tmp/test"),
-        None,
+        /*sandbox_policy_constraint*/ None,
     );
     assert_eq!(resolution, SandboxPolicy::DangerFullAccess);
 
@@ -984,10 +1019,10 @@ network_access = true  # This should be ignored.
     let sandbox_mode_override = None;
     let resolution = sandbox_read_only_cfg.derive_sandbox_policy(
         sandbox_mode_override,
-        None,
+        /*profile_sandbox_mode*/ None,
         WindowsSandboxLevel::Disabled,
         &PathBuf::from("/tmp/test"),
-        None,
+        /*sandbox_policy_constraint*/ None,
     );
     assert_eq!(resolution, SandboxPolicy::new_read_only_policy());
 
@@ -1011,10 +1046,10 @@ exclude_slash_tmp = true
     let sandbox_mode_override = None;
     let resolution = sandbox_workspace_write_cfg.derive_sandbox_policy(
         sandbox_mode_override,
-        None,
+        /*profile_sandbox_mode*/ None,
         WindowsSandboxLevel::Disabled,
         &PathBuf::from("/tmp/test"),
-        None,
+        /*sandbox_policy_constraint*/ None,
     );
     if cfg!(target_os = "windows") {
         assert_eq!(resolution, SandboxPolicy::new_read_only_policy());
@@ -1053,10 +1088,10 @@ trust_level = "trusted"
     let sandbox_mode_override = None;
     let resolution = sandbox_workspace_write_cfg.derive_sandbox_policy(
         sandbox_mode_override,
-        None,
+        /*profile_sandbox_mode*/ None,
         WindowsSandboxLevel::Disabled,
         &PathBuf::from("/tmp/test"),
-        None,
+        /*sandbox_policy_constraint*/ None,
     );
     if cfg!(target_os = "windows") {
         assert_eq!(resolution, SandboxPolicy::new_read_only_policy());
@@ -1234,7 +1269,7 @@ fn filter_mcp_servers_by_allowlist_allows_all_when_unset() {
         ("server-b".to_string(), http_mcp("https://example.com/b")),
     ]);
 
-    filter_mcp_servers_by_requirements(&mut servers, None);
+    filter_mcp_servers_by_requirements(&mut servers, /*mcp_requirements*/ None);
 
     assert_eq!(
         servers
@@ -1863,7 +1898,7 @@ async fn replace_mcp_servers_round_trips_entries() -> anyhow::Result<()> {
 
     apply_blocking(
         codex_home.path(),
-        None,
+        /*profile*/ None,
         &[ConfigEdit::ReplaceMcpServers(servers.clone())],
     )?;
 
@@ -1893,7 +1928,7 @@ async fn replace_mcp_servers_round_trips_entries() -> anyhow::Result<()> {
     let empty = BTreeMap::new();
     apply_blocking(
         codex_home.path(),
-        None,
+        /*profile*/ None,
         &[ConfigEdit::ReplaceMcpServers(empty.clone())],
     )?;
     let loaded = load_global_mcp_servers(codex_home.path()).await?;
@@ -2033,6 +2068,30 @@ approval_mode = "approve"
     );
 }
 
+#[test]
+fn to_mcp_config_preserves_apps_feature_from_config() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let mut config = Config::load_from_base_config_with_overrides(
+        ConfigToml::default(),
+        ConfigOverrides::default(),
+        codex_home.path().to_path_buf(),
+    )?;
+    let plugins_manager = PluginsManager::new(codex_home.path().to_path_buf());
+
+    let mcp_config = config.to_mcp_config(&plugins_manager);
+    assert!(mcp_config.apps_enabled);
+
+    let _ = config.features.disable(Feature::Apps);
+    let mcp_config = config.to_mcp_config(&plugins_manager);
+    assert!(!mcp_config.apps_enabled);
+
+    let _ = config.features.enable(Feature::Apps);
+    let mcp_config = config.to_mcp_config(&plugins_manager);
+    assert!(mcp_config.apps_enabled);
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn load_global_mcp_servers_rejects_inline_bearer_token() -> anyhow::Result<()> {
     let codex_home = TempDir::new()?;
@@ -2090,7 +2149,7 @@ async fn replace_mcp_servers_serializes_env_sorted() -> anyhow::Result<()> {
 
     apply_blocking(
         codex_home.path(),
-        None,
+        /*profile*/ None,
         &[ConfigEdit::ReplaceMcpServers(servers.clone())],
     )?;
 
@@ -2163,7 +2222,7 @@ async fn replace_mcp_servers_serializes_env_vars() -> anyhow::Result<()> {
 
     apply_blocking(
         codex_home.path(),
-        None,
+        /*profile*/ None,
         &[ConfigEdit::ReplaceMcpServers(servers.clone())],
     )?;
 
@@ -2216,7 +2275,7 @@ async fn replace_mcp_servers_serializes_cwd() -> anyhow::Result<()> {
 
     apply_blocking(
         codex_home.path(),
-        None,
+        /*profile*/ None,
         &[ConfigEdit::ReplaceMcpServers(servers.clone())],
     )?;
 
@@ -2267,7 +2326,7 @@ async fn replace_mcp_servers_streamable_http_serializes_bearer_token() -> anyhow
 
     apply_blocking(
         codex_home.path(),
-        None,
+        /*profile*/ None,
         &[ConfigEdit::ReplaceMcpServers(servers.clone())],
     )?;
 
@@ -2333,7 +2392,7 @@ async fn replace_mcp_servers_streamable_http_serializes_custom_headers() -> anyh
     )]);
     apply_blocking(
         codex_home.path(),
-        None,
+        /*profile*/ None,
         &[ConfigEdit::ReplaceMcpServers(servers.clone())],
     )?;
 
@@ -2413,7 +2472,7 @@ async fn replace_mcp_servers_streamable_http_removes_optional_sections() -> anyh
 
     apply_blocking(
         codex_home.path(),
-        None,
+        /*profile*/ None,
         &[ConfigEdit::ReplaceMcpServers(servers.clone())],
     )?;
     let serialized_with_optional = std::fs::read_to_string(&config_path)?;
@@ -2444,7 +2503,7 @@ async fn replace_mcp_servers_streamable_http_removes_optional_sections() -> anyh
     );
     apply_blocking(
         codex_home.path(),
-        None,
+        /*profile*/ None,
         &[ConfigEdit::ReplaceMcpServers(servers.clone())],
     )?;
 
@@ -2535,7 +2594,7 @@ async fn replace_mcp_servers_streamable_http_isolates_headers_between_servers() 
 
     apply_blocking(
         codex_home.path(),
-        None,
+        /*profile*/ None,
         &[ConfigEdit::ReplaceMcpServers(servers.clone())],
     )?;
 
@@ -2619,7 +2678,7 @@ async fn replace_mcp_servers_serializes_disabled_flag() -> anyhow::Result<()> {
 
     apply_blocking(
         codex_home.path(),
-        None,
+        /*profile*/ None,
         &[ConfigEdit::ReplaceMcpServers(servers.clone())],
     )?;
 
@@ -2666,7 +2725,7 @@ async fn replace_mcp_servers_serializes_required_flag() -> anyhow::Result<()> {
 
     apply_blocking(
         codex_home.path(),
-        None,
+        /*profile*/ None,
         &[ConfigEdit::ReplaceMcpServers(servers.clone())],
     )?;
 
@@ -2713,7 +2772,7 @@ async fn replace_mcp_servers_serializes_tool_filters() -> anyhow::Result<()> {
 
     apply_blocking(
         codex_home.path(),
-        None,
+        /*profile*/ None,
         &[ConfigEdit::ReplaceMcpServers(servers.clone())],
     )?;
 
@@ -2764,7 +2823,7 @@ async fn replace_mcp_servers_streamable_http_serializes_oauth_resource() -> anyh
 
     apply_blocking(
         codex_home.path(),
-        None,
+        /*profile*/ None,
         &[ConfigEdit::ReplaceMcpServers(servers.clone())],
     )?;
 
@@ -2918,7 +2977,7 @@ async fn set_feature_enabled_updates_profile() -> anyhow::Result<()> {
 
     ConfigEditsBuilder::new(codex_home.path())
         .with_profile(Some("dev"))
-        .set_feature_enabled("guardian_approval", true)
+        .set_feature_enabled("guardian_approval", /*enabled*/ true)
         .apply()
         .await?;
 
@@ -2954,13 +3013,13 @@ async fn set_feature_enabled_persists_default_false_feature_disable_in_profile()
 
     ConfigEditsBuilder::new(codex_home.path())
         .with_profile(Some("dev"))
-        .set_feature_enabled("guardian_approval", true)
+        .set_feature_enabled("guardian_approval", /*enabled*/ true)
         .apply()
         .await?;
 
     ConfigEditsBuilder::new(codex_home.path())
         .with_profile(Some("dev"))
-        .set_feature_enabled("guardian_approval", false)
+        .set_feature_enabled("guardian_approval", /*enabled*/ false)
         .apply()
         .await?;
 
@@ -2994,13 +3053,13 @@ async fn set_feature_enabled_profile_disable_overrides_root_enable() -> anyhow::
     let codex_home = TempDir::new()?;
 
     ConfigEditsBuilder::new(codex_home.path())
-        .set_feature_enabled("guardian_approval", true)
+        .set_feature_enabled("guardian_approval", /*enabled*/ true)
         .apply()
         .await?;
 
     ConfigEditsBuilder::new(codex_home.path())
         .with_profile(Some("dev"))
-        .set_feature_enabled("guardian_approval", false)
+        .set_feature_enabled("guardian_approval", /*enabled*/ false)
         .apply()
         .await?;
 
@@ -4301,6 +4360,7 @@ model_verbosity = "high"
         wire_api: crate::WireApi::Responses,
         env_key_instructions: None,
         experimental_bearer_token: None,
+        auth: None,
         query_params: None,
         http_headers: None,
         env_http_headers: None,
@@ -4312,7 +4372,8 @@ model_verbosity = "high"
         supports_websockets: false,
     };
     let model_provider_map = {
-        let mut model_provider_map = built_in_model_providers(/* openai_base_url */ None);
+        let mut model_provider_map =
+            built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None);
         model_provider_map.insert("openai-custom".to_string(), openai_custom_provider.clone());
         model_provider_map
     };
@@ -4381,7 +4442,7 @@ fn test_precedence_fixture_with_o3_profile() -> std::io::Result<()> {
                 windows_sandbox_private_desktop: true,
             },
             approvals_reviewer: ApprovalsReviewer::User,
-            enforce_residency: Constrained::allow_any(None),
+            enforce_residency: Constrained::allow_any(/*initial_value*/ None),
             user_instructions: None,
             notify: None,
             cwd: fixture.cwd(),
@@ -4523,7 +4584,7 @@ fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
             windows_sandbox_private_desktop: true,
         },
         approvals_reviewer: ApprovalsReviewer::User,
-        enforce_residency: Constrained::allow_any(None),
+        enforce_residency: Constrained::allow_any(/*initial_value*/ None),
         user_instructions: None,
         notify: None,
         cwd: fixture.cwd(),
@@ -4663,7 +4724,7 @@ fn test_precedence_fixture_with_zdr_profile() -> std::io::Result<()> {
             windows_sandbox_private_desktop: true,
         },
         approvals_reviewer: ApprovalsReviewer::User,
-        enforce_residency: Constrained::allow_any(None),
+        enforce_residency: Constrained::allow_any(/*initial_value*/ None),
         user_instructions: None,
         notify: None,
         cwd: fixture.cwd(),
@@ -4789,7 +4850,7 @@ fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
             windows_sandbox_private_desktop: true,
         },
         approvals_reviewer: ApprovalsReviewer::User,
-        enforce_residency: Constrained::allow_any(None),
+        enforce_residency: Constrained::allow_any(/*initial_value*/ None),
         user_instructions: None,
         notify: None,
         cwd: fixture.cwd(),
@@ -5131,11 +5192,11 @@ trust_level = "untrusted"
         .expect("TOML deserialization should succeed");
 
     let resolution = cfg.derive_sandbox_policy(
-        None,
-        None,
+        /*sandbox_mode_override*/ None,
+        /*profile_sandbox_mode*/ None,
         WindowsSandboxLevel::Disabled,
         &PathBuf::from("/tmp/test"),
-        None,
+        /*sandbox_policy_constraint*/ None,
     );
 
     // Verify that untrusted projects get WorkspaceWrite (or ReadOnly on Windows due to downgrade)
@@ -5183,8 +5244,8 @@ fn derive_sandbox_policy_falls_back_to_constraint_value_for_implicit_defaults() 
     })?;
 
     let resolution = cfg.derive_sandbox_policy(
-        None,
-        None,
+        /*sandbox_mode_override*/ None,
+        /*profile_sandbox_mode*/ None,
         WindowsSandboxLevel::Disabled,
         &project_path,
         Some(&constrained),
@@ -5223,8 +5284,8 @@ fn derive_sandbox_policy_preserves_windows_downgrade_for_unsupported_fallback() 
     })?;
 
     let resolution = cfg.derive_sandbox_policy(
-        None,
-        None,
+        /*sandbox_mode_override*/ None,
+        /*profile_sandbox_mode*/ None,
         WindowsSandboxLevel::Disabled,
         &project_path,
         Some(&constrained),
@@ -5241,7 +5302,11 @@ fn derive_sandbox_policy_preserves_windows_downgrade_for_unsupported_fallback() 
 #[test]
 fn test_resolve_oss_provider_explicit_override() {
     let config_toml = ConfigToml::default();
-    let result = resolve_oss_provider(Some("custom-provider"), &config_toml, None);
+    let result = resolve_oss_provider(
+        Some("custom-provider"),
+        &config_toml,
+        /*config_profile*/ None,
+    );
     assert_eq!(result, Some("custom-provider".to_string()));
 }
 
@@ -5258,7 +5323,11 @@ fn test_resolve_oss_provider_from_profile() {
         ..Default::default()
     };
 
-    let result = resolve_oss_provider(None, &config_toml, Some("test-profile".to_string()));
+    let result = resolve_oss_provider(
+        /*explicit_provider*/ None,
+        &config_toml,
+        Some("test-profile".to_string()),
+    );
     assert_eq!(result, Some("profile-provider".to_string()));
 }
 
@@ -5269,7 +5338,11 @@ fn test_resolve_oss_provider_from_global_config() {
         ..Default::default()
     };
 
-    let result = resolve_oss_provider(None, &config_toml, None);
+    let result = resolve_oss_provider(
+        /*explicit_provider*/ None,
+        &config_toml,
+        /*config_profile*/ None,
+    );
     assert_eq!(result, Some("global-provider".to_string()));
 }
 
@@ -5284,14 +5357,22 @@ fn test_resolve_oss_provider_profile_fallback_to_global() {
         ..Default::default()
     };
 
-    let result = resolve_oss_provider(None, &config_toml, Some("test-profile".to_string()));
+    let result = resolve_oss_provider(
+        /*explicit_provider*/ None,
+        &config_toml,
+        Some("test-profile".to_string()),
+    );
     assert_eq!(result, Some("global-provider".to_string()));
 }
 
 #[test]
 fn test_resolve_oss_provider_none_when_not_configured() {
     let config_toml = ConfigToml::default();
-    let result = resolve_oss_provider(None, &config_toml, None);
+    let result = resolve_oss_provider(
+        /*explicit_provider*/ None,
+        &config_toml,
+        /*config_profile*/ None,
+    );
     assert_eq!(result, None);
 }
 

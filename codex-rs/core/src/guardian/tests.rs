@@ -11,9 +11,10 @@ use crate::config::test_config;
 use crate::config_loader::ConfigLayerStack;
 use crate::config_loader::FeatureRequirementsToml;
 use crate::config_loader::NetworkConstraints;
+use crate::config_loader::NetworkDomainPermissionToml;
+use crate::config_loader::NetworkDomainPermissionsToml;
 use crate::config_loader::RequirementSource;
 use crate::config_loader::Sourced;
-use crate::protocol::SandboxPolicy;
 use crate::test_support;
 use codex_network_proxy::NetworkProxyConfig;
 use codex_protocol::approvals::NetworkApprovalProtocol;
@@ -25,6 +26,7 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::GuardianAssessmentStatus;
 use codex_protocol::protocol::GuardianRiskLevel;
 use codex_protocol::protocol::ReviewDecision;
+use codex_protocol::protocol::SandboxPolicy;
 use core_test_support::PathBufExt;
 use core_test_support::TempDirExt;
 use core_test_support::context_snapshot;
@@ -249,7 +251,7 @@ fn collect_guardian_transcript_entries_includes_recent_tool_calls_and_output() {
 fn guardian_truncate_text_keeps_prefix_suffix_and_xml_marker() {
     let content = "prefix ".repeat(200) + &" suffix".repeat(200);
 
-    let truncated = guardian_truncate_text(&content, 20);
+    let truncated = guardian_truncate_text(&content, /*token_cap*/ 20);
 
     assert!(truncated.starts_with("prefix"));
     assert!(truncated.contains("<truncated omitted_approx_tokens=\""));
@@ -263,7 +265,6 @@ fn format_guardian_action_pretty_truncates_large_string_fields() -> serde_json::
         id: "patch-1".to_string(),
         cwd: PathBuf::from("/tmp"),
         files: Vec::new(),
-        change_count: 1usize,
         patch: patch.clone(),
     };
 
@@ -316,7 +317,7 @@ fn guardian_approval_request_to_json_renders_mcp_tool_call_shape() -> serde_json
 }
 
 #[test]
-fn guardian_assessment_action_value_redacts_apply_patch_patch_text() {
+fn guardian_assessment_action_redacts_apply_patch_patch_text() {
     let (cwd, file) = if cfg!(windows) {
         (r"C:\tmp", r"C:\tmp\guardian.txt")
     } else {
@@ -328,19 +329,17 @@ fn guardian_assessment_action_value_redacts_apply_patch_patch_text() {
         id: "patch-1".to_string(),
         cwd: cwd.clone(),
         files: vec![file.clone()],
-        change_count: 1usize,
         patch: "*** Begin Patch\n*** Update File: guardian.txt\n@@\n+secret\n*** End Patch"
             .to_string(),
     };
 
     assert_eq!(
-        guardian_assessment_action_value(&action),
+        serde_json::to_value(guardian_assessment_action(&action)).expect("serialize action"),
         serde_json::json!({
-            "tool": "apply_patch",
+            "type": "apply_patch",
             "cwd": cwd,
             "files": [file],
-            "change_count": 1,
-        })
+        }),
     );
 }
 
@@ -358,7 +357,6 @@ fn guardian_request_turn_id_prefers_network_access_owner_turn() {
         id: "patch-1".to_string(),
         cwd: PathBuf::from("/tmp"),
         files: vec![PathBuf::from("/tmp/guardian.txt").abs()],
-        change_count: 1usize,
         patch: "*** Begin Patch\n*** Update File: guardian.txt\n@@\n+hello\n*** End Patch"
             .to_string(),
     };
@@ -386,11 +384,10 @@ async fn cancelled_guardian_review_emits_terminal_abort_without_warning() {
             id: "patch-1".to_string(),
             cwd: PathBuf::from("/tmp"),
             files: vec![PathBuf::from("/tmp/guardian.txt").abs()],
-            change_count: 1usize,
             patch: "*** Begin Patch\n*** Update File: guardian.txt\n@@\n+hello\n*** End Patch"
                 .to_string(),
         },
-        None,
+        /*retry_reason*/ None,
         cancel_token,
     )
     .await;
@@ -554,7 +551,7 @@ async fn guardian_review_request_layout_matches_model_visible_request_snapshot()
         Arc::clone(&turn),
         prompt,
         guardian_output_schema(),
-        None,
+        /*external_cancel*/ None,
     )
     .await;
     let GuardianReviewOutcome::Completed(Ok(assessment)) = outcome else {
@@ -632,7 +629,7 @@ async fn guardian_reuses_prompt_cache_key_and_appends_prior_reviews() -> anyhow:
         Arc::clone(&turn),
         first_prompt,
         guardian_output_schema(),
-        None,
+        /*external_cancel*/ None,
     )
     .await;
     let second_prompt = build_guardian_prompt_items(
@@ -657,7 +654,7 @@ async fn guardian_reuses_prompt_cache_key_and_appends_prior_reviews() -> anyhow:
         Arc::clone(&turn),
         second_prompt,
         guardian_output_schema(),
-        None,
+        /*external_cancel*/ None,
     )
     .await;
 
@@ -770,7 +767,7 @@ async fn guardian_review_surfaces_responses_api_errors_in_rejection_reason() -> 
             additional_permissions: None,
             justification: Some("Need to push the reviewed docs fix.".to_string()),
         },
-        None,
+        /*retry_reason*/ None,
     )
     .await;
 
@@ -882,7 +879,7 @@ async fn guardian_parallel_reviews_fork_from_last_committed_trunk_history() -> a
         justification: Some("Inspect repo state before proceeding.".to_string()),
     };
     assert_eq!(
-        review_approval_request(&session, &turn, initial_request, None).await,
+        review_approval_request(&session, &turn, initial_request, /*retry_reason*/ None).await,
         ReviewDecision::Approved
     );
 
@@ -971,7 +968,12 @@ fn guardian_review_session_config_preserves_parent_network_proxy() {
         NetworkProxyConfig::default(),
         Some(NetworkConstraints {
             enabled: Some(true),
-            allowed_domains: Some(vec!["github.com".to_string()]),
+            domains: Some(NetworkDomainPermissionsToml {
+                entries: std::collections::BTreeMap::from([(
+                    "github.com".to_string(),
+                    NetworkDomainPermissionToml::Allow,
+                )]),
+            }),
             ..Default::default()
         }),
         parent_config.permissions.sandbox_policy.get(),
@@ -981,7 +983,7 @@ fn guardian_review_session_config_preserves_parent_network_proxy() {
 
     let guardian_config = build_guardian_review_session_config_for_test(
         &parent_config,
-        None,
+        /*live_network_config*/ None,
         "parent-active-model",
         Some(codex_protocol::openai_models::ReasoningEffort::Low),
     )
@@ -1012,9 +1014,13 @@ fn guardian_review_session_config_overrides_parent_developer_instructions() {
     parent_config.developer_instructions =
         Some("parent or managed config should not replace guardian policy".to_string());
 
-    let guardian_config =
-        build_guardian_review_session_config_for_test(&parent_config, None, "active-model", None)
-            .expect("guardian config");
+    let guardian_config = build_guardian_review_session_config_for_test(
+        &parent_config,
+        /*live_network_config*/ None,
+        "active-model",
+        /*reasoning_effort*/ None,
+    )
+    .expect("guardian config");
 
     assert_eq!(
         guardian_config.developer_instructions,
@@ -1027,11 +1033,13 @@ fn guardian_review_session_config_uses_live_network_proxy_state() {
     let mut parent_config = test_config();
     let mut parent_network = NetworkProxyConfig::default();
     parent_network.network.enabled = true;
-    parent_network.network.allowed_domains = vec!["parent.example".to_string()];
+    parent_network
+        .network
+        .set_allowed_domains(vec!["parent.example".to_string()]);
     parent_config.permissions.network = Some(
         NetworkProxySpec::from_config_and_constraints(
             parent_network,
-            None,
+            /*requirements*/ None,
             parent_config.permissions.sandbox_policy.get(),
         )
         .expect("parent network proxy spec"),
@@ -1039,13 +1047,15 @@ fn guardian_review_session_config_uses_live_network_proxy_state() {
 
     let mut live_network = NetworkProxyConfig::default();
     live_network.network.enabled = true;
-    live_network.network.allowed_domains = vec!["github.com".to_string()];
+    live_network
+        .network
+        .set_allowed_domains(vec!["github.com".to_string()]);
 
     let guardian_config = build_guardian_review_session_config_for_test(
         &parent_config,
         Some(live_network.clone()),
         "active-model",
-        None,
+        /*reasoning_effort*/ None,
     )
     .expect("guardian config");
 
@@ -1054,7 +1064,7 @@ fn guardian_review_session_config_uses_live_network_proxy_state() {
         Some(
             NetworkProxySpec::from_config_and_constraints(
                 live_network,
-                None,
+                /*requirements*/ None,
                 &SandboxPolicy::new_read_only_policy(),
             )
             .expect("live network proxy spec")
@@ -1076,9 +1086,13 @@ fn guardian_review_session_config_rejects_pinned_collab_feature() {
     )
     .expect("managed features");
 
-    let err =
-        build_guardian_review_session_config_for_test(&parent_config, None, "active-model", None)
-            .expect_err("guardian config should fail when collab is pinned on");
+    let err = build_guardian_review_session_config_for_test(
+        &parent_config,
+        /*live_network_config*/ None,
+        "active-model",
+        /*reasoning_effort*/ None,
+    )
+    .expect_err("guardian config should fail when collab is pinned on");
 
     assert!(
         err.to_string()
@@ -1091,9 +1105,13 @@ fn guardian_review_session_config_uses_parent_active_model_instead_of_hardcoded_
     let mut parent_config = test_config();
     parent_config.model = Some("configured-model".to_string());
 
-    let guardian_config =
-        build_guardian_review_session_config_for_test(&parent_config, None, "active-model", None)
-            .expect("guardian config");
+    let guardian_config = build_guardian_review_session_config_for_test(
+        &parent_config,
+        /*live_network_config*/ None,
+        "active-model",
+        /*reasoning_effort*/ None,
+    )
+    .expect("guardian config");
 
     assert_eq!(guardian_config.model, Some("active-model".to_string()));
 }
@@ -1124,9 +1142,13 @@ fn guardian_review_session_config_uses_requirements_guardian_override() {
     )
     .expect("load config");
 
-    let guardian_config =
-        build_guardian_review_session_config_for_test(&parent_config, None, "active-model", None)
-            .expect("guardian config");
+    let guardian_config = build_guardian_review_session_config_for_test(
+        &parent_config,
+        /*live_network_config*/ None,
+        "active-model",
+        /*reasoning_effort*/ None,
+    )
+    .expect("guardian config");
 
     assert_eq!(
         guardian_config.developer_instructions,
@@ -1152,9 +1174,13 @@ fn guardian_review_session_config_uses_default_guardian_policy_without_requireme
     )
     .expect("load config");
 
-    let guardian_config =
-        build_guardian_review_session_config_for_test(&parent_config, None, "active-model", None)
-            .expect("guardian config");
+    let guardian_config = build_guardian_review_session_config_for_test(
+        &parent_config,
+        /*live_network_config*/ None,
+        "active-model",
+        /*reasoning_effort*/ None,
+    )
+    .expect("guardian config");
 
     assert_eq!(
         guardian_config.developer_instructions,

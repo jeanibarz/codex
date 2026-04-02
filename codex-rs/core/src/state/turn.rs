@@ -18,10 +18,10 @@ use rmcp::model::RequestId;
 use tokio::sync::oneshot;
 
 use crate::codex::TurnContext;
-use crate::protocol::ReviewDecision;
-use crate::protocol::TokenUsage;
 use crate::tasks::SessionTask;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::protocol::ReviewDecision;
+use codex_protocol::protocol::TokenUsage;
 
 /// Metadata about the currently running turn.
 pub(crate) struct ActiveTurn {
@@ -196,10 +196,6 @@ impl TurnState {
             std::mem::swap(&mut ret, &mut self.pending_input);
             ret
         }
-    }
-
-    pub(crate) fn pending_input_snapshot(&self) -> Vec<ResponseInputItem> {
-        self.pending_input.clone()
     }
 
     pub(crate) fn has_pending_input(&self) -> bool {

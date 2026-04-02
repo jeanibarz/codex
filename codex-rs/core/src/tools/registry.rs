@@ -3,13 +3,11 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
-use crate::client_common::tools::ToolSpec;
 use crate::function_tool::FunctionCallError;
 use crate::hook_runtime::record_additional_contexts;
 use crate::hook_runtime::run_post_tool_use_hooks;
 use crate::hook_runtime::run_pre_tool_use_hooks;
 use crate::memories::usage::emit_metric_for_tool_read;
-use crate::protocol::SandboxPolicy;
 use crate::sandbox_tags::sandbox_tag;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
@@ -24,6 +22,9 @@ use codex_hooks::HookToolInput;
 use codex_hooks::HookToolInputLocalShell;
 use codex_hooks::HookToolKind;
 use codex_protocol::models::ResponseInputItem;
+use codex_protocol::protocol::SandboxPolicy;
+use codex_tools::ConfiguredToolSpec;
+use codex_tools::ToolSpec;
 use codex_utils_readiness::Readiness;
 use serde_json::Value;
 use tracing::warn;
@@ -432,21 +433,6 @@ impl ToolRegistry {
                 Ok(result)
             }
             Err(err) => Err(err),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ConfiguredToolSpec {
-    pub spec: ToolSpec,
-    pub supports_parallel_tool_calls: bool,
-}
-
-impl ConfiguredToolSpec {
-    pub fn new(spec: ToolSpec, supports_parallel_tool_calls: bool) -> Self {
-        Self {
-            spec,
-            supports_parallel_tool_calls,
         }
     }
 }
