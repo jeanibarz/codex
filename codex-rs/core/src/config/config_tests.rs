@@ -4,8 +4,6 @@ use crate::config::edit::ConfigEditsBuilder;
 use crate::config_loader::RequirementSource;
 use crate::plugins::PluginsManager;
 use crate::project_doc::DEFAULT_PROJECT_DOC_FALLBACK_FILENAMES;
-use crate::config_loader::RequirementSource;
-use crate::plugins::PluginsManager;
 use assert_matches::assert_matches;
 use codex_config::CONFIG_TOML_FILE;
 use codex_config::types::AppToolApproval;
@@ -3499,7 +3497,7 @@ Investigate carefully and cite concrete evidence.
 }
 
 #[tokio::test]
-async fn native_codex_agent_role_takes_precedence_over_claude_markdown_role() -> std::io::Result<()>
+async fn claude_markdown_agent_role_takes_precedence_over_native_codex_role() -> std::io::Result<()>
 {
     let codex_home = TempDir::new()?;
     let repo_root = TempDir::new()?;
@@ -3559,18 +3557,13 @@ nickname_candidates = ["Hypatia"]
         .expect("researcher role should load");
     assert_eq!(
         role.description.as_deref(),
-        Some("Research role from Codex")
+        Some("Research role from Claude")
     );
     assert_eq!(
         role.config_file.as_ref(),
-        Some(&codex_agents_dir.join("researcher.toml"))
+        Some(&claude_agents_dir.join("researcher.md"))
     );
-    assert_eq!(
-        role.nickname_candidates
-            .as_ref()
-            .map(|candidates| candidates.iter().map(String::as_str).collect::<Vec<_>>()),
-        Some(vec!["Hypatia"])
-    );
+    assert!(role.nickname_candidates.is_none());
 
     Ok(())
 }
@@ -4360,14 +4353,14 @@ fn load_instructions_falls_back_to_claude_home_when_codex_home_is_missing_docs()
 }
 
 #[test]
-fn load_instructions_prefers_codex_home_docs_over_claude_home() {
+fn load_instructions_ignores_codex_home_docs_when_claude_home_exists() {
     let codex_home = TempDir::new().expect("tempdir");
     let claude_home = TempDir::new().expect("tempdir");
     std::fs::write(
-        codex_home.path().join("AGENTS.md"),
+        codex_home.path().join("CLAUDE.md"),
         "codex home instructions\n",
     )
-    .expect("write AGENTS.md");
+    .expect("write CLAUDE.md");
     std::fs::write(
         claude_home.path().join("CLAUDE.md"),
         "claude home instructions\n",
@@ -4377,7 +4370,7 @@ fn load_instructions_prefers_codex_home_docs_over_claude_home() {
     let instructions =
         Config::load_instructions_from_locations(Some(codex_home.path()), Some(claude_home.path()));
 
-    assert_eq!(instructions.as_deref(), Some("codex home instructions"));
+    assert_eq!(instructions.as_deref(), Some("claude home instructions"));
 }
 
 #[test]
@@ -4520,10 +4513,10 @@ model_verbosity = "high"
     let cfg: ConfigToml = toml::from_str(toml).expect("TOML deserialization should succeed");
 
     // Use a temporary directory for the cwd so it does not contain an
-    // AGENTS.md file.
+    // CLAUDE.md file.
     let cwd_temp_dir = TempDir::new().unwrap();
     let cwd = cwd_temp_dir.path().to_path_buf();
-    // Make it look like a Git repo so it does not search for AGENTS.md in
+    // Make it look like a Git repo so it does not search for CLAUDE.md in
     // a parent folder, either.
     std::fs::write(cwd.join(".git"), "gitdir: nowhere")?;
 

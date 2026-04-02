@@ -77,41 +77,41 @@ pub(crate) fn load_agent_roles(
             }
         }
 
-        if let Some(config_folder) = layer.config_folder() {
-            for (role_name, role) in discover_agent_roles_in_dir(
-                config_folder.as_path().join("agents").as_path(),
-                &declared_role_files,
-                startup_warnings,
-            )? {
-                if layer_roles.contains_key(&role_name) {
-                    push_agent_role_warning(
-                        startup_warnings,
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            format!(
-                                "duplicate agent role name `{role_name}` declared in the same config layer"
-                            ),
-                        ),
-                    );
-                    continue;
-                }
-                layer_roles.insert(role_name, role);
-            }
-        }
-
         for (role_name, role) in layer_roles {
-            let mut merged_role = role;
-            if let Some(existing_role) = roles.get(&role_name) {
-                merge_missing_role_fields(&mut merged_role, &existing_role.config);
-            }
-            if let Err(err) = validate_required_agent_role_description(
-                &role_name,
-                merged_role.description.as_deref(),
-            ) {
+            let resolved_role = if let Some(existing_role) = roles.get(&role_name) {
+                match existing_role.origin {
+                    AgentRoleOrigin::Compatibility => {
+                        let mut compatibility_role = existing_role.config.clone();
+                        merge_missing_role_fields(&mut compatibility_role, &role);
+                        compatibility_role
+                    }
+                    AgentRoleOrigin::Layer => {
+                        let mut merged_role = role;
+                        merge_missing_role_fields(&mut merged_role, &existing_role.config);
+                        merged_role
+                    }
+                }
+            } else {
+                role
+            };
+            if let Err(err) =
+                validate_required_agent_role_description(&role_name, resolved_role.description.as_deref())
+            {
                 push_agent_role_warning(startup_warnings, err);
                 continue;
             }
-            roles.insert(role_name, DiscoveredAgentRole::layer(merged_role));
+            let origin = roles
+                .get(&role_name)
+                .map_or(AgentRoleOrigin::Layer, |existing_role| existing_role.origin);
+            roles.insert(
+                role_name,
+                match origin {
+                    AgentRoleOrigin::Compatibility => {
+                        DiscoveredAgentRole::compatibility(resolved_role)
+                    }
+                    AgentRoleOrigin::Layer => DiscoveredAgentRole::layer(resolved_role),
+                },
+            );
         }
     }
 
@@ -156,11 +156,23 @@ fn load_agent_roles_without_layers(
                     ));
                 }
             }
-            let mut merged_role = role;
-            if let Some(existing_role) = roles.get(&role_name) {
-                merge_missing_role_fields(&mut merged_role, &existing_role.config);
-            }
-            roles.insert(role_name.clone(), DiscoveredAgentRole::layer(merged_role));
+            let discovered_role = if let Some(existing_role) = roles.get(&role_name) {
+                match existing_role.origin {
+                    AgentRoleOrigin::Compatibility => {
+                        let mut compatibility_role = existing_role.config.clone();
+                        merge_missing_role_fields(&mut compatibility_role, &role);
+                        DiscoveredAgentRole::compatibility(compatibility_role)
+                    }
+                    AgentRoleOrigin::Layer => {
+                        let mut merged_role = role;
+                        merge_missing_role_fields(&mut merged_role, &existing_role.config);
+                        DiscoveredAgentRole::layer(merged_role)
+                    }
+                }
+            } else {
+                DiscoveredAgentRole::layer(role)
+            };
+            roles.insert(role_name.clone(), discovered_role);
         }
     }
 
@@ -593,17 +605,11 @@ fn merge_repo_claude_agent_roles(
         &BTreeSet::new(),
         startup_warnings,
     )? {
-        match roles.get(&role_name) {
-            Some(existing_role) if existing_role.origin == AgentRoleOrigin::Layer => continue,
-            Some(existing_role) => {
-                let mut merged_role = role;
-                merge_missing_role_fields(&mut merged_role, &existing_role.config);
-                roles.insert(role_name, DiscoveredAgentRole::compatibility(merged_role));
-            }
-            None => {
-                roles.insert(role_name, DiscoveredAgentRole::compatibility(role));
-            }
+        let mut merged_role = role;
+        if let Some(existing_role) = roles.get(&role_name) {
+            merge_missing_role_fields(&mut merged_role, &existing_role.config);
         }
+        roles.insert(role_name, DiscoveredAgentRole::compatibility(merged_role));
     }
     Ok(())
 }
@@ -814,7 +820,7 @@ fn collect_agent_role_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> s
         if file_type.is_file()
             && path
                 .extension()
-                .is_some_and(|extension| extension == "toml" || extension == "md")
+                .is_some_and(|extension| extension == "md" || extension == "toml")
         {
             files.push(path);
         }

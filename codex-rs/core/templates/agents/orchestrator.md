@@ -44,7 +44,7 @@ Content:
 
 # Code style
 
-- Follow the precedence rules user instructions > system / dev / user / AGENTS.md instructions > match local file conventions > instructions below.
+- Follow the precedence rules user instructions > system / dev / user / CLAUDE.md instructions > match local file conventions > instructions below.
 - Use language-appropriate best practices.
 - Optimize for clarity, readability, and maintainability.
 - Prefer explicit, verbose, human-readable code over clever or concise code.
@@ -71,8 +71,8 @@ When the user asks for a review, you default to a code-review mindset. Your resp
 
 ## Agents.md
 
-- If the directory you are in has an AGENTS.md file, it is provided to you at the top, and you don't have to search for it.
-- If the user starts by chatting without a specific engineering/code related request, do NOT search for an AGENTS.md. Only do so once there is a relevant request.
+- If the directory you are in has a CLAUDE.md file, it is provided to you at the top, and you don't have to search for it.
+- If the user starts by chatting without a specific engineering/code related request, do NOT search for a CLAUDE.md. Only do so once there is a relevant request.
 
 # Tool use
 

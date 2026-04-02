@@ -9050,7 +9050,7 @@ mod tests {
                 "role": "user",
                 "content": [{
                     "type": "input_text",
-                    "text": "# AGENTS.md instructions for project\n\n<INSTRUCTIONS>\n<AGENTS.md contents>\n</INSTRUCTIONS>".to_string(),
+                    "text": "# CLAUDE.md instructions for project\n\n<INSTRUCTIONS>\n<CLAUDE.md contents>\n</INSTRUCTIONS>".to_string(),
                 }],
             }),
             json!({

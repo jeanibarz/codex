@@ -12,19 +12,23 @@ use thiserror::Error;
 const SYSTEM_SKILLS_DIR: Dir = include_dir::include_dir!("$CARGO_MANIFEST_DIR/src/assets/samples");
 
 const SYSTEM_SKILLS_DIR_NAME: &str = ".system";
+const CLAUDE_DIR_NAME: &str = ".claude";
 const SKILLS_DIR_NAME: &str = "skills";
-const SYSTEM_SKILLS_MARKER_FILENAME: &str = ".codex-system-skills.marker";
+const SYSTEM_SKILLS_MARKER_FILENAME: &str = ".claude-system-skills.marker";
 const SYSTEM_SKILLS_MARKER_SALT: &str = "v1";
 
 /// Returns the on-disk cache location for embedded system skills.
 ///
-/// This is typically located at `CODEX_HOME/skills/.system`.
+/// This is typically located at `~/.claude/skills/.system`.
 pub fn system_cache_root_dir(codex_home: &Path) -> PathBuf {
     AbsolutePathBuf::try_from(codex_home)
         .and_then(|codex_home| system_cache_root_dir_abs(&codex_home))
         .map(AbsolutePathBuf::into_path_buf)
         .unwrap_or_else(|_| {
             codex_home
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(CLAUDE_DIR_NAME)
                 .join(SKILLS_DIR_NAME)
                 .join(SYSTEM_SKILLS_DIR_NAME)
         })
@@ -32,11 +36,14 @@ pub fn system_cache_root_dir(codex_home: &Path) -> PathBuf {
 
 fn system_cache_root_dir_abs(codex_home: &AbsolutePathBuf) -> std::io::Result<AbsolutePathBuf> {
     codex_home
+        .parent()
+        .ok_or_else(|| std::io::Error::other("codex home has no parent"))?
+        .join(CLAUDE_DIR_NAME)?
         .join(SKILLS_DIR_NAME)?
         .join(SYSTEM_SKILLS_DIR_NAME)
 }
 
-/// Installs embedded system skills into `CODEX_HOME/skills/.system`.
+/// Installs embedded system skills into `~/.claude/skills/.system`.
 ///
 /// Clears any existing system skills directory first and then writes the embedded
 /// skills directory into place.
@@ -48,7 +55,10 @@ pub fn install_system_skills(codex_home: &Path) -> Result<(), SystemSkillsError>
     let codex_home = AbsolutePathBuf::try_from(codex_home)
         .map_err(|source| SystemSkillsError::io("normalize codex home dir", source))?;
     let skills_root_dir = codex_home
-        .join(SKILLS_DIR_NAME)
+        .parent()
+        .ok_or_else(|| SystemSkillsError::io("resolve home dir", std::io::Error::other("codex home has no parent")))?
+        .join(CLAUDE_DIR_NAME)
+        .and_then(|path| path.join(SKILLS_DIR_NAME))
         .map_err(|source| SystemSkillsError::io("resolve skills root dir", source))?;
     fs::create_dir_all(skills_root_dir.as_path())
         .map_err(|source| SystemSkillsError::io("create skills root dir", source))?;

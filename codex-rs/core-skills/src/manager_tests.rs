@@ -136,7 +136,8 @@ fn skills_for_config_with_stack(
 #[test]
 fn new_with_disabled_bundled_skills_removes_stale_cached_system_skills() {
     let codex_home = tempfile::tempdir().expect("tempdir");
-    let stale_system_skill_dir = codex_home.path().join("skills/.system/stale-skill");
+    let stale_system_skill_dir =
+        codex_skills::system_cache_root_dir(codex_home.path()).join("stale-skill");
     fs::create_dir_all(&stale_system_skill_dir).expect("create stale system skill dir");
     fs::write(stale_system_skill_dir.join("SKILL.md"), "# stale\n")
         .expect("write stale system skill");
@@ -147,7 +148,7 @@ fn new_with_disabled_bundled_skills_removes_stale_cached_system_skills() {
     );
 
     assert!(
-        !codex_home.path().join("skills/.system").exists(),
+        !codex_skills::system_cache_root_dir(codex_home.path()).exists(),
         "expected disabling system skills to remove stale cached bundled skills"
     );
 }
@@ -285,7 +286,8 @@ async fn skills_for_cwd_reuses_cached_entry_even_when_entry_has_extra_roots() {
 async fn skills_for_config_excludes_bundled_skills_when_disabled_in_config() {
     let codex_home = tempfile::tempdir().expect("tempdir");
     let cwd = tempfile::tempdir().expect("tempdir");
-    let bundled_skill_dir = codex_home.path().join("skills/.system/bundled-skill");
+    let bundled_skill_dir =
+        codex_skills::system_cache_root_dir(codex_home.path()).join("bundled-skill");
     fs::create_dir_all(&bundled_skill_dir).expect("create bundled skill dir");
     fs::write(
         bundled_skill_dir.join("SKILL.md"),

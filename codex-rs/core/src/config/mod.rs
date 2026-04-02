@@ -22,8 +22,6 @@ use crate::model_provider_info::OLLAMA_OSS_PROVIDER_ID;
 use crate::model_provider_info::OPENAI_PROVIDER_ID;
 use crate::path_utils::normalize_for_native_workdir;
 use crate::project_doc::DEFAULT_PROJECT_DOC_FALLBACK_FILENAMES;
-use crate::project_doc::DEFAULT_PROJECT_DOC_FILENAME;
-use crate::project_doc::LOCAL_PROJECT_DOC_FILENAME;
 use crate::unified_exec::DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS;
 use crate::unified_exec::MIN_EMPTY_YIELD_TIME_MS;
 use crate::windows_sandbox::resolve_windows_sandbox_mode;
@@ -134,7 +132,6 @@ pub use permissions::NetworkUnixSocketPermissionsToml;
 pub use permissions::PermissionProfileToml;
 pub use permissions::PermissionsToml;
 pub(crate) use permissions::overlay_network_domain_permissions;
-pub(crate) use permissions::resolve_permission_profile;
 pub use service::ConfigService;
 pub use service::ConfigServiceError;
 
@@ -270,7 +267,7 @@ pub struct Config {
     /// Defaults to `false`.
     pub show_raw_agent_reasoning: bool,
 
-    /// User-provided instructions from AGENTS.md.
+    /// User-provided instructions from CLAUDE.md.
     pub user_instructions: Option<String>,
 
     /// Base instructions override.
@@ -392,7 +389,7 @@ pub struct Config {
     /// Combined provider map (defaults plus user-defined providers).
     pub model_providers: HashMap<String, ModelProviderInfo>,
 
-    /// Maximum number of bytes to include from an AGENTS.md project doc file.
+    /// Maximum number of bytes to include from a CLAUDE.md project doc file.
     pub project_doc_max_bytes: usize,
 
     /// Additional filenames to try when looking for project-level docs.
@@ -1231,10 +1228,10 @@ pub struct ConfigToml {
     #[serde(default, deserialize_with = "deserialize_model_providers")]
     pub model_providers: HashMap<String, ModelProviderInfo>,
 
-    /// Maximum number of bytes to include from an AGENTS.md project doc file.
+    /// Maximum number of bytes to include from a CLAUDE.md project doc file.
     pub project_doc_max_bytes: Option<usize>,
 
-    /// Ordered list of fallback filenames to look for when AGENTS.md is missing.
+    /// Ordered list of fallback filenames to look for when CLAUDE.md is missing.
     pub project_doc_fallback_filenames: Option<Vec<String>>,
 
     /// Token budget applied when storing tool/function outputs in the context manager.
@@ -2790,21 +2787,9 @@ impl Config {
     }
 
     fn load_instructions_from_locations(
-        codex_dir: Option<&Path>,
+        _codex_dir: Option<&Path>,
         claude_home: Option<&Path>,
     ) -> Option<String> {
-        if let Some(base) = codex_dir {
-            for candidate in [LOCAL_PROJECT_DOC_FILENAME, DEFAULT_PROJECT_DOC_FILENAME] {
-                let mut path = base.to_path_buf();
-                path.push(candidate);
-                if let Ok(contents) = std::fs::read_to_string(&path) {
-                    let trimmed = contents.trim();
-                    if !trimmed.is_empty() {
-                        return Some(trimmed.to_string());
-                    }
-                }
-            }
-        }
         if let Some(base) = claude_home {
             let path = base.join("CLAUDE.md");
             if let Ok(contents) = std::fs::read_to_string(&path) {

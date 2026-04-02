@@ -2463,14 +2463,14 @@
       "type": "object"
     },
     "project_doc_fallback_filenames": {
-      "description": "Ordered list of fallback filenames to look for when AGENTS.md is missing.",
+      "description": "Ordered list of fallback filenames to look for when CLAUDE.md is missing.",
       "items": {
         "type": "string"
       },
       "type": "array"
     },
     "project_doc_max_bytes": {
-      "description": "Maximum number of bytes to include from an AGENTS.md project doc file.",
+      "description": "Maximum number of bytes to include from a CLAUDE.md project doc file.",
       "format": "uint",
       "minimum": 0.0,
       "type": "integer"

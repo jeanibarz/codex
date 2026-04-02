@@ -919,15 +919,9 @@ pub struct ConfigRequirementsReadResponse {
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash, JsonSchema, TS)]
 #[ts(export_to = "v2/")]
 pub enum ExternalAgentConfigMigrationItemType {
-    #[serde(rename = "AGENTS_MD")]
-    #[ts(rename = "AGENTS_MD")]
-    AgentsMd,
     #[serde(rename = "CONFIG")]
     #[ts(rename = "CONFIG")]
     Config,
-    #[serde(rename = "SKILLS")]
-    #[ts(rename = "SKILLS")]
-    Skills,
     #[serde(rename = "MCP_SERVER_CONFIG")]
     #[ts(rename = "MCP_SERVER_CONFIG")]
     McpServerConfig,
@@ -7862,7 +7856,7 @@ mod tests {
                 },
                 CoreUserInput::Skill {
                     name: "skill-creator".to_string(),
-                    path: PathBuf::from("/repo/.codex/skills/skill-creator/SKILL.md"),
+                    path: PathBuf::from("/repo/.claude/skills/skill-creator/SKILL.md"),
                 },
                 CoreUserInput::Mention {
                     name: "Demo App".to_string(),
@@ -7888,7 +7882,7 @@ mod tests {
                     },
                     UserInput::Skill {
                         name: "skill-creator".to_string(),
-                        path: PathBuf::from("/repo/.codex/skills/skill-creator/SKILL.md"),
+                        path: PathBuf::from("/repo/.claude/skills/skill-creator/SKILL.md"),
                     },
                     UserInput::Mention {
                         name: "Demo App".to_string(),

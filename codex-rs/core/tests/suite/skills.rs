@@ -27,9 +27,7 @@ fn write_skill(home: &Path, name: &str, description: &str, body: &str) -> std::p
 }
 
 fn system_skill_md_path(home: impl AsRef<Path>, name: &str) -> std::path::PathBuf {
-    home.as_ref()
-        .join("skills")
-        .join(".system")
+    codex_skills::system_cache_root_dir(home.as_ref())
         .join(name)
         .join("SKILL.md")
 }
@@ -217,7 +215,7 @@ async fn list_skills_includes_system_cache_entries() -> Result<()> {
         .expect("expected system skill to be present");
     assert_eq!(skill.scope, codex_protocol::protocol::SkillScope::System);
     let path_str = skill.path.to_string_lossy().replace('\\', "/");
-    let expected_path_suffix = format!("/skills/.system/{SYSTEM_SKILL_NAME}/SKILL.md");
+    let expected_path_suffix = format!("/.claude/skills/.system/{SYSTEM_SKILL_NAME}/SKILL.md");
     assert!(
         path_str.ends_with(&expected_path_suffix),
         "unexpected skill path: {path_str}"

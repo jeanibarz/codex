@@ -97,7 +97,7 @@ pub fn format_response_items_snapshot(items: &[Value], options: &ContextSnapshot
                                         }
                                         if options.strip_agents_md_user_context
                                             && role == "user"
-                                            && text.starts_with("# AGENTS.md instructions for ")
+                                            && text.starts_with("# CLAUDE.md instructions for ")
                                         {
                                             return None;
                                         }
@@ -281,7 +281,7 @@ fn canonicalize_snapshot_text(text: &str) -> String {
     if text.starts_with(PLUGINS_INSTRUCTIONS_OPEN_TAG) {
         return "<PLUGINS_INSTRUCTIONS>".to_string();
     }
-    if text.starts_with("# AGENTS.md instructions for ") {
+    if text.starts_with("# CLAUDE.md instructions for ") {
         return "<AGENTS_MD>".to_string();
     }
     if text.starts_with("<environment_context>") {
@@ -357,7 +357,7 @@ mod tests {
             "role": "user",
             "content": [{
                 "type": "input_text",
-                "text": "# AGENTS.md instructions for /tmp/example\n\n<INSTRUCTIONS>\nbody\n</INSTRUCTIONS>"
+                "text": "# CLAUDE.md instructions for /tmp/example\n\n<INSTRUCTIONS>\nbody\n</INSTRUCTIONS>"
             }]
         })];
 
@@ -368,7 +368,7 @@ mod tests {
 
         assert_eq!(
             rendered,
-            r"00:message/user:# AGENTS.md instructions for /tmp/example\n\n<INSTRUCTIONS>\nbody\n</INSTRUCTIONS>"
+            r"00:message/user:# CLAUDE.md instructions for /tmp/example\n\n<INSTRUCTIONS>\nbody\n</INSTRUCTIONS>"
         );
     }
 
@@ -398,7 +398,7 @@ mod tests {
             "role": "user",
             "content": [{
                 "type": "input_text",
-                "text": "# AGENTS.md instructions for /tmp/example\n\n<INSTRUCTIONS>\nbody\n</INSTRUCTIONS>"
+                "text": "# CLAUDE.md instructions for /tmp/example\n\n<INSTRUCTIONS>\nbody\n</INSTRUCTIONS>"
             }]
         })];
 
@@ -472,7 +472,7 @@ mod tests {
             "content": [
                 {
                     "type": "input_text",
-                    "text": "# AGENTS.md instructions for /tmp/example\n\n<INSTRUCTIONS>\n- test\n</INSTRUCTIONS>"
+                    "text": "# CLAUDE.md instructions for /tmp/example\n\n<INSTRUCTIONS>\n- test\n</INSTRUCTIONS>"
                 },
                 {
                     "type": "input_text",

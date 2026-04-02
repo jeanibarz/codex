@@ -7,7 +7,7 @@ use core_test_support::responses::start_mock_server;
 use core_test_support::test_codex::test_codex;
 
 const HIERARCHICAL_AGENTS_SNIPPET: &str =
-    "Files called AGENTS.md commonly appear in many places inside a container";
+    "Files called CLAUDE.md commonly appear in many places inside a container";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hierarchical_agents_appends_to_project_doc_in_user_instructions() {
@@ -26,11 +26,11 @@ async fn hierarchical_agents_appends_to_project_doc_in_user_instructions() {
         std::fs::write(
             config
                 .cwd
-                .join("AGENTS.md")
-                .expect("absolute AGENTS.md path"),
+                .join("CLAUDE.md")
+                .expect("absolute CLAUDE.md path"),
             "be nice",
         )
-        .expect("write AGENTS.md");
+        .expect("write CLAUDE.md");
     });
     let test = builder.build(&server).await.expect("build test codex");
 
@@ -40,18 +40,18 @@ async fn hierarchical_agents_appends_to_project_doc_in_user_instructions() {
     let user_messages = request.message_input_texts("user");
     let instructions = user_messages
         .iter()
-        .find(|text| text.starts_with("# AGENTS.md instructions for "))
+        .find(|text| text.starts_with("# CLAUDE.md instructions for "))
         .expect("instructions message");
     assert!(
         instructions.contains("be nice"),
-        "expected AGENTS.md text included: {instructions}"
+        "expected CLAUDE.md text included: {instructions}"
     );
     let snippet_pos = instructions
         .find(HIERARCHICAL_AGENTS_SNIPPET)
         .expect("expected hierarchical agents snippet");
     let base_pos = instructions
         .find("be nice")
-        .expect("expected AGENTS.md text");
+        .expect("expected CLAUDE.md text");
     assert!(
         snippet_pos > base_pos,
         "expected hierarchical agents message appended after base instructions: {instructions}"
@@ -81,7 +81,7 @@ async fn hierarchical_agents_emits_when_no_project_doc() {
     let user_messages = request.message_input_texts("user");
     let instructions = user_messages
         .iter()
-        .find(|text| text.starts_with("# AGENTS.md instructions for "))
+        .find(|text| text.starts_with("# CLAUDE.md instructions for "))
         .expect("instructions message");
     assert!(
         instructions.contains(HIERARCHICAL_AGENTS_SNIPPET),

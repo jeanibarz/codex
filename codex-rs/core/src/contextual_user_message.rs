@@ -50,7 +50,7 @@ fn is_standard_contextual_user_text(text: &str) -> bool {
 /// Returns whether a contextual user fragment should be omitted from memory
 /// stage-1 inputs.
 ///
-/// We exclude injected `AGENTS.md` instructions and skill payloads because
+/// We exclude injected `CLAUDE.md` instructions and skill payloads because
 /// they are prompt scaffolding rather than conversation content, so they do
 /// not improve the resulting memory. We keep environment context and
 /// subagent notifications because they can carry useful execution context or

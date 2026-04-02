@@ -1,6 +1,4 @@
 use serde_json::Value as JsonValue;
-use std::collections::HashSet;
-use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -19,8 +17,6 @@ pub struct ExternalAgentConfigDetectOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExternalAgentConfigMigrationItemType {
     Config,
-    Skills,
-    AgentsMd,
     McpServerConfig,
 }
 
@@ -84,22 +80,6 @@ impl ExternalAgentConfigService {
                         /*skills_count*/ None,
                     );
                 }
-                ExternalAgentConfigMigrationItemType::Skills => {
-                    let skills_count = self.import_skills(migration_item.cwd.as_deref())?;
-                    emit_migration_metric(
-                        EXTERNAL_AGENT_CONFIG_IMPORT_METRIC,
-                        ExternalAgentConfigMigrationItemType::Skills,
-                        Some(skills_count),
-                    );
-                }
-                ExternalAgentConfigMigrationItemType::AgentsMd => {
-                    self.import_agents_md(migration_item.cwd.as_deref())?;
-                    emit_migration_metric(
-                        EXTERNAL_AGENT_CONFIG_IMPORT_METRIC,
-                        ExternalAgentConfigMigrationItemType::AgentsMd,
-                        /*skills_count*/ None,
-                    );
-                }
                 ExternalAgentConfigMigrationItemType::McpServerConfig => {}
             }
         }
@@ -159,69 +139,7 @@ impl ExternalAgentConfigService {
             }
         }
 
-        let source_skills = repo_root.map_or_else(
-            || self.claude_home.join("skills"),
-            |repo_root| repo_root.join(".claude").join("skills"),
-        );
-        let target_skills = repo_root.map_or_else(
-            || self.home_target_skills_dir(),
-            |repo_root| repo_root.join(".agents").join("skills"),
-        );
-        let skills_count = count_missing_subdirectories(&source_skills, &target_skills)?;
-        if skills_count > 0 {
-            items.push(ExternalAgentConfigMigrationItem {
-                item_type: ExternalAgentConfigMigrationItemType::Skills,
-                description: format!(
-                    "Copy skill folders from {} to {}",
-                    source_skills.display(),
-                    target_skills.display()
-                ),
-                cwd: cwd.clone(),
-            });
-            emit_migration_metric(
-                EXTERNAL_AGENT_CONFIG_DETECT_METRIC,
-                ExternalAgentConfigMigrationItemType::Skills,
-                Some(skills_count),
-            );
-        }
-
-        let source_agents_md = if let Some(repo_root) = repo_root {
-            find_repo_agents_md_source(repo_root)?
-        } else {
-            let path = self.claude_home.join("CLAUDE.md");
-            is_non_empty_text_file(&path)?.then_some(path)
-        };
-        let target_agents_md = repo_root.map_or_else(
-            || self.codex_home.join("AGENTS.md"),
-            |repo_root| repo_root.join("AGENTS.md"),
-        );
-        if let Some(source_agents_md) = source_agents_md
-            && is_missing_or_empty_text_file(&target_agents_md)?
-        {
-            items.push(ExternalAgentConfigMigrationItem {
-                item_type: ExternalAgentConfigMigrationItemType::AgentsMd,
-                description: format!(
-                    "Import {} to {}",
-                    source_agents_md.display(),
-                    target_agents_md.display()
-                ),
-                cwd,
-            });
-            emit_migration_metric(
-                EXTERNAL_AGENT_CONFIG_DETECT_METRIC,
-                ExternalAgentConfigMigrationItemType::AgentsMd,
-                /*skills_count*/ None,
-            );
-        }
-
         Ok(())
-    }
-
-    fn home_target_skills_dir(&self) -> PathBuf {
-        self.codex_home
-            .parent()
-            .map(|parent| parent.join(".agents").join("skills"))
-            .unwrap_or_else(|| PathBuf::from(".agents").join("skills"))
     }
 
     fn import_config(&self, cwd: Option<&Path>) -> io::Result<()> {
@@ -275,74 +193,6 @@ impl ExternalAgentConfigService {
         write_toml_file(&target_config, &existing)?;
         Ok(())
     }
-
-    fn import_skills(&self, cwd: Option<&Path>) -> io::Result<usize> {
-        let (source_skills, target_skills) = if let Some(repo_root) = find_repo_root(cwd)? {
-            (
-                repo_root.join(".claude").join("skills"),
-                repo_root.join(".agents").join("skills"),
-            )
-        } else if cwd.is_some_and(|cwd| !cwd.as_os_str().is_empty()) {
-            return Ok(0);
-        } else {
-            (
-                self.claude_home.join("skills"),
-                self.home_target_skills_dir(),
-            )
-        };
-        if !source_skills.is_dir() {
-            return Ok(0);
-        }
-
-        fs::create_dir_all(&target_skills)?;
-        let mut copied_count = 0usize;
-
-        for entry in fs::read_dir(&source_skills)? {
-            let entry = entry?;
-            let file_type = entry.file_type()?;
-            if !file_type.is_dir() {
-                continue;
-            }
-
-            let target = target_skills.join(entry.file_name());
-            if target.exists() {
-                continue;
-            }
-
-            copy_dir_recursive(&entry.path(), &target)?;
-            copied_count += 1;
-        }
-
-        Ok(copied_count)
-    }
-
-    fn import_agents_md(&self, cwd: Option<&Path>) -> io::Result<()> {
-        let (source_agents_md, target_agents_md) = if let Some(repo_root) = find_repo_root(cwd)? {
-            let Some(source_agents_md) = find_repo_agents_md_source(&repo_root)? else {
-                return Ok(());
-            };
-            (source_agents_md, repo_root.join("AGENTS.md"))
-        } else if cwd.is_some_and(|cwd| !cwd.as_os_str().is_empty()) {
-            return Ok(());
-        } else {
-            (
-                self.claude_home.join("CLAUDE.md"),
-                self.codex_home.join("AGENTS.md"),
-            )
-        };
-        if !is_non_empty_text_file(&source_agents_md)?
-            || !is_missing_or_empty_text_file(&target_agents_md)?
-        {
-            return Ok(());
-        }
-
-        let Some(target_parent) = target_agents_md.parent() else {
-            return Err(invalid_data_error("AGENTS.md target path has no parent"));
-        };
-        fs::create_dir_all(target_parent)?;
-
-        rewrite_and_copy_text_file(&source_agents_md, &target_agents_md)
-    }
 }
 
 fn default_claude_home() -> PathBuf {
@@ -387,158 +237,6 @@ fn find_repo_root(cwd: Option<&Path>) -> io::Result<Option<PathBuf>> {
     }
 
     Ok(Some(fallback))
-}
-
-fn collect_subdirectory_names(path: &Path) -> io::Result<HashSet<OsString>> {
-    let mut names = HashSet::new();
-    if !path.is_dir() {
-        return Ok(names);
-    }
-
-    for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        if entry.file_type()?.is_dir() {
-            names.insert(entry.file_name());
-        }
-    }
-
-    Ok(names)
-}
-
-fn count_missing_subdirectories(source: &Path, target: &Path) -> io::Result<usize> {
-    let source_names = collect_subdirectory_names(source)?;
-    let target_names = collect_subdirectory_names(target)?;
-    Ok(source_names
-        .iter()
-        .filter(|name| !target_names.contains(*name))
-        .count())
-}
-
-fn is_missing_or_empty_text_file(path: &Path) -> io::Result<bool> {
-    if !path.exists() {
-        return Ok(true);
-    }
-    if !path.is_file() {
-        return Ok(false);
-    }
-
-    Ok(fs::read_to_string(path)?.trim().is_empty())
-}
-
-fn is_non_empty_text_file(path: &Path) -> io::Result<bool> {
-    if !path.is_file() {
-        return Ok(false);
-    }
-
-    Ok(!fs::read_to_string(path)?.trim().is_empty())
-}
-
-fn find_repo_agents_md_source(repo_root: &Path) -> io::Result<Option<PathBuf>> {
-    for candidate in [
-        repo_root.join("CLAUDE.md"),
-        repo_root.join(".claude").join("CLAUDE.md"),
-    ] {
-        if is_non_empty_text_file(&candidate)? {
-            return Ok(Some(candidate));
-        }
-    }
-
-    Ok(None)
-}
-
-fn copy_dir_recursive(source: &Path, target: &Path) -> io::Result<()> {
-    fs::create_dir_all(target)?;
-
-    for entry in fs::read_dir(source)? {
-        let entry = entry?;
-        let source_path = entry.path();
-        let target_path = target.join(entry.file_name());
-        let file_type = entry.file_type()?;
-
-        if file_type.is_dir() {
-            copy_dir_recursive(&source_path, &target_path)?;
-            continue;
-        }
-
-        if file_type.is_file() {
-            if is_skill_md(&source_path) {
-                rewrite_and_copy_text_file(&source_path, &target_path)?;
-            } else {
-                fs::copy(source_path, target_path)?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn is_skill_md(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.eq_ignore_ascii_case("SKILL.md"))
-}
-
-fn rewrite_and_copy_text_file(source: &Path, target: &Path) -> io::Result<()> {
-    let source_contents = fs::read_to_string(source)?;
-    let rewritten = rewrite_claude_terms(&source_contents);
-    fs::write(target, rewritten)
-}
-
-fn rewrite_claude_terms(content: &str) -> String {
-    let mut rewritten = replace_case_insensitive_with_boundaries(content, "claude.md", "AGENTS.md");
-    for from in [
-        "claude code",
-        "claude-code",
-        "claude_code",
-        "claudecode",
-        "claude",
-    ] {
-        rewritten = replace_case_insensitive_with_boundaries(&rewritten, from, "Codex");
-    }
-    rewritten
-}
-
-fn replace_case_insensitive_with_boundaries(
-    input: &str,
-    needle: &str,
-    replacement: &str,
-) -> String {
-    let needle_lower = needle.to_ascii_lowercase();
-    if needle_lower.is_empty() {
-        return input.to_string();
-    }
-
-    let haystack_lower = input.to_ascii_lowercase();
-    let bytes = input.as_bytes();
-    let mut output = String::with_capacity(input.len());
-    let mut last_emitted = 0usize;
-    let mut search_start = 0usize;
-
-    while let Some(relative_pos) = haystack_lower[search_start..].find(&needle_lower) {
-        let start = search_start + relative_pos;
-        let end = start + needle_lower.len();
-        let boundary_before = start == 0 || !is_word_byte(bytes[start - 1]);
-        let boundary_after = end == bytes.len() || !is_word_byte(bytes[end]);
-
-        if boundary_before && boundary_after {
-            output.push_str(&input[last_emitted..start]);
-            output.push_str(replacement);
-            last_emitted = end;
-        }
-
-        search_start = start + 1;
-    }
-
-    if last_emitted == 0 {
-        return input.to_string();
-    }
-
-    output.push_str(&input[last_emitted..]);
-    output
-}
-
-fn is_word_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
 fn build_config_from_external(settings: &JsonValue) -> io::Result<TomlValue> {
@@ -656,19 +354,13 @@ fn invalid_data_error(message: impl Into<String>) -> io::Error {
 
 fn migration_metric_tags(
     item_type: ExternalAgentConfigMigrationItemType,
-    skills_count: Option<usize>,
+    _skills_count: Option<usize>,
 ) -> Vec<(&'static str, String)> {
     let migration_type = match item_type {
         ExternalAgentConfigMigrationItemType::Config => "config",
-        ExternalAgentConfigMigrationItemType::Skills => "skills",
-        ExternalAgentConfigMigrationItemType::AgentsMd => "agents_md",
         ExternalAgentConfigMigrationItemType::McpServerConfig => "mcp_server_config",
     };
-    let mut tags = vec![("migration_type", migration_type.to_string())];
-    if item_type == ExternalAgentConfigMigrationItemType::Skills {
-        tags.push(("skills_count", skills_count.unwrap_or(0).to_string()));
-    }
-    tags
+    vec![("migration_type", migration_type.to_string())]
 }
 
 fn emit_migration_metric(

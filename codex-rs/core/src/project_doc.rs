@@ -1,9 +1,7 @@
 //! Project-level documentation discovery.
 //!
-//! Project-level documentation is primarily stored in files named `AGENTS.md`.
+//! Project-level documentation is primarily stored in files named `CLAUDE.md`.
 //! Additional fallback filenames can be configured via `project_doc_fallback_filenames`.
-//! By default, Claude-compatible fallbacks are also checked when `AGENTS.md`
-//! is absent.
 //! We include the concatenation of all files found along the path from the
 //! project root to the current working directory as follows:
 //!
@@ -12,7 +10,7 @@
 //!     When `project_root_markers` is unset, the default marker list is used
 //!     (`.git`). If no marker is found, only the current working directory is
 //!     considered. An empty marker list disables parent traversal.
-//! 2.  Collect every `AGENTS.md` found from the project root down to the
+//! 2.  Collect every `CLAUDE.md` found from the project root down to the
 //!     current working directory (inclusive) and concatenate their contents in
 //!     that order.
 //! 3.  We do **not** walk past the project root.
@@ -34,11 +32,11 @@ pub(crate) const HIERARCHICAL_AGENTS_MESSAGE: &str =
     include_str!("../hierarchical_agents_message.md");
 
 /// Default filename scanned for project-level docs.
-pub const DEFAULT_PROJECT_DOC_FILENAME: &str = "AGENTS.md";
+pub const DEFAULT_PROJECT_DOC_FILENAME: &str = "CLAUDE.md";
 /// Preferred local override for project-level docs.
-pub const LOCAL_PROJECT_DOC_FILENAME: &str = "AGENTS.override.md";
-/// Built-in fallback filenames used when `AGENTS.md` is absent.
-pub const DEFAULT_PROJECT_DOC_FALLBACK_FILENAMES: &[&str] = &["CLAUDE.md", ".claude/CLAUDE.md"];
+pub const LOCAL_PROJECT_DOC_FILENAME: &str = ".claude/CLAUDE.md";
+/// Built-in fallback filenames used when `CLAUDE.md` is absent.
+pub const DEFAULT_PROJECT_DOC_FALLBACK_FILENAMES: &[&str] = &[];
 
 /// When both `Config::instructions` and the project doc are present, they will
 /// be concatenated with the following separator.
@@ -78,7 +76,7 @@ fn render_js_repl_instructions(config: &Config) -> Option<String> {
     Some(section)
 }
 
-/// Combines `Config::instructions` and `AGENTS.md` (if present) into a single
+/// Combines `Config::instructions` and the discovered project doc (if present) into a single
 /// string of instructions.
 pub(crate) async fn get_user_instructions(config: &Config) -> Option<String> {
     let project_docs = read_project_docs(config).await;
@@ -182,7 +180,7 @@ pub async fn read_project_docs(config: &Config) -> std::io::Result<Option<String
     }
 }
 
-/// Discover the list of AGENTS.md files using the same search rules as
+/// Discover the list of project-doc files using the same search rules as
 /// `read_project_docs`, but return the file paths instead of concatenated
 /// contents. The list is ordered from project root to the current working
 /// directory (inclusive). Symlinks are allowed. When `project_doc_max_bytes`
