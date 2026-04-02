@@ -4,10 +4,10 @@ use std::path::Path;
 use codex_config::ConfigLayerStack;
 use codex_config::ConfigLayerStackOrdering;
 
-use super::ConfiguredHandler;
 use super::config::HookHandlerConfig;
 use super::config::HooksFile;
 use super::config::MatcherGroup;
+use super::ConfiguredHandler;
 use crate::events::common::matcher_pattern_for_event;
 use crate::events::common::validate_matcher_pattern;
 
@@ -84,9 +84,9 @@ pub(crate) fn discover_handlers(
             pre_tool_use,
             post_tool_use,
             session_start,
+            permission_request,
             user_prompt_submit,
             stop,
-            permission_request,
         } = parsed.hooks;
 
         for (event_name, groups) in [
@@ -103,14 +103,14 @@ pub(crate) fn discover_handlers(
                 session_start,
             ),
             (
+                codex_protocol::protocol::HookEventName::PermissionRequest,
+                permission_request,
+            ),
+            (
                 codex_protocol::protocol::HookEventName::UserPromptSubmit,
                 user_prompt_submit,
             ),
             (codex_protocol::protocol::HookEventName::Stop, stop),
-            (
-                codex_protocol::protocol::HookEventName::PermissionRequest,
-                permission_request,
-            ),
         ] {
             append_matcher_groups(
                 &mut handlers,
@@ -310,9 +310,9 @@ mod tests {
     use codex_protocol::protocol::HookEventName;
     use pretty_assertions::assert_eq;
 
+    use super::append_group_handlers;
     use super::ConfiguredHandler;
     use super::HookHandlerConfig;
-    use super::append_group_handlers;
     use crate::events::common::matcher_pattern_for_event;
 
     #[test]

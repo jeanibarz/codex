@@ -2950,7 +2950,11 @@ impl Session {
             model: turn_context.model_info.slug.clone(),
             permission_mode: crate::hook_runtime::hook_permission_mode(turn_context),
             tool_name: "Bash".to_string(),
-            tool_input: command.join(" "),
+            tool_input: serde_json::from_value(serde_json::json!({
+                "command": command.join(" "),
+            }))
+            .expect("permission request tool input should serialize"),
+            permission_suggestions: Vec::new(),
         };
         let _perm_outcome = self.hooks().run_permission_request(perm_request).await;
 

@@ -4,8 +4,8 @@ use codex_protocol::protocol::HookOutputEntry;
 use codex_protocol::protocol::HookOutputEntryKind;
 use codex_protocol::protocol::HookRunStatus;
 
-use crate::engine::ConfiguredHandler;
 use crate::engine::dispatcher;
+use crate::engine::ConfiguredHandler;
 
 pub(crate) fn join_text_chunks(chunks: Vec<String>) -> Option<String> {
     if chunks.is_empty() {
@@ -182,6 +182,10 @@ mod tests {
         assert_eq!(
             matcher_pattern_for_event(HookEventName::SessionStart, Some("startup|resume")),
             Some("startup|resume")
+        );
+        assert_eq!(
+            matcher_pattern_for_event(HookEventName::PermissionRequest, Some("WorkspaceTrust")),
+            Some("WorkspaceTrust")
         );
     }
 }

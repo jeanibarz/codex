@@ -18,7 +18,6 @@ use ratatui::widgets::WidgetRef;
 
 use codex_protocol::config_types::ForcedLoginMethod;
 
-use crate::LoginStatus;
 use crate::app_server_session::AppServerSession;
 use crate::onboarding::auth::AuthModeWidget;
 use crate::onboarding::auth::SignInOption;
@@ -29,6 +28,7 @@ use crate::onboarding::welcome::WelcomeWidget;
 use crate::tui::FrameRequester;
 use crate::tui::Tui;
 use crate::tui::TuiEvent;
+use crate::LoginStatus;
 use color_eyre::eyre::Result;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -437,6 +437,10 @@ pub(crate) async fn run_onboarding_app(
     tui: &mut Tui,
 ) -> Result<OnboardingResult> {
     use tokio_stream::StreamExt;
+
+    if args.show_trust_screen {
+        codex_core::emit_workspace_trust_permission_request_hook(&args.config).await;
+    }
 
     let mut onboarding_screen = OnboardingScreen::new(tui, args);
     // One-time guard to fully clear the screen after ChatGPT login success message is shown

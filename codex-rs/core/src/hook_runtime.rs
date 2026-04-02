@@ -1,6 +1,9 @@
 use std::future::Future;
 use std::sync::Arc;
 
+use codex_features::Feature;
+use codex_hooks::Hooks;
+use codex_hooks::HooksConfig;
 use codex_hooks::PermissionRequestRequest;
 use codex_hooks::PostToolUseOutcome;
 use codex_hooks::PostToolUseRequest;
@@ -16,13 +19,19 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::HookCompletedEvent;
+use codex_protocol::protocol::HookRunStatus;
 use codex_protocol::protocol::HookRunSummary;
 use codex_protocol::user_input::UserInput;
+use codex_protocol::ThreadId;
+use serde_json::Map;
 use serde_json::Value;
+use tracing::warn;
 
 use crate::codex::Session;
 use crate::codex::TurnContext;
+use crate::config::Config;
 use crate::event_mapping::parse_turn_item;
+use crate::shell;
 
 pub(crate) struct HookRuntimeOutcome {
     pub should_stop: bool,
@@ -86,6 +95,57 @@ impl From<UserPromptSubmitOutcome> for ContextInjectingHookOutcome {
     }
 }
 
+pub async fn emit_workspace_trust_permission_request_hook(config: &Config) {
+    let hooks = hooks_for_config(config);
+    for startup_warning in hooks.startup_warnings() {
+        warn!(
+            warning = startup_warning,
+            "workspace trust hook startup warning"
+        );
+    }
+
+    let outcome = hooks
+        .run_permission_request(PermissionRequestRequest {
+            session_id: ThreadId::new(),
+            turn_id: ThreadId::new().to_string(),
+            cwd: config.cwd.to_path_buf(),
+            transcript_path: None,
+            model: config.model.clone().unwrap_or_default(),
+            permission_mode: hook_permission_mode_from_approval_policy(
+                config.permissions.approval_policy.value(),
+            ),
+            tool_name: "WorkspaceTrust".to_string(),
+            tool_input: json_object([
+                ("path", Value::String(config.cwd.display().to_string())),
+                (
+                    "prompt",
+                    Value::String("Do you trust the contents of this directory?".to_string()),
+                ),
+            ]),
+            permission_suggestions: vec![
+                json_object([
+                    ("label", Value::String("Yes, continue".to_string())),
+                    ("value", Value::String("trust".to_string())),
+                ]),
+                json_object([
+                    ("label", Value::String("No, quit".to_string())),
+                    ("value", Value::String("quit".to_string())),
+                ]),
+            ],
+        })
+        .await;
+
+    for hook_event in outcome.hook_events {
+        if hook_event.run.status != HookRunStatus::Completed {
+            warn!(
+                status = ?hook_event.run.status,
+                source_path = %hook_event.run.source_path.display(),
+                "workspace trust hook completed with non-success status"
+            );
+        }
+    }
+}
+
 pub(crate) async fn run_pending_session_start_hooks(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
@@ -142,7 +202,11 @@ pub(crate) async fn run_pre_tool_use_hooks(
     } = sess.hooks().run_pre_tool_use(request).await;
     emit_hook_completed_events(sess, turn_context, hook_events).await;
 
-    if should_block { block_reason } else { None }
+    if should_block {
+        block_reason
+    } else {
+        None
+    }
 }
 
 pub(crate) async fn run_post_tool_use_hooks(
@@ -187,7 +251,8 @@ pub(crate) async fn run_permission_request_hooks(
         model: turn_context.model_info.slug.clone(),
         permission_mode: hook_permission_mode(turn_context),
         tool_name,
-        tool_input,
+        tool_input: json_object([("command", Value::String(tool_input))]),
+        permission_suggestions: Vec::new(),
     };
     let preview_runs = sess.hooks().preview_permission_request(&request);
     emit_hook_started_events(sess, turn_context, preview_runs).await;
@@ -352,7 +417,26 @@ async fn emit_hook_completed_events(
 }
 
 pub(crate) fn hook_permission_mode(turn_context: &TurnContext) -> String {
-    match turn_context.approval_policy.value() {
+    hook_permission_mode_from_approval_policy(turn_context.approval_policy.value())
+}
+
+fn hooks_for_config(config: &Config) -> Hooks {
+    let default_shell = shell::default_user_shell();
+    let mut hook_shell_argv = default_shell.derive_exec_args("", /*use_login_shell*/ false);
+    let hook_shell_program = hook_shell_argv.remove(0);
+    let _ = hook_shell_argv.pop();
+    Hooks::new(HooksConfig {
+        legacy_notify_argv: config.notify.clone(),
+        feature_enabled: config.features.enabled(Feature::CodexHooks),
+        config_layer_stack: Some(config.config_layer_stack.clone()),
+        shell_program: Some(hook_shell_program),
+        shell_args: hook_shell_argv,
+        settings_file: config.settings_file.clone(),
+    })
+}
+
+fn hook_permission_mode_from_approval_policy(approval_policy: AskForApproval) -> String {
+    match approval_policy {
         AskForApproval::Never => "bypassPermissions",
         AskForApproval::UnlessTrusted
         | AskForApproval::OnFailure
@@ -360,6 +444,13 @@ pub(crate) fn hook_permission_mode(turn_context: &TurnContext) -> String {
         | AskForApproval::Granular(_) => "default",
     }
     .to_string()
+}
+
+fn json_object(entries: impl IntoIterator<Item = (&'static str, Value)>) -> Map<String, Value> {
+    entries
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect()
 }
 
 #[cfg(test)]
