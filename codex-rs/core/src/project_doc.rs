@@ -2,6 +2,8 @@
 //!
 //! Project-level documentation is primarily stored in files named `AGENTS.md`.
 //! Additional fallback filenames can be configured via `project_doc_fallback_filenames`.
+//! By default, Claude-compatible fallbacks are also checked when `AGENTS.md`
+//! is absent.
 //! We include the concatenation of all files found along the path from the
 //! project root to the current working directory as follows:
 //!
@@ -16,10 +18,10 @@
 //! 3.  We do **not** walk past the project root.
 
 use crate::config::Config;
-use crate::config_loader::ConfigLayerStackOrdering;
 use crate::config_loader::default_project_root_markers;
 use crate::config_loader::merge_toml_values;
 use crate::config_loader::project_root_markers_from_config;
+use crate::config_loader::ConfigLayerStackOrdering;
 use codex_app_server_protocol::ConfigLayerSource;
 use codex_features::Feature;
 use dunce::canonicalize as normalize_path;
@@ -35,6 +37,8 @@ pub(crate) const HIERARCHICAL_AGENTS_MESSAGE: &str =
 pub const DEFAULT_PROJECT_DOC_FILENAME: &str = "AGENTS.md";
 /// Preferred local override for project-level docs.
 pub const LOCAL_PROJECT_DOC_FILENAME: &str = "AGENTS.override.md";
+/// Built-in fallback filenames used when `AGENTS.md` is absent.
+pub const DEFAULT_PROJECT_DOC_FALLBACK_FILENAMES: &[&str] = &["CLAUDE.md", ".claude/CLAUDE.md"];
 
 /// When both `Config::instructions` and the project doc are present, they will
 /// be concatenated with the following separator.

@@ -4,6 +4,7 @@ use codex_features::Feature;
 use core_test_support::PathBufExt;
 use core_test_support::TempDirExt;
 use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -350,6 +351,53 @@ async fn uses_configured_fallback_when_agents_missing() {
     assert_eq!(res, "example instructions");
 }
 
+/// Claude-compatible fallback filenames are used by default when AGENTS.md is absent.
+#[tokio::test]
+async fn uses_default_claude_md_fallback_when_agents_missing() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::write(tmp.path().join("CLAUDE.md"), "claude instructions").unwrap();
+
+    let cfg = make_config(&tmp, 4096, None).await;
+
+    let res = get_user_instructions(&cfg)
+        .await
+        .expect("CLAUDE.md fallback expected");
+
+    assert_eq!(res, "claude instructions");
+
+    let discovery = discover_project_doc_paths(&cfg).expect("discover paths");
+    assert_eq!(discovery.len(), 1);
+    assert!(discovery[0]
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .eq("CLAUDE.md"));
+}
+
+/// Nested `.claude/CLAUDE.md` is used by default when AGENTS.md is absent.
+#[tokio::test]
+async fn uses_default_nested_claude_md_fallback_when_agents_missing() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::create_dir_all(tmp.path().join(".claude")).unwrap();
+    fs::write(
+        tmp.path().join(".claude").join("CLAUDE.md"),
+        "nested claude instructions",
+    )
+    .unwrap();
+
+    let cfg = make_config(&tmp, 4096, None).await;
+
+    let res = get_user_instructions(&cfg)
+        .await
+        .expect("nested CLAUDE.md fallback expected");
+
+    assert_eq!(res, "nested claude instructions");
+
+    let discovery = discover_project_doc_paths(&cfg).expect("discover paths");
+    assert_eq!(discovery.len(), 1);
+    assert!(discovery[0].ends_with(Path::new(".claude").join("CLAUDE.md")));
+}
+
 /// AGENTS.md remains preferred when both AGENTS.md and fallbacks are present.
 #[tokio::test]
 async fn agents_md_preferred_over_fallbacks() {
@@ -373,13 +421,11 @@ async fn agents_md_preferred_over_fallbacks() {
 
     let discovery = discover_project_doc_paths(&cfg).expect("discover paths");
     assert_eq!(discovery.len(), 1);
-    assert!(
-        discovery[0]
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .eq(DEFAULT_PROJECT_DOC_FILENAME)
-    );
+    assert!(discovery[0]
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .eq(DEFAULT_PROJECT_DOC_FILENAME));
 }
 
 #[tokio::test]

@@ -1,6 +1,9 @@
+use crate::config::edit::apply_blocking;
 use crate::config::edit::ConfigEdit;
 use crate::config::edit::ConfigEditsBuilder;
-use crate::config::edit::apply_blocking;
+use crate::config_loader::RequirementSource;
+use crate::plugins::PluginsManager;
+use crate::project_doc::DEFAULT_PROJECT_DOC_FALLBACK_FILENAMES;
 use crate::config_loader::RequirementSource;
 use crate::plugins::PluginsManager;
 use assert_matches::assert_matches;
@@ -30,10 +33,10 @@ use serde::Deserialize;
 use tempfile::tempdir;
 
 use super::*;
+use core_test_support::test_absolute_path;
 use core_test_support::PathBufExt;
 use core_test_support::PathExt;
 use core_test_support::TempDirExt;
-use core_test_support::test_absolute_path;
 use pretty_assertions::assert_eq;
 
 use std::collections::BTreeMap;
@@ -41,6 +44,13 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 use tempfile::TempDir;
+
+fn default_project_doc_fallback_filenames() -> Vec<String> {
+    DEFAULT_PROJECT_DOC_FALLBACK_FILENAMES
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect()
+}
 
 fn stdio_mcp(command: &str) -> McpServerConfig {
     McpServerConfig {
@@ -929,13 +939,11 @@ fn permissions_profiles_allow_network_enablement() -> std::io::Result<()> {
         config.permissions.network_sandbox_policy.is_enabled(),
         "expected network sandbox policy to be enabled",
     );
-    assert!(
-        config
-            .permissions
-            .sandbox_policy
-            .get()
-            .has_full_network_access()
-    );
+    assert!(config
+        .permissions
+        .sandbox_policy
+        .get()
+        .has_full_network_access());
     Ok(())
 }
 
@@ -3007,8 +3015,8 @@ async fn set_feature_enabled_updates_profile() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn set_feature_enabled_persists_default_false_feature_disable_in_profile()
--> anyhow::Result<()> {
+async fn set_feature_enabled_persists_default_false_feature_disable_in_profile(
+) -> anyhow::Result<()> {
     let codex_home = TempDir::new()?;
 
     ConfigEditsBuilder::new(codex_home.path())
@@ -3363,8 +3371,8 @@ nickname_candidates = ["Noether"]
 }
 
 #[tokio::test]
-async fn agent_role_file_without_developer_instructions_is_dropped_with_warning()
--> std::io::Result<()> {
+async fn agent_role_file_without_developer_instructions_is_dropped_with_warning(
+) -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let repo_root = TempDir::new()?;
     let nested_cwd = repo_root.path().join("packages").join("app");
@@ -3420,11 +3428,148 @@ model = "gpt-5"
             .and_then(|role| role.description.as_deref()),
         Some("Review role")
     );
-    assert!(
-        config
-            .startup_warnings
-            .iter()
-            .any(|warning| warning.contains("must define `developer_instructions`"))
+    assert!(config
+        .startup_warnings
+        .iter()
+        .any(|warning| warning.contains("must define `developer_instructions`")));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn loads_claude_markdown_agent_roles_from_trusted_repo_without_dot_codex(
+) -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let repo_root = TempDir::new()?;
+    let nested_cwd = repo_root.path().join("packages").join("app");
+    std::fs::create_dir_all(repo_root.path().join(".git"))?;
+    std::fs::create_dir_all(&nested_cwd)?;
+
+    let workspace_key = repo_root.path().to_string_lossy().replace('\\', "\\\\");
+    tokio::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        format!(
+            r#"[projects."{workspace_key}"]
+trust_level = "trusted"
+"#
+        ),
+    )
+    .await?;
+
+    let claude_agents_dir = repo_root.path().join(".claude").join("agents");
+    tokio::fs::create_dir_all(&claude_agents_dir).await?;
+    tokio::fs::write(
+        claude_agents_dir.join("researcher.md"),
+        r#"---
+name: researcher
+description: Research role from Claude
+model: sonnet
+skills: testing-patterns
+---
+
+# Researcher
+
+Investigate carefully and cite concrete evidence.
+"#,
+    )
+    .await?;
+
+    let config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(ConfigOverrides {
+            cwd: Some(nested_cwd),
+            ..Default::default()
+        })
+        .build()
+        .await?;
+    let role = config
+        .agent_roles
+        .get("researcher")
+        .expect("researcher role should load from .claude/agents");
+    assert_eq!(
+        role.description.as_deref(),
+        Some("Research role from Claude")
+    );
+    assert_eq!(
+        role.config_file.as_ref(),
+        Some(&claude_agents_dir.join("researcher.md"))
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_codex_agent_role_takes_precedence_over_claude_markdown_role() -> std::io::Result<()>
+{
+    let codex_home = TempDir::new()?;
+    let repo_root = TempDir::new()?;
+    let nested_cwd = repo_root.path().join("packages").join("app");
+    std::fs::create_dir_all(repo_root.path().join(".git"))?;
+    std::fs::create_dir_all(&nested_cwd)?;
+
+    let workspace_key = repo_root.path().to_string_lossy().replace('\\', "\\\\");
+    tokio::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        format!(
+            r#"[projects."{workspace_key}"]
+trust_level = "trusted"
+"#
+        ),
+    )
+    .await?;
+
+    let claude_agents_dir = repo_root.path().join(".claude").join("agents");
+    tokio::fs::create_dir_all(&claude_agents_dir).await?;
+    tokio::fs::write(
+        claude_agents_dir.join("researcher.md"),
+        r#"---
+name: researcher
+description: Research role from Claude
+---
+
+Investigate carefully.
+"#,
+    )
+    .await?;
+
+    let codex_agents_dir = repo_root.path().join(".codex").join("agents");
+    tokio::fs::create_dir_all(&codex_agents_dir).await?;
+    tokio::fs::write(
+        codex_agents_dir.join("researcher.toml"),
+        r#"
+name = "researcher"
+description = "Research role from Codex"
+developer_instructions = "Research from Codex"
+nickname_candidates = ["Hypatia"]
+"#,
+    )
+    .await?;
+
+    let config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(ConfigOverrides {
+            cwd: Some(nested_cwd),
+            ..Default::default()
+        })
+        .build()
+        .await?;
+    let role = config
+        .agent_roles
+        .get("researcher")
+        .expect("researcher role should load");
+    assert_eq!(
+        role.description.as_deref(),
+        Some("Research role from Codex")
+    );
+    assert_eq!(
+        role.config_file.as_ref(),
+        Some(&codex_agents_dir.join("researcher.toml"))
+    );
+    assert_eq!(
+        role.nickname_candidates
+            .as_ref()
+            .map(|candidates| candidates.iter().map(String::as_str).collect::<Vec<_>>()),
+        Some(vec!["Hypatia"])
     );
 
     Ok(())
@@ -3524,12 +3669,10 @@ description = "Review role"
             .and_then(|role| role.description.as_deref()),
         Some("Review role")
     );
-    assert!(
-        config
-            .startup_warnings
-            .iter()
-            .any(|warning| warning.contains("agent role `researcher` must define a description"))
-    );
+    assert!(config
+        .startup_warnings
+        .iter()
+        .any(|warning| warning.contains("agent role `researcher` must define a description")));
 
     Ok(())
 }
@@ -3589,12 +3732,10 @@ developer_instructions = "Review carefully"
             .and_then(|role| role.description.as_deref()),
         Some("Review role")
     );
-    assert!(
-        config
-            .startup_warnings
-            .iter()
-            .any(|warning| warning.contains("must define a non-empty `name`"))
-    );
+    assert!(config
+        .startup_warnings
+        .iter()
+        .any(|warning| warning.contains("must define a non-empty `name`")));
 
     Ok(())
 }
@@ -3919,8 +4060,8 @@ developer_instructions = "Write carefully"
 }
 
 #[tokio::test]
-async fn mixed_legacy_and_standalone_agent_role_sources_merge_with_precedence()
--> std::io::Result<()> {
+async fn mixed_legacy_and_standalone_agent_role_sources_merge_with_precedence(
+) -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let repo_root = TempDir::new()?;
     let nested_cwd = repo_root.path().join("packages").join("app");
@@ -4065,8 +4206,8 @@ model = "gpt-5"
 }
 
 #[tokio::test]
-async fn higher_precedence_agent_role_can_inherit_description_from_lower_layer()
--> std::io::Result<()> {
+async fn higher_precedence_agent_role_can_inherit_description_from_lower_layer(
+) -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let repo_root = TempDir::new()?;
     let nested_cwd = repo_root.path().join("packages").join("app");
@@ -4215,10 +4356,9 @@ fn load_config_rejects_empty_agent_role_nickname_candidates() -> std::io::Result
     );
     let err = result.expect_err("empty nickname candidates should be rejected");
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-    assert!(
-        err.to_string()
-            .contains("agents.researcher.nickname_candidates")
-    );
+    assert!(err
+        .to_string()
+        .contains("agents.researcher.nickname_candidates"));
 
     Ok(())
 }
@@ -4250,12 +4390,48 @@ fn load_config_rejects_duplicate_agent_role_nickname_candidates() -> std::io::Re
     );
     let err = result.expect_err("duplicate nickname candidates should be rejected");
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-    assert!(
-        err.to_string()
-            .contains("agents.researcher.nickname_candidates cannot contain duplicates")
-    );
+    assert!(err
+        .to_string()
+        .contains("agents.researcher.nickname_candidates cannot contain duplicates"));
 
     Ok(())
+}
+
+#[test]
+fn load_instructions_falls_back_to_claude_home_when_codex_home_is_missing_docs() {
+    let codex_home = TempDir::new().expect("tempdir");
+    let claude_home = TempDir::new().expect("tempdir");
+    std::fs::write(
+        claude_home.path().join("CLAUDE.md"),
+        "claude home instructions\n",
+    )
+    .expect("write CLAUDE.md");
+
+    let instructions =
+        Config::load_instructions_from_locations(Some(codex_home.path()), Some(claude_home.path()));
+
+    assert_eq!(instructions.as_deref(), Some("claude home instructions"));
+}
+
+#[test]
+fn load_instructions_prefers_codex_home_docs_over_claude_home() {
+    let codex_home = TempDir::new().expect("tempdir");
+    let claude_home = TempDir::new().expect("tempdir");
+    std::fs::write(
+        codex_home.path().join("AGENTS.md"),
+        "codex home instructions\n",
+    )
+    .expect("write AGENTS.md");
+    std::fs::write(
+        claude_home.path().join("CLAUDE.md"),
+        "claude home instructions\n",
+    )
+    .expect("write CLAUDE.md");
+
+    let instructions =
+        Config::load_instructions_from_locations(Some(codex_home.path()), Some(claude_home.path()));
+
+    assert_eq!(instructions.as_deref(), Some("codex home instructions"));
 }
 
 #[test]
@@ -4507,7 +4683,7 @@ fn test_precedence_fixture_with_o3_profile() -> std::io::Result<()> {
             mcp_oauth_callback_url: None,
             model_providers: fixture.model_provider_map.clone(),
             project_doc_max_bytes: PROJECT_DOC_MAX_BYTES,
-            project_doc_fallback_filenames: Vec::new(),
+            project_doc_fallback_filenames: default_project_doc_fallback_filenames(),
             tool_output_token_limit: None,
             agent_max_threads: DEFAULT_AGENT_MAX_THREADS,
             agent_max_depth: DEFAULT_AGENT_MAX_DEPTH,
@@ -4650,7 +4826,7 @@ fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
         mcp_oauth_callback_url: None,
         model_providers: fixture.model_provider_map.clone(),
         project_doc_max_bytes: PROJECT_DOC_MAX_BYTES,
-        project_doc_fallback_filenames: Vec::new(),
+        project_doc_fallback_filenames: default_project_doc_fallback_filenames(),
         tool_output_token_limit: None,
         agent_max_threads: DEFAULT_AGENT_MAX_THREADS,
         agent_max_depth: DEFAULT_AGENT_MAX_DEPTH,
@@ -4791,7 +4967,7 @@ fn test_precedence_fixture_with_zdr_profile() -> std::io::Result<()> {
         mcp_oauth_callback_url: None,
         model_providers: fixture.model_provider_map.clone(),
         project_doc_max_bytes: PROJECT_DOC_MAX_BYTES,
-        project_doc_fallback_filenames: Vec::new(),
+        project_doc_fallback_filenames: default_project_doc_fallback_filenames(),
         tool_output_token_limit: None,
         agent_max_threads: DEFAULT_AGENT_MAX_THREADS,
         agent_max_depth: DEFAULT_AGENT_MAX_DEPTH,
@@ -4918,7 +5094,7 @@ fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
         mcp_oauth_callback_url: None,
         model_providers: fixture.model_provider_map.clone(),
         project_doc_max_bytes: PROJECT_DOC_MAX_BYTES,
-        project_doc_fallback_filenames: Vec::new(),
+        project_doc_fallback_filenames: default_project_doc_fallback_filenames(),
         tool_output_token_limit: None,
         agent_max_threads: DEFAULT_AGENT_MAX_THREADS,
         agent_max_depth: DEFAULT_AGENT_MAX_DEPTH,
@@ -5127,8 +5303,8 @@ trust_level = "trusted"
 }
 
 #[test]
-fn test_set_project_trusted_migrates_top_level_inline_projects_preserving_entries()
--> anyhow::Result<()> {
+fn test_set_project_trusted_migrates_top_level_inline_projects_preserving_entries(
+) -> anyhow::Result<()> {
     let initial = r#"toplevel = "baz"
 projects = { "/Users/mbolin/code/codex4" = { trust_level = "trusted", foo = "bar" } , "/Users/mbolin/code/codex3" = { trust_level = "trusted" } }
 model = "foo""#;
@@ -5204,11 +5380,9 @@ fn test_set_default_oss_provider_rejects_legacy_ollama_chat_provider() -> std::i
     assert!(result.is_err());
     let error = result.unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-    assert!(
-        error
-            .to_string()
-            .contains(OLLAMA_CHAT_PROVIDER_REMOVED_ERROR)
-    );
+    assert!(error
+        .to_string()
+        .contains(OLLAMA_CHAT_PROVIDER_REMOVED_ERROR));
 
     Ok(())
 }
@@ -5230,11 +5404,9 @@ fn test_load_config_rejects_legacy_ollama_chat_provider_with_helpful_error() -> 
     assert!(result.is_err());
     let error = result.unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
-    assert!(
-        error
-            .to_string()
-            .contains(OLLAMA_CHAT_PROVIDER_REMOVED_ERROR)
-    );
+    assert!(error
+        .to_string()
+        .contains(OLLAMA_CHAT_PROVIDER_REMOVED_ERROR));
 
     Ok(())
 }
@@ -5592,8 +5764,8 @@ fn test_untrusted_project_gets_unless_trusted_approval_policy() -> anyhow::Resul
 }
 
 #[tokio::test]
-async fn requirements_disallowing_default_sandbox_falls_back_to_required_default()
--> std::io::Result<()> {
+async fn requirements_disallowing_default_sandbox_falls_back_to_required_default(
+) -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
 
     let config = ConfigBuilder::default()
@@ -5688,8 +5860,8 @@ async fn requirements_web_search_mode_overrides_danger_full_access_default() -> 
 }
 
 #[tokio::test]
-async fn requirements_disallowing_default_approval_falls_back_to_required_default()
--> std::io::Result<()> {
+async fn requirements_disallowing_default_approval_falls_back_to_required_default(
+) -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let workspace = TempDir::new()?;
     let workspace_key = workspace.path().to_string_lossy().replace('\\', "\\\\");
@@ -5843,8 +6015,8 @@ async fn approvals_reviewer_defaults_to_manual_only_without_guardian_feature() -
 }
 
 #[tokio::test]
-async fn approvals_reviewer_stays_manual_only_when_guardian_feature_is_enabled()
--> std::io::Result<()> {
+async fn approvals_reviewer_stays_manual_only_when_guardian_feature_is_enabled(
+) -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     std::fs::write(
         codex_home.path().join(CONFIG_TOML_FILE),
