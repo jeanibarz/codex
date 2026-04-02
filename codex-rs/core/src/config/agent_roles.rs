@@ -4,6 +4,7 @@ use super::AgentsToml;
 use super::ConfigToml;
 use crate::config_loader::ConfigLayerStack;
 use crate::config_loader::ConfigLayerStackOrdering;
+use codex_git_utils::get_git_repo_root;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::AbsolutePathBufGuard;
 use serde::Deserialize;
@@ -17,6 +18,9 @@ use toml::Value as TomlValue;
 pub(crate) fn load_agent_roles(
     cfg: &ConfigToml,
     config_layer_stack: &ConfigLayerStack,
+    codex_home: &Path,
+    resolved_cwd: &Path,
+    trust_repo_agent_roles: bool,
     startup_warnings: &mut Vec<String>,
 ) -> std::io::Result<BTreeMap<String, AgentRoleConfig>> {
     let layers = config_layer_stack.get_layers(
@@ -24,10 +28,17 @@ pub(crate) fn load_agent_roles(
         /*include_disabled*/ false,
     );
     if layers.is_empty() {
-        return load_agent_roles_without_layers(cfg);
+        return load_agent_roles_without_layers(
+            cfg,
+            codex_home,
+            resolved_cwd,
+            trust_repo_agent_roles,
+            startup_warnings,
+        );
     }
 
-    let mut roles: BTreeMap<String, AgentRoleConfig> = BTreeMap::new();
+    let mut roles: BTreeMap<String, DiscoveredAgentRole> =
+        discover_home_claude_agent_roles(codex_home, startup_warnings)?;
     for layer in layers {
         let mut layer_roles: BTreeMap<String, AgentRoleConfig> = BTreeMap::new();
         let mut declared_role_files = BTreeSet::new();
@@ -91,7 +102,7 @@ pub(crate) fn load_agent_roles(
         for (role_name, role) in layer_roles {
             let mut merged_role = role;
             if let Some(existing_role) = roles.get(&role_name) {
-                merge_missing_role_fields(&mut merged_role, existing_role);
+                merge_missing_role_fields(&mut merged_role, &existing_role.config);
             }
             if let Err(err) = validate_required_agent_role_description(
                 &role_name,
@@ -100,11 +111,21 @@ pub(crate) fn load_agent_roles(
                 push_agent_role_warning(startup_warnings, err);
                 continue;
             }
-            roles.insert(role_name, merged_role);
+            roles.insert(role_name, DiscoveredAgentRole::layer(merged_role));
         }
     }
 
-    Ok(roles)
+    merge_repo_claude_agent_roles(
+        &mut roles,
+        resolved_cwd,
+        trust_repo_agent_roles,
+        startup_warnings,
+    )?;
+
+    Ok(roles
+        .into_iter()
+        .map(|(role_name, role)| (role_name, role.config))
+        .collect())
 }
 
 fn push_agent_role_warning(startup_warnings: &mut Vec<String>, err: std::io::Error) {
@@ -115,23 +136,45 @@ fn push_agent_role_warning(startup_warnings: &mut Vec<String>, err: std::io::Err
 
 fn load_agent_roles_without_layers(
     cfg: &ConfigToml,
+    codex_home: &Path,
+    resolved_cwd: &Path,
+    trust_repo_agent_roles: bool,
+    startup_warnings: &mut Vec<String>,
 ) -> std::io::Result<BTreeMap<String, AgentRoleConfig>> {
-    let mut roles = BTreeMap::new();
+    let mut roles: BTreeMap<String, DiscoveredAgentRole> =
+        discover_home_claude_agent_roles(codex_home, startup_warnings)?;
     if let Some(agents_toml) = cfg.agents.as_ref() {
         for (declared_role_name, role_toml) in &agents_toml.roles {
             let (role_name, role) = read_declared_role(declared_role_name, role_toml)?;
             validate_required_agent_role_description(&role_name, role.description.as_deref())?;
 
-            if roles.insert(role_name.clone(), role).is_some() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("duplicate agent role name `{role_name}` declared in config"),
-                ));
+            if let Some(existing_role) = roles.get(&role_name) {
+                if existing_role.origin == AgentRoleOrigin::Layer {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("duplicate agent role name `{role_name}` declared in config"),
+                    ));
+                }
             }
+            let mut merged_role = role;
+            if let Some(existing_role) = roles.get(&role_name) {
+                merge_missing_role_fields(&mut merged_role, &existing_role.config);
+            }
+            roles.insert(role_name.clone(), DiscoveredAgentRole::layer(merged_role));
         }
     }
 
-    Ok(roles)
+    merge_repo_claude_agent_roles(
+        &mut roles,
+        resolved_cwd,
+        trust_repo_agent_roles,
+        startup_warnings,
+    )?;
+
+    Ok(roles
+        .into_iter()
+        .map(|(role_name, role)| (role_name, role.config))
+        .collect())
 }
 
 fn read_declared_role(
@@ -201,6 +244,20 @@ struct RawAgentRoleFileToml {
     nickname_candidates: Option<Vec<String>>,
     #[serde(flatten)]
     config: ConfigToml,
+}
+
+#[derive(Deserialize, Debug, Clone, Default, PartialEq)]
+struct RawClaudeAgentFrontmatter {
+    name: Option<String>,
+    description: Option<String>,
+    skills: Option<ClaudeAgentSkills>,
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+enum ClaudeAgentSkills {
+    One(String),
+    Many(Vec<String>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -298,12 +355,257 @@ fn read_resolved_agent_role_file(
     role_name_hint: Option<&str>,
 ) -> std::io::Result<ResolvedAgentRoleFile> {
     let contents = std::fs::read_to_string(path)?;
-    parse_agent_role_file_contents(
-        &contents,
-        path,
-        path.parent().unwrap_or(path),
-        role_name_hint,
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some("md") => parse_claude_markdown_agent_role_file_contents(
+            &contents,
+            path,
+            role_name_hint.or_else(|| path.file_stem().and_then(|name| name.to_str())),
+        ),
+        _ => parse_agent_role_file_contents(
+            &contents,
+            path,
+            path.parent().unwrap_or(path),
+            role_name_hint,
+        ),
+    }
+}
+
+fn parse_claude_markdown_agent_role_file_contents(
+    contents: &str,
+    role_file_label: &Path,
+    role_name_hint: Option<&str>,
+) -> std::io::Result<ResolvedAgentRoleFile> {
+    let (frontmatter, body) = split_markdown_frontmatter(contents);
+    let parsed_frontmatter = match frontmatter {
+        Some(frontmatter) => serde_yaml::from_str::<RawClaudeAgentFrontmatter>(frontmatter)
+            .map_err(|err| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "failed to parse Claude agent frontmatter at {}: {err}",
+                        role_file_label.display()
+                    ),
+                )
+            })?,
+        None => RawClaudeAgentFrontmatter::default(),
+    };
+    let description = normalize_agent_role_description(
+        &format!("agent role file {}.description", role_file_label.display()),
+        parsed_frontmatter.description.as_deref(),
+    )?;
+    let role_name = parsed_frontmatter
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| role_name_hint.map(ToOwned::to_owned))
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "agent role file at {} must define a non-empty `name`",
+                    role_file_label.display()
+                ),
+            )
+        })?;
+
+    let developer_instructions =
+        render_claude_markdown_developer_instructions(body, parsed_frontmatter.skills.as_ref());
+    validate_agent_role_file_developer_instructions(
+        role_file_label,
+        Some(&developer_instructions),
+        role_name_hint.is_none(),
+    )?;
+
+    let mut config = TomlValue::try_from(ConfigToml {
+        developer_instructions: Some(developer_instructions),
+        ..Default::default()
+    })
+    .map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "failed to build Codex config for Claude agent role at {}: {err}",
+                role_file_label.display()
+            ),
+        )
+    })?;
+    let Some(config_table) = config.as_table_mut() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "generated config for Claude agent role at {} must contain a TOML table",
+                role_file_label.display()
+            ),
+        ));
+    };
+    config_table.remove("name");
+    config_table.remove("description");
+    config_table.remove("nickname_candidates");
+
+    Ok(ResolvedAgentRoleFile {
+        role_name,
+        description,
+        nickname_candidates: None,
+        config,
+    })
+}
+
+fn split_markdown_frontmatter(content: &str) -> (Option<&str>, &str) {
+    let mut segments = content.split_inclusive('\n');
+    let Some(first_segment) = segments.next() else {
+        return (None, "");
+    };
+    let first_line = first_segment.trim_end_matches(['\r', '\n']);
+    if first_line.trim() != "---" {
+        return (None, content);
+    }
+
+    let mut frontmatter_closed = false;
+    let frontmatter_start = first_segment.len();
+    let mut frontmatter_end = frontmatter_start;
+    let mut consumed = first_segment.len();
+
+    for segment in segments {
+        let line = segment.trim_end_matches(['\r', '\n']);
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            frontmatter_closed = true;
+            frontmatter_end = consumed;
+            consumed += segment.len();
+            break;
+        }
+        consumed += segment.len();
+    }
+
+    if !frontmatter_closed {
+        return (None, content);
+    }
+
+    (
+        Some(&content[frontmatter_start..frontmatter_end]),
+        if consumed >= content.len() {
+            ""
+        } else {
+            &content[consumed..]
+        },
     )
+}
+
+fn render_claude_markdown_developer_instructions(
+    body: &str,
+    skills: Option<&ClaudeAgentSkills>,
+) -> String {
+    let body = body.trim();
+    let Some(skills_note) = render_claude_skills_note(skills) else {
+        return body.to_string();
+    };
+    if body.is_empty() {
+        skills_note
+    } else {
+        format!("{skills_note}\n\n{body}")
+    }
+}
+
+fn render_claude_skills_note(skills: Option<&ClaudeAgentSkills>) -> Option<String> {
+    let skills = match skills? {
+        ClaudeAgentSkills::One(skill) => vec![skill.trim().to_string()],
+        ClaudeAgentSkills::Many(skills) => skills
+            .iter()
+            .map(|skill| skill.trim().to_string())
+            .collect(),
+    };
+    let skills = skills
+        .into_iter()
+        .filter(|skill| !skill.is_empty())
+        .collect::<Vec<_>>();
+    if skills.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "Preferred skills from the source Claude agent definition: {}.",
+            skills.join(", ")
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentRoleOrigin {
+    Compatibility,
+    Layer,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiscoveredAgentRole {
+    config: AgentRoleConfig,
+    origin: AgentRoleOrigin,
+}
+
+impl DiscoveredAgentRole {
+    fn compatibility(config: AgentRoleConfig) -> Self {
+        Self {
+            config,
+            origin: AgentRoleOrigin::Compatibility,
+        }
+    }
+
+    fn layer(config: AgentRoleConfig) -> Self {
+        Self {
+            config,
+            origin: AgentRoleOrigin::Layer,
+        }
+    }
+}
+
+fn discover_home_claude_agent_roles(
+    codex_home: &Path,
+    startup_warnings: &mut Vec<String>,
+) -> std::io::Result<BTreeMap<String, DiscoveredAgentRole>> {
+    let mut roles = BTreeMap::new();
+    let Some(home_dir) = codex_home.parent() else {
+        return Ok(roles);
+    };
+    for (role_name, role) in discover_agent_roles_in_dir(
+        &home_dir.join(".claude").join("agents"),
+        &BTreeSet::new(),
+        startup_warnings,
+    )? {
+        roles.insert(role_name, DiscoveredAgentRole::compatibility(role));
+    }
+    Ok(roles)
+}
+
+fn merge_repo_claude_agent_roles(
+    roles: &mut BTreeMap<String, DiscoveredAgentRole>,
+    resolved_cwd: &Path,
+    trust_repo_agent_roles: bool,
+    startup_warnings: &mut Vec<String>,
+) -> std::io::Result<()> {
+    if !trust_repo_agent_roles {
+        return Ok(());
+    }
+    let Some(repo_root) = get_git_repo_root(resolved_cwd) else {
+        return Ok(());
+    };
+    for (role_name, role) in discover_agent_roles_in_dir(
+        &repo_root.join(".claude").join("agents"),
+        &BTreeSet::new(),
+        startup_warnings,
+    )? {
+        match roles.get(&role_name) {
+            Some(existing_role) if existing_role.origin == AgentRoleOrigin::Layer => continue,
+            Some(existing_role) => {
+                let mut merged_role = role;
+                merge_missing_role_fields(&mut merged_role, &existing_role.config);
+                roles.insert(role_name, DiscoveredAgentRole::compatibility(merged_role));
+            }
+            None => {
+                roles.insert(role_name, DiscoveredAgentRole::compatibility(role));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn normalize_agent_role_description(
@@ -512,7 +814,7 @@ fn collect_agent_role_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> s
         if file_type.is_file()
             && path
                 .extension()
-                .is_some_and(|extension| extension == "toml")
+                .is_some_and(|extension| extension == "toml" || extension == "md")
         {
             files.push(path);
         }

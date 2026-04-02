@@ -1,5 +1,6 @@
 use crate::config::edit::ConfigEdit;
 use crate::config::edit::ConfigEditsBuilder;
+use crate::config_loader::load_config_layers_state;
 use crate::config_loader::CloudRequirementsLoader;
 use crate::config_loader::ConfigLayerStack;
 use crate::config_loader::ConfigLayerStackOrdering;
@@ -11,23 +12,23 @@ use crate::config_loader::McpServerIdentity;
 use crate::config_loader::McpServerRequirement;
 use crate::config_loader::ResidencyRequirement;
 use crate::config_loader::Sourced;
-use crate::config_loader::load_config_layers_state;
 use crate::memories::memory_root;
+use crate::model_provider_info::built_in_model_providers;
+use crate::model_provider_info::ModelProviderInfo;
 use crate::model_provider_info::LEGACY_OLLAMA_CHAT_PROVIDER_ID;
 use crate::model_provider_info::LMSTUDIO_OSS_PROVIDER_ID;
-use crate::model_provider_info::ModelProviderInfo;
 use crate::model_provider_info::OLLAMA_CHAT_PROVIDER_REMOVED_ERROR;
 use crate::model_provider_info::OLLAMA_OSS_PROVIDER_ID;
 use crate::model_provider_info::OPENAI_PROVIDER_ID;
-use crate::model_provider_info::built_in_model_providers;
 use crate::path_utils::normalize_for_native_workdir;
+use crate::project_doc::DEFAULT_PROJECT_DOC_FALLBACK_FILENAMES;
 use crate::project_doc::DEFAULT_PROJECT_DOC_FILENAME;
 use crate::project_doc::LOCAL_PROJECT_DOC_FILENAME;
 use crate::unified_exec::DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS;
 use crate::unified_exec::MIN_EMPTY_YIELD_TIME_MS;
-use crate::windows_sandbox::WindowsSandboxLevelExt;
 use crate::windows_sandbox::resolve_windows_sandbox_mode;
 use crate::windows_sandbox::resolve_windows_sandbox_private_desktop;
+use crate::windows_sandbox::WindowsSandboxLevelExt;
 use codex_app_server_protocol::Tools;
 use codex_app_server_protocol::UserSavedConfig;
 use codex_config::types::ApprovalsReviewer;
@@ -122,6 +123,7 @@ pub use codex_sandboxing::system_bwrap_warning;
 pub use managed_features::ManagedFeatures;
 pub use network_proxy_spec::NetworkProxySpec;
 pub use network_proxy_spec::StartedNetworkProxy;
+pub(crate) use permissions::resolve_permission_profile;
 pub use permissions::FilesystemPermissionToml;
 pub use permissions::FilesystemPermissionsToml;
 pub use permissions::NetworkDomainPermissionToml;
@@ -2277,8 +2279,14 @@ impl Config {
             .unwrap_or(WebSearchMode::Cached);
         let web_search_config = resolve_web_search_config(&cfg, &config_profile);
 
-        let agent_roles =
-            agent_roles::load_agent_roles(&cfg, &config_layer_stack, &mut startup_warnings)?;
+        let agent_roles = agent_roles::load_agent_roles(
+            &cfg,
+            &config_layer_stack,
+            codex_home.as_path(),
+            resolved_cwd.as_path(),
+            active_project.is_trusted(),
+            &mut startup_warnings,
+        )?;
 
         let openai_base_url = cfg
             .openai_base_url
@@ -2626,7 +2634,12 @@ impl Config {
             project_doc_max_bytes: cfg.project_doc_max_bytes.unwrap_or(PROJECT_DOC_MAX_BYTES),
             project_doc_fallback_filenames: cfg
                 .project_doc_fallback_filenames
-                .unwrap_or_default()
+                .unwrap_or_else(|| {
+                    DEFAULT_PROJECT_DOC_FALLBACK_FILENAMES
+                        .iter()
+                        .map(|name| (*name).to_string())
+                        .collect()
+                })
                 .into_iter()
                 .filter_map(|name| {
                     let trimmed = name.trim();
@@ -2772,10 +2785,28 @@ impl Config {
     }
 
     fn load_instructions(codex_dir: Option<&Path>) -> Option<String> {
-        let base = codex_dir?;
-        for candidate in [LOCAL_PROJECT_DOC_FILENAME, DEFAULT_PROJECT_DOC_FILENAME] {
-            let mut path = base.to_path_buf();
-            path.push(candidate);
+        let claude_home = dirs::home_dir().map(|path| path.join(".claude"));
+        Self::load_instructions_from_locations(codex_dir, claude_home.as_deref())
+    }
+
+    fn load_instructions_from_locations(
+        codex_dir: Option<&Path>,
+        claude_home: Option<&Path>,
+    ) -> Option<String> {
+        if let Some(base) = codex_dir {
+            for candidate in [LOCAL_PROJECT_DOC_FILENAME, DEFAULT_PROJECT_DOC_FILENAME] {
+                let mut path = base.to_path_buf();
+                path.push(candidate);
+                if let Ok(contents) = std::fs::read_to_string(&path) {
+                    let trimmed = contents.trim();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed.to_string());
+                    }
+                }
+            }
+        }
+        if let Some(base) = claude_home {
+            let path = base.join("CLAUDE.md");
             if let Ok(contents) = std::fs::read_to_string(&path) {
                 let trimmed = contents.trim();
                 if !trimmed.is_empty() {
