@@ -99,7 +99,7 @@ struct DependencyTool {
 }
 
 const SKILLS_FILENAME: &str = "SKILL.md";
-const AGENTS_DIR_NAME: &str = ".agents";
+const CLAUDE_DIR_NAME: &str = ".claude";
 const SKILLS_METADATA_DIR: &str = "agents";
 const SKILLS_METADATA_FILENAME: &str = "openai.yaml";
 const SKILLS_DIR_NAME: &str = "skills";
@@ -227,24 +227,12 @@ fn skill_roots_from_layer_stack_inner(
         };
 
         match &layer.name {
-            ConfigLayerSource::Project { .. } => {
-                roots.push(SkillRoot {
-                    path: config_folder.as_path().join(SKILLS_DIR_NAME),
-                    scope: SkillScope::Repo,
-                });
-            }
+            ConfigLayerSource::Project { .. } => {}
             ConfigLayerSource::User { .. } => {
-                // Deprecated user skills location (`$CODEX_HOME/skills`), kept for backward
-                // compatibility.
-                roots.push(SkillRoot {
-                    path: config_folder.as_path().join(SKILLS_DIR_NAME),
-                    scope: SkillScope::User,
-                });
-
-                // `$HOME/.agents/skills` (user-installed skills).
+                // `$HOME/.claude/skills` (user-installed Claude-compatible skills).
                 if let Some(home_dir) = home_dir {
                     roots.push(SkillRoot {
-                        path: home_dir.join(AGENTS_DIR_NAME).join(SKILLS_DIR_NAME),
+                        path: home_dir.join(CLAUDE_DIR_NAME).join(SKILLS_DIR_NAME),
                         scope: SkillScope::User,
                     });
                 }
@@ -280,10 +268,10 @@ fn repo_agents_skill_roots(config_layer_stack: &ConfigLayerStack, cwd: &Path) ->
     let dirs = dirs_between_project_root_and_cwd(cwd, &project_root);
     let mut roots = Vec::new();
     for dir in dirs {
-        let agents_skills = dir.join(AGENTS_DIR_NAME).join(SKILLS_DIR_NAME);
-        if agents_skills.is_dir() {
+        let claude_skills = dir.join(CLAUDE_DIR_NAME).join(SKILLS_DIR_NAME);
+        if claude_skills.is_dir() {
             roots.push(SkillRoot {
-                path: agents_skills,
+                path: claude_skills,
                 scope: SkillScope::Repo,
             });
         }

@@ -15,7 +15,14 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 
 fn write_user_skill(codex_home: &TempDir, dir: &str, name: &str, description: &str) {
-    let skill_dir = codex_home.path().join("skills").join(dir);
+    let skill_dir = codex_home.path().join(".claude").join("skills").join(dir);
+    fs::create_dir_all(&skill_dir).unwrap();
+    let content = format!("---\nname: {name}\ndescription: {description}\n---\n\n# Body\n");
+    fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+}
+
+fn write_skill_root(root: &TempDir, dir: &str, name: &str, description: &str) {
+    let skill_dir = root.path().join(dir);
     fs::create_dir_all(&skill_dir).unwrap();
     let content = format!("---\nname: {name}\ndescription: {description}\n---\n\n# Body\n");
     fs::write(skill_dir.join("SKILL.md"), content).unwrap();
@@ -157,13 +164,19 @@ async fn skills_for_config_reuses_cache_for_same_effective_config() {
     let codex_home = tempfile::tempdir().expect("tempdir");
     let cwd = tempfile::tempdir().expect("tempdir");
     let config_layer_stack = config_stack(&codex_home, "");
+    let user_skill_root = codex_home.path().join(".claude").join("skills");
     let skills_manager = SkillsManager::new(
         codex_home.path().to_path_buf(),
         /*bundled_skills_enabled*/ true,
     );
 
     write_user_skill(&codex_home, "a", "skill-a", "from a");
-    let outcome1 = skills_for_config_with_stack(&skills_manager, &cwd, &config_layer_stack, &[]);
+    let outcome1 = skills_for_config_with_stack(
+        &skills_manager,
+        &cwd,
+        &config_layer_stack,
+        std::slice::from_ref(&user_skill_root),
+    );
     assert!(
         outcome1.skills.iter().any(|s| s.name == "skill-a"),
         "expected skill-a to be discovered"
@@ -172,7 +185,12 @@ async fn skills_for_config_reuses_cache_for_same_effective_config() {
     // Write a new skill after the first call; the second call should reuse the config-aware cache
     // entry because the effective skill config is unchanged.
     write_user_skill(&codex_home, "b", "skill-b", "from b");
-    let outcome2 = skills_for_config_with_stack(&skills_manager, &cwd, &config_layer_stack, &[]);
+    let outcome2 = skills_for_config_with_stack(
+        &skills_manager,
+        &cwd,
+        &config_layer_stack,
+        std::slice::from_ref(&user_skill_root),
+    );
     assert_eq!(outcome2.errors, outcome1.errors);
     assert_eq!(outcome2.skills, outcome1.skills);
 }
@@ -238,7 +256,7 @@ async fn skills_for_cwd_reuses_cached_entry_even_when_entry_has_extra_roots() {
     );
     let _ = skills_for_config_with_stack(&skills_manager, &cwd, &config_layer_stack, &[]);
 
-    write_user_skill(&extra_root, "x", "extra-skill", "from extra root");
+    write_skill_root(&extra_root, "x", "extra-skill", "from extra root");
     let extra_root_path = extra_root.path().to_path_buf();
     let base_input = SkillsLoadInput::new(
         cwd.path().to_path_buf(),
@@ -335,8 +353,8 @@ async fn skills_for_cwd_with_extra_roots_only_refreshes_on_force_reload() {
     );
     let _ = skills_for_config_with_stack(&skills_manager, &cwd, &config_layer_stack, &[]);
 
-    write_user_skill(&extra_root_a, "x", "extra-skill-a", "from extra root a");
-    write_user_skill(&extra_root_b, "x", "extra-skill-b", "from extra root b");
+    write_skill_root(&extra_root_a, "x", "extra-skill-a", "from extra root a");
+    write_skill_root(&extra_root_b, "x", "extra-skill-b", "from extra root b");
 
     let extra_root_a_path = extra_root_a.path().to_path_buf();
     let base_input = SkillsLoadInput::new(
@@ -546,7 +564,11 @@ fn disabled_paths_for_skills_allows_name_selector_to_override_path_selector() {
 async fn skills_for_config_ignores_cwd_cache_when_session_flags_reenable_skill() {
     let codex_home = tempfile::tempdir().expect("tempdir");
     let cwd = tempfile::tempdir().expect("tempdir");
-    let skill_dir = codex_home.path().join("skills").join("demo");
+    let skill_dir = codex_home
+        .path()
+        .join(".claude")
+        .join("skills")
+        .join("demo");
     fs::create_dir_all(&skill_dir).expect("create skill dir");
     let skill_path = skill_dir.join("SKILL.md");
     fs::write(
@@ -554,6 +576,7 @@ async fn skills_for_config_ignores_cwd_cache_when_session_flags_reenable_skill()
         "---\nname: demo-skill\ndescription: demo description\n---\n\n# Body\n",
     )
     .expect("write skill");
+    let user_skill_root = codex_home.path().join(".claude").join("skills");
     let disabled_skill_config = path_toggle_config(&skill_path, /*enabled*/ false);
     let enabled_skill_config = path_toggle_config(&skill_path, /*enabled*/ true);
     let parent_stack = config_stack(&codex_home, &disabled_skill_config);
@@ -565,7 +588,7 @@ async fn skills_for_config_ignores_cwd_cache_when_session_flags_reenable_skill()
     );
     let parent_input = SkillsLoadInput::new(
         cwd.path().to_path_buf(),
-        Vec::new(),
+        vec![user_skill_root.clone()],
         parent_stack.clone(),
         bundled_skills_enabled_from_stack(&parent_stack),
     );
@@ -580,7 +603,12 @@ async fn skills_for_config_ignores_cwd_cache_when_session_flags_reenable_skill()
         .expect("demo skill should be discovered");
     assert_eq!(parent_outcome.is_skill_enabled(parent_skill), false);
 
-    let child_outcome = skills_for_config_with_stack(&skills_manager, &cwd, &child_stack, &[]);
+    let child_outcome = skills_for_config_with_stack(
+        &skills_manager,
+        &cwd,
+        &child_stack,
+        std::slice::from_ref(&user_skill_root),
+    );
     let child_skill = child_outcome
         .skills
         .iter()
