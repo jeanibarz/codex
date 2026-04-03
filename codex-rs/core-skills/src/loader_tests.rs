@@ -1,9 +1,9 @@
 use super::*;
-use codex_config::CONFIG_TOML_FILE;
 use codex_config::ConfigLayerEntry;
 use codex_config::ConfigLayerStack;
 use codex_config::ConfigRequirements;
 use codex_config::ConfigRequirementsToml;
+use codex_config::CONFIG_TOML_FILE;
 use codex_protocol::protocol::Product;
 use codex_protocol::protocol::SkillScope;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -131,8 +131,8 @@ fn normalized(path: &Path) -> PathBuf {
 }
 
 #[test]
-fn skill_roots_from_layer_stack_maps_user_to_user_and_system_cache_and_system_to_admin()
--> anyhow::Result<()> {
+fn skill_roots_from_layer_stack_maps_user_to_user_and_system_cache_and_system_to_admin(
+) -> anyhow::Result<()> {
     let tmp = tempfile::tempdir()?;
 
     let system_folder = tmp.path().join("etc/codex");
@@ -1149,6 +1149,42 @@ async fn loads_short_description_from_metadata() {
             name: "demo-skill".to_string(),
             description: "long description".to_string(),
             short_description: Some("short summary".to_string()),
+            interface: None,
+            dependencies: None,
+            policy: None,
+            path_to_skills_md: normalized(&skill_path),
+            scope: SkillScope::User,
+        }]
+    );
+}
+
+#[tokio::test]
+async fn ignores_claude_specific_frontmatter_fields_when_loading_skills() {
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    let skill_path = write_raw_skill_at(
+        &codex_home.path().join("skills"),
+        "claude-compat",
+        r#"name: claude-compat
+description: Claude-compatible skill
+keywords: oss, pr, distill
+related: [[oss-pr-threshold]], [[oss-pr-state]], [[oss-pr-critic]]
+allowed-tools: Read, Write, Edit"#,
+    );
+
+    let cfg = make_config(&codex_home).await;
+    let outcome = load_skills_for_test(&cfg);
+
+    assert!(
+        outcome.errors.is_empty(),
+        "unexpected errors: {:?}",
+        outcome.errors
+    );
+    assert_eq!(
+        outcome.skills,
+        vec![SkillMetadata {
+            name: "claude-compat".to_string(),
+            description: "Claude-compatible skill".to_string(),
+            short_description: None,
             interface: None,
             dependencies: None,
             policy: None,

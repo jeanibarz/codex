@@ -7,11 +7,11 @@ use crate::model::SkillPolicy;
 use crate::model::SkillToolDependency;
 use crate::system::system_cache_root_dir;
 use codex_app_server_protocol::ConfigLayerSource;
-use codex_config::ConfigLayerStack;
-use codex_config::ConfigLayerStackOrdering;
 use codex_config::default_project_root_markers;
 use codex_config::merge_toml_values;
 use codex_config::project_root_markers_from_config;
+use codex_config::ConfigLayerStack;
+use codex_config::ConfigLayerStackOrdering;
 use codex_protocol::protocol::Product;
 use codex_protocol::protocol::SkillScope;
 use codex_utils_absolute_path::AbsolutePathBufGuard;
@@ -497,8 +497,7 @@ fn parse_skill_file(path: &Path, scope: SkillScope) -> Result<SkillMetadata, Ski
 
     let frontmatter = extract_frontmatter(&contents).ok_or(SkillParseError::MissingFrontmatter)?;
 
-    let parsed: SkillFrontmatter =
-        serde_yaml::from_str(&frontmatter).map_err(SkillParseError::InvalidYaml)?;
+    let parsed = parse_skill_frontmatter(&frontmatter)?;
 
     let base_name = parsed
         .name
@@ -546,6 +545,130 @@ fn parse_skill_file(path: &Path, scope: SkillScope) -> Result<SkillMetadata, Ski
         path_to_skills_md: resolved_path,
         scope,
     })
+}
+
+fn parse_skill_frontmatter(frontmatter: &str) -> Result<SkillFrontmatter, SkillParseError> {
+    match serde_yaml::from_str(frontmatter) {
+        Ok(parsed) => Ok(parsed),
+        Err(original_error) => {
+            let filtered_frontmatter = filter_supported_skill_frontmatter(frontmatter);
+            if filtered_frontmatter.trim() == frontmatter.trim() {
+                return Err(SkillParseError::InvalidYaml(original_error));
+            }
+
+            serde_yaml::from_str(&filtered_frontmatter)
+                .map_err(|_| SkillParseError::InvalidYaml(original_error))
+        }
+    }
+}
+
+fn filter_supported_skill_frontmatter(frontmatter: &str) -> String {
+    let mut filtered_lines = Vec::new();
+    let lines: Vec<&str> = frontmatter.lines().collect();
+    let mut index = 0;
+
+    while index < lines.len() {
+        let line = lines[index];
+        let trimmed = line.trim();
+        let indentation = line.len() - line.trim_start().len();
+
+        if trimmed.is_empty() {
+            filtered_lines.push(line);
+            index += 1;
+            continue;
+        }
+
+        if indentation != 0 {
+            index += 1;
+            continue;
+        }
+
+        let Some((key, value)) = trimmed.split_once(':') else {
+            index += 1;
+            continue;
+        };
+
+        match key.trim() {
+            "name" => {
+                filtered_lines.push(line);
+                index += 1;
+            }
+            "description" => {
+                filtered_lines.push(line);
+                index += 1;
+                if uses_yaml_block_scalar(value) {
+                    while index < lines.len() {
+                        let next_line = lines[index];
+                        let next_trimmed = next_line.trim();
+                        let next_indentation = next_line.len() - next_line.trim_start().len();
+                        if !next_trimmed.is_empty() && next_indentation == 0 {
+                            break;
+                        }
+                        filtered_lines.push(next_line);
+                        index += 1;
+                    }
+                }
+            }
+            "metadata" => {
+                filtered_lines.push(line);
+                index += 1;
+                while index < lines.len() {
+                    let next_line = lines[index];
+                    let next_trimmed = next_line.trim();
+                    let next_indentation = next_line.len() - next_line.trim_start().len();
+                    if !next_trimmed.is_empty() && next_indentation == 0 {
+                        break;
+                    }
+                    if next_trimmed.is_empty() {
+                        filtered_lines.push(next_line);
+                        index += 1;
+                        continue;
+                    }
+                    if next_indentation < 2 {
+                        index += 1;
+                        continue;
+                    }
+
+                    let Some((nested_key, nested_value)) = next_trimmed.split_once(':') else {
+                        index += 1;
+                        continue;
+                    };
+
+                    if nested_key.trim() == "short-description" {
+                        filtered_lines.push(next_line);
+                        index += 1;
+                        if uses_yaml_block_scalar(nested_value) {
+                            while index < lines.len() {
+                                let continuation_line = lines[index];
+                                let continuation_trimmed = continuation_line.trim();
+                                let continuation_indentation =
+                                    continuation_line.len() - continuation_line.trim_start().len();
+                                if !continuation_trimmed.is_empty()
+                                    && continuation_indentation <= next_indentation
+                                {
+                                    break;
+                                }
+                                filtered_lines.push(continuation_line);
+                                index += 1;
+                            }
+                        }
+                        continue;
+                    }
+
+                    index += 1;
+                }
+            }
+            _ => {
+                index += 1;
+            }
+        }
+    }
+
+    filtered_lines.join("\n")
+}
+
+fn uses_yaml_block_scalar(value: &str) -> bool {
+    matches!(value.trim_start().chars().next(), Some('|' | '>'))
 }
 
 fn default_skill_name(path: &Path) -> String {
@@ -642,7 +765,11 @@ fn resolve_interface(interface: Option<Interface>, skill_dir: &Path) -> Option<S
         || interface.icon_large.is_some()
         || interface.brand_color.is_some()
         || interface.default_prompt.is_some();
-    if has_fields { Some(interface) } else { None }
+    if has_fields {
+        Some(interface)
+    } else {
+        None
+    }
 }
 
 fn resolve_dependencies(dependencies: Option<Dependencies>) -> Option<SkillDependencies> {
