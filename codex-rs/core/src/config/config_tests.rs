@@ -3600,6 +3600,60 @@ developer_instructions = "Review carefully"
 }
 
 #[tokio::test]
+async fn discovers_repo_claude_markdown_agent_roles_without_dot_codex() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let repo_root = TempDir::new()?;
+    let nested_cwd = repo_root.path().join("packages").join("app");
+    std::fs::create_dir_all(repo_root.path().join(".git"))?;
+    std::fs::create_dir_all(&nested_cwd)?;
+
+    let workspace_key = repo_root.path().to_string_lossy().replace('\\', "\\\\");
+    tokio::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        format!(
+            r#"[projects."{workspace_key}"]
+trust_level = "trusted"
+"#
+        ),
+    )
+    .await?;
+
+    let claude_agents_dir = repo_root.path().join(".claude").join("agents");
+    tokio::fs::create_dir_all(&claude_agents_dir).await?;
+    let role_path = claude_agents_dir.join("api-surface-auditor.md");
+    tokio::fs::write(
+        &role_path,
+        r#"---
+name: api-surface-auditor
+description: Audit API surface
+model: sonnet
+---
+
+Audit the API thoroughly.
+"#,
+    )
+    .await?;
+
+    let config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(ConfigOverrides {
+            cwd: Some(nested_cwd),
+            ..Default::default()
+        })
+        .build()
+        .await?;
+
+    let role = config
+        .agent_roles
+        .get("api-surface-auditor")
+        .expect("repo Claude agent role should be discovered");
+    assert_eq!(role.description.as_deref(), Some("Audit API surface"));
+    assert_eq!(role.config_file.as_ref(), Some(&role_path));
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn agent_role_file_name_takes_precedence_over_config_key() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let role_config_path = codex_home.path().join("agents").join("researcher.toml");
