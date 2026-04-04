@@ -40,7 +40,7 @@ pub struct CliConfigOverrides {
     /// Path to a JSON settings file containing additional hook definitions,
     /// merged additively with existing config. Used by external supervisors
     /// to inject per-session hooks.
-    #[clap(skip)]
+    #[arg(long = "settings", value_name = "FILE", global = true)]
     pub settings_file: Option<PathBuf>,
 }
 

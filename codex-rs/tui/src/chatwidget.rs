@@ -11022,6 +11022,8 @@ fn hook_event_label(event_name: codex_protocol::protocol::HookEventName) -> &'st
     match event_name {
         codex_protocol::protocol::HookEventName::PreToolUse => "PreToolUse",
         codex_protocol::protocol::HookEventName::PostToolUse => "PostToolUse",
+        codex_protocol::protocol::HookEventName::PostToolUseFailure => "PostToolUseFailure",
+        codex_protocol::protocol::HookEventName::Notification => "Notification",
         codex_protocol::protocol::HookEventName::SessionStart => "SessionStart",
         codex_protocol::protocol::HookEventName::PermissionRequest => "PermissionRequest",
         codex_protocol::protocol::HookEventName::UserPromptSubmit => "UserPromptSubmit",

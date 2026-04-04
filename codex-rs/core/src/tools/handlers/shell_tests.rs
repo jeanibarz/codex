@@ -6,6 +6,7 @@ use pretty_assertions::assert_eq;
 
 use crate::codex::make_session_and_context;
 use crate::exec_env::create_env;
+use crate::function_tool::FunctionCallError;
 use crate::sandboxing::SandboxPermissions;
 use crate::shell::Shell;
 use crate::shell::ShellType;
@@ -280,6 +281,30 @@ fn build_post_tool_use_payload_uses_tool_output_wire_value() {
         Some(crate::tools::registry::PostToolUsePayload {
             command: "printf shell command".to_string(),
             tool_response: json!("shell output"),
+        })
+    );
+}
+
+#[test]
+fn build_post_tool_use_failure_payload_uses_tool_input_wire_value() {
+    let payload = ToolPayload::Function {
+        arguments: json!({ "command": "printf shell command" }).to_string(),
+    };
+    let handler = ShellCommandHandler {
+        backend: super::ShellCommandBackend::Classic,
+    };
+
+    assert_eq!(
+        handler.post_tool_use_failure_payload(
+            "call-42",
+            &payload,
+            &FunctionCallError::RespondToModel("shell failed".to_string()),
+        ),
+        Some(crate::tools::registry::PostToolUseFailurePayload {
+            command: "printf shell command".to_string(),
+            tool_input: json!({ "command": "printf shell command" }),
+            error: "shell failed".to_string(),
+            is_interrupt: false,
         })
     );
 }

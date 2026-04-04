@@ -2,6 +2,12 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "definitions": {
+    "BlockDecisionWire": {
+      "enum": [
+        "block"
+      ],
+      "type": "string"
+    },
     "HookEventNameWire": {
       "enum": [
         "PreToolUse",
@@ -15,7 +21,7 @@
       ],
       "type": "string"
     },
-    "PermissionRequestHookSpecificOutputWire": {
+    "PostToolUseFailureHookSpecificOutputWire": {
       "additionalProperties": false,
       "properties": {
         "additionalContext": {
@@ -24,6 +30,9 @@
         },
         "hookEventName": {
           "$ref": "#/definitions/HookEventNameWire"
+        },
+        "updatedMCPToolOutput": {
+          "default": null
         }
       },
       "required": [
@@ -37,13 +46,25 @@
       "default": true,
       "type": "boolean"
     },
-    "hookSpecificOutput": {
+    "decision": {
       "allOf": [
         {
-          "$ref": "#/definitions/PermissionRequestHookSpecificOutputWire"
+          "$ref": "#/definitions/BlockDecisionWire"
         }
       ],
       "default": null
+    },
+    "hookSpecificOutput": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/PostToolUseFailureHookSpecificOutputWire"
+        }
+      ],
+      "default": null
+    },
+    "reason": {
+      "default": null,
+      "type": "string"
     },
     "stopReason": {
       "default": null,
@@ -58,6 +79,6 @@
       "type": "string"
     }
   },
-  "title": "permission-request.command.output",
+  "title": "post-tool-use-failure.command.output",
   "type": "object"
 }

@@ -15,7 +15,7 @@
       ],
       "type": "string"
     },
-    "PermissionRequestHookSpecificOutputWire": {
+    "NotificationHookSpecificOutputWire": {
       "additionalProperties": false,
       "properties": {
         "additionalContext": {
@@ -40,7 +40,7 @@
     "hookSpecificOutput": {
       "allOf": [
         {
-          "$ref": "#/definitions/PermissionRequestHookSpecificOutputWire"
+          "$ref": "#/definitions/NotificationHookSpecificOutputWire"
         }
       ],
       "default": null
@@ -58,6 +58,6 @@
       "type": "string"
     }
   },
-  "title": "permission-request.command.output",
+  "title": "notification.command.output",
   "type": "object"
 }

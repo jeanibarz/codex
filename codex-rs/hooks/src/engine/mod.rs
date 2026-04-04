@@ -12,8 +12,12 @@ use codex_protocol::protocol::HookRunSummary;
 
 use crate::events::permission_request::PermissionRequestOutcome;
 use crate::events::permission_request::PermissionRequestRequest;
+use crate::events::notification::NotificationOutcome;
+use crate::events::notification::NotificationRequest;
 use crate::events::post_tool_use::PostToolUseOutcome;
 use crate::events::post_tool_use::PostToolUseRequest;
+use crate::events::post_tool_use_failure::PostToolUseFailureOutcome;
+use crate::events::post_tool_use_failure::PostToolUseFailureRequest;
 use crate::events::pre_tool_use::PreToolUseOutcome;
 use crate::events::pre_tool_use::PreToolUseRequest;
 use crate::events::session_start::SessionStartOutcome;
@@ -33,6 +37,7 @@ pub(crate) struct CommandShell {
 pub(crate) struct ConfiguredHandler {
     pub event_name: codex_protocol::protocol::HookEventName,
     pub matcher: Option<String>,
+    pub condition: Option<String>,
     pub command: String,
     pub timeout_sec: u64,
     pub status_message: Option<String>,
@@ -54,6 +59,8 @@ impl ConfiguredHandler {
         match self.event_name {
             codex_protocol::protocol::HookEventName::PreToolUse => "pre-tool-use",
             codex_protocol::protocol::HookEventName::PostToolUse => "post-tool-use",
+            codex_protocol::protocol::HookEventName::PostToolUseFailure => "post-tool-use-failure",
+            codex_protocol::protocol::HookEventName::Notification => "notification",
             codex_protocol::protocol::HookEventName::SessionStart => "session-start",
             codex_protocol::protocol::HookEventName::UserPromptSubmit => "user-prompt-submit",
             codex_protocol::protocol::HookEventName::Stop => "stop",
@@ -126,6 +133,20 @@ impl ClaudeHooksEngine {
         crate::events::post_tool_use::preview(&self.handlers, request)
     }
 
+    pub(crate) fn preview_post_tool_use_failure(
+        &self,
+        request: &PostToolUseFailureRequest,
+    ) -> Vec<HookRunSummary> {
+        crate::events::post_tool_use_failure::preview(&self.handlers, request)
+    }
+
+    pub(crate) fn preview_notification(
+        &self,
+        request: &NotificationRequest,
+    ) -> Vec<HookRunSummary> {
+        crate::events::notification::preview(&self.handlers, request)
+    }
+
     pub(crate) fn preview_permission_request(
         &self,
         request: &PermissionRequestRequest,
@@ -150,6 +171,20 @@ impl ClaudeHooksEngine {
         request: PostToolUseRequest,
     ) -> PostToolUseOutcome {
         crate::events::post_tool_use::run(&self.handlers, &self.shell, request).await
+    }
+
+    pub(crate) async fn run_post_tool_use_failure(
+        &self,
+        request: PostToolUseFailureRequest,
+    ) -> PostToolUseFailureOutcome {
+        crate::events::post_tool_use_failure::run(&self.handlers, &self.shell, request).await
+    }
+
+    pub(crate) async fn run_notification(
+        &self,
+        request: NotificationRequest,
+    ) -> NotificationOutcome {
+        crate::events::notification::run(&self.handlers, &self.shell, request).await
     }
 
     pub(crate) fn preview_user_prompt_submit(

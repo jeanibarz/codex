@@ -43,3 +43,24 @@ fn main() -> anyhow::Result<()> {
         Ok(())
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn top_cli_keeps_root_level_settings_file_for_inner_cli() {
+        let cli = TopCli::parse_from(["codex", "--settings", "/tmp/settings.json", "hello"]);
+
+        let mut inner = cli.inner;
+        if inner.config_overrides.settings_file.is_none() {
+            inner.config_overrides.settings_file = cli.config_overrides.settings_file;
+        }
+
+        assert_eq!(
+            inner.config_overrides.settings_file.as_deref(),
+            Some(std::path::Path::new("/tmp/settings.json"))
+        );
+    }
+}

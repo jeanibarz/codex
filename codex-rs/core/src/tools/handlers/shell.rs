@@ -28,6 +28,7 @@ use crate::tools::handlers::parse_arguments_with_base_path;
 use crate::tools::handlers::resolve_workdir_base_path;
 use crate::tools::orchestrator::ToolOrchestrator;
 use crate::tools::registry::PostToolUsePayload;
+use crate::tools::registry::PostToolUseFailurePayload;
 use crate::tools::registry::PreToolUsePayload;
 use crate::tools::registry::ToolHandler;
 use crate::tools::registry::ToolKind;
@@ -73,6 +74,22 @@ fn shell_command_payload_command(payload: &ToolPayload) -> Option<String> {
     parse_arguments::<ShellCommandToolCallParams>(arguments)
         .ok()
         .map(|params| params.command)
+}
+
+fn shell_failure_tool_input(payload: &ToolPayload) -> Option<JsonValue> {
+    match payload {
+        ToolPayload::Function { arguments } => serde_json::from_str(arguments).ok(),
+        ToolPayload::LocalShell { params } => Some(serde_json::json!({
+            "command": params.command,
+            "workdir": params.workdir,
+            "timeout_ms": params.timeout_ms,
+            "sandbox_permissions": params.sandbox_permissions,
+            "prefix_rule": params.prefix_rule,
+            "additional_permissions": params.additional_permissions,
+            "justification": params.justification,
+        })),
+        _ => None,
+    }
 }
 
 struct RunExecLikeArgs {
@@ -222,6 +239,20 @@ impl ToolHandler for ShellHandler {
         })
     }
 
+    fn post_tool_use_failure_payload(
+        &self,
+        _call_id: &str,
+        payload: &ToolPayload,
+        error: &FunctionCallError,
+    ) -> Option<PostToolUseFailurePayload> {
+        Some(PostToolUseFailurePayload {
+            command: shell_payload_command(payload)?,
+            tool_input: shell_failure_tool_input(payload)?,
+            error: error.to_string(),
+            is_interrupt: false,
+        })
+    }
+
     async fn handle(&self, invocation: ToolInvocation) -> Result<Self::Output, FunctionCallError> {
         let ToolInvocation {
             session,
@@ -327,6 +358,20 @@ impl ToolHandler for ShellCommandHandler {
         Some(PostToolUsePayload {
             command: shell_command_payload_command(payload)?,
             tool_response,
+        })
+    }
+
+    fn post_tool_use_failure_payload(
+        &self,
+        _call_id: &str,
+        payload: &ToolPayload,
+        error: &FunctionCallError,
+    ) -> Option<PostToolUseFailurePayload> {
+        Some(PostToolUseFailurePayload {
+            command: shell_command_payload_command(payload)?,
+            tool_input: shell_failure_tool_input(payload)?,
+            error: error.to_string(),
+            is_interrupt: false,
         })
     }
 

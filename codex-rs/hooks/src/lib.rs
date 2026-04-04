@@ -5,10 +5,14 @@ mod registry;
 mod schema;
 mod types;
 
+pub use events::notification::NotificationOutcome;
+pub use events::notification::NotificationRequest;
 pub use events::permission_request::PermissionRequestOutcome;
 pub use events::permission_request::PermissionRequestRequest;
 pub use events::post_tool_use::PostToolUseOutcome;
 pub use events::post_tool_use::PostToolUseRequest;
+pub use events::post_tool_use_failure::PostToolUseFailureOutcome;
+pub use events::post_tool_use_failure::PostToolUseFailureRequest;
 pub use events::pre_tool_use::PreToolUseOutcome;
 pub use events::pre_tool_use::PreToolUseRequest;
 pub use events::session_start::SessionStartOutcome;

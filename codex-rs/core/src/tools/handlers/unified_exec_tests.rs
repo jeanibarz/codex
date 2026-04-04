@@ -1,4 +1,5 @@
 use super::*;
+use crate::function_tool::FunctionCallError;
 use crate::shell::default_user_shell;
 use crate::tools::handlers::parse_arguments_with_base_path;
 use crate::tools::handlers::resolve_workdir_base_path;
@@ -324,5 +325,26 @@ fn exec_command_post_tool_use_payload_skips_running_sessions() {
     assert_eq!(
         UnifiedExecHandler.post_tool_use_payload("call-45", &payload, &output),
         None
+    );
+}
+
+#[test]
+fn exec_command_post_tool_use_failure_payload_uses_original_input() {
+    let payload = ToolPayload::Function {
+        arguments: serde_json::json!({ "cmd": "echo three", "tty": false }).to_string(),
+    };
+
+    assert_eq!(
+        UnifiedExecHandler.post_tool_use_failure_payload(
+            "call-46",
+            &payload,
+            &FunctionCallError::RespondToModel("exec failed".to_string()),
+        ),
+        Some(crate::tools::registry::PostToolUseFailurePayload {
+            command: "echo three".to_string(),
+            tool_input: serde_json::json!({ "cmd": "echo three", "tty": false }),
+            error: "exec failed".to_string(),
+            is_interrupt: false,
+        })
     );
 }

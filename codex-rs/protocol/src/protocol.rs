@@ -1425,6 +1425,8 @@ pub enum EventMsg {
 pub enum HookEventName {
     PreToolUse,
     PostToolUse,
+    PostToolUseFailure,
+    Notification,
     SessionStart,
     PermissionRequest,
     UserPromptSubmit,

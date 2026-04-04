@@ -14,6 +14,9 @@ use crate::engine::ConfiguredHandler;
 use crate::engine::command_runner::CommandRunResult;
 use crate::engine::dispatcher;
 use crate::engine::output_parser;
+use crate::schema::CodexHookCapabilitiesWire;
+use crate::schema::CodexHookHandlerFeaturesWire;
+use crate::schema::HookEventNameWire;
 use crate::schema::SessionStartCommandInput;
 
 #[derive(Debug, Clone, Copy)]
@@ -97,6 +100,7 @@ pub(crate) async fn run(
         request.model.clone(),
         request.permission_mode.clone(),
         request.source.as_str().to_string(),
+        supported_capabilities_wire(),
     )) {
         Ok(input_json) => input_json,
         Err(error) => {
@@ -133,6 +137,25 @@ pub(crate) async fn run(
         should_stop,
         stop_reason,
         additional_contexts,
+    }
+}
+
+fn supported_capabilities_wire() -> CodexHookCapabilitiesWire {
+    CodexHookCapabilitiesWire {
+        surface_version: 2,
+        supported_events: vec![
+            HookEventNameWire::SessionStart,
+            HookEventNameWire::PreToolUse,
+            HookEventNameWire::PostToolUse,
+            HookEventNameWire::PostToolUseFailure,
+            HookEventNameWire::Notification,
+            HookEventNameWire::PermissionRequest,
+            HookEventNameWire::UserPromptSubmit,
+            HookEventNameWire::Stop,
+        ],
+        handler_features: CodexHookHandlerFeaturesWire {
+            command_if: true,
+        },
     }
 }
 
@@ -354,6 +377,7 @@ mod tests {
         ConfiguredHandler {
             event_name: HookEventName::SessionStart,
             matcher: None,
+            condition: None,
             command: "echo hook".to_string(),
             timeout_sec: 600,
             status_message: None,

@@ -15,6 +15,10 @@ use std::path::PathBuf;
 const GENERATED_DIR: &str = "generated";
 const POST_TOOL_USE_INPUT_FIXTURE: &str = "post-tool-use.command.input.schema.json";
 const POST_TOOL_USE_OUTPUT_FIXTURE: &str = "post-tool-use.command.output.schema.json";
+const POST_TOOL_USE_FAILURE_INPUT_FIXTURE: &str = "post-tool-use-failure.command.input.schema.json";
+const POST_TOOL_USE_FAILURE_OUTPUT_FIXTURE: &str = "post-tool-use-failure.command.output.schema.json";
+const NOTIFICATION_INPUT_FIXTURE: &str = "notification.command.input.schema.json";
+const NOTIFICATION_OUTPUT_FIXTURE: &str = "notification.command.output.schema.json";
 const PERMISSION_REQUEST_INPUT_FIXTURE: &str = "permission-request.command.input.schema.json";
 const PERMISSION_REQUEST_OUTPUT_FIXTURE: &str = "permission-request.command.output.schema.json";
 const PRE_TOOL_USE_INPUT_FIXTURE: &str = "pre-tool-use.command.input.schema.json";
@@ -73,6 +77,10 @@ pub(crate) enum HookEventNameWire {
     PreToolUse,
     #[serde(rename = "PostToolUse")]
     PostToolUse,
+    #[serde(rename = "PostToolUseFailure")]
+    PostToolUseFailure,
+    #[serde(rename = "Notification")]
+    Notification,
     #[serde(rename = "SessionStart")]
     SessionStart,
     #[serde(rename = "UserPromptSubmit")]
@@ -116,7 +124,34 @@ pub(crate) struct PostToolUseCommandOutputWire {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[serde(deny_unknown_fields)]
+#[schemars(rename = "post-tool-use-failure.command.output")]
+pub(crate) struct PostToolUseFailureCommandOutputWire {
+    #[serde(flatten)]
+    pub universal: HookUniversalOutputWire,
+    #[serde(default)]
+    pub decision: Option<BlockDecisionWire>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub hook_specific_output: Option<PostToolUseFailureHookSpecificOutputWire>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub(crate) struct PostToolUseHookSpecificOutputWire {
+    pub hook_event_name: HookEventNameWire,
+    #[serde(default)]
+    pub additional_context: Option<String>,
+    #[serde(default)]
+    #[serde(rename = "updatedMCPToolOutput")]
+    pub updated_mcp_tool_output: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PostToolUseFailureHookSpecificOutputWire {
     pub hook_event_name: HookEventNameWire,
     #[serde(default)]
     pub additional_context: Option<String>,
@@ -213,6 +248,28 @@ pub(crate) struct PostToolUseCommandInput {
     pub tool_use_id: String,
 }
 
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "post-tool-use-failure.command.input")]
+pub(crate) struct PostToolUseFailureCommandInput {
+    pub session_id: String,
+    /// Codex extension: expose the active turn id to internal turn-scoped hooks.
+    pub turn_id: String,
+    pub transcript_path: NullableString,
+    pub cwd: String,
+    #[schemars(schema_with = "post_tool_use_failure_hook_event_name_schema")]
+    pub hook_event_name: String,
+    pub model: String,
+    #[schemars(schema_with = "permission_mode_schema")]
+    pub permission_mode: String,
+    #[schemars(schema_with = "post_tool_use_failure_tool_name_schema")]
+    pub tool_name: String,
+    pub tool_input: Value,
+    pub tool_use_id: String,
+    pub error: String,
+    pub is_interrupt: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[serde(deny_unknown_fields)]
@@ -222,6 +279,26 @@ pub(crate) struct SessionStartCommandOutputWire {
     pub universal: HookUniversalOutputWire,
     #[serde(default)]
     pub hook_specific_output: Option<SessionStartHookSpecificOutputWire>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "notification.command.output")]
+pub(crate) struct NotificationCommandOutputWire {
+    #[serde(flatten)]
+    pub universal: HookUniversalOutputWire,
+    #[serde(default)]
+    pub hook_specific_output: Option<NotificationHookSpecificOutputWire>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NotificationHookSpecificOutputWire {
+    pub hook_event_name: HookEventNameWire,
+    #[serde(default)]
+    pub additional_context: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -312,6 +389,7 @@ pub(crate) struct SessionStartCommandInput {
     pub permission_mode: String,
     #[schemars(schema_with = "session_start_source_schema")]
     pub source: String,
+    pub codex_hook_capabilities: CodexHookCapabilitiesWire,
 }
 
 impl SessionStartCommandInput {
@@ -322,6 +400,7 @@ impl SessionStartCommandInput {
         model: impl Into<String>,
         permission_mode: impl Into<String>,
         source: impl Into<String>,
+        codex_hook_capabilities: CodexHookCapabilitiesWire,
     ) -> Self {
         Self {
             session_id: session_id.into(),
@@ -331,8 +410,23 @@ impl SessionStartCommandInput {
             model: model.into(),
             permission_mode: permission_mode.into(),
             source: source.into(),
+            codex_hook_capabilities,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CodexHookCapabilitiesWire {
+    pub surface_version: u32,
+    pub supported_events: Vec<HookEventNameWire>,
+    pub handler_features: CodexHookHandlerFeaturesWire,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CodexHookHandlerFeaturesWire {
+    pub command_if: bool,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -389,6 +483,22 @@ pub(crate) struct PermissionRequestCommandInput {
     pub permission_suggestions: Vec<Map<String, Value>>,
 }
 
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "notification.command.input")]
+pub(crate) struct NotificationCommandInput {
+    pub session_id: String,
+    /// Codex extension: expose the active turn id to internal turn-scoped hooks.
+    pub turn_id: String,
+    pub transcript_path: NullableString,
+    pub cwd: String,
+    #[schemars(schema_with = "notification_hook_event_name_schema")]
+    pub hook_event_name: String,
+    pub model: String,
+    pub notification_type: String,
+    pub message: String,
+}
+
 pub fn write_schema_fixtures(schema_root: &Path) -> anyhow::Result<()> {
     let generated_dir = schema_root.join(GENERATED_DIR);
     ensure_empty_dir(&generated_dir)?;
@@ -400,6 +510,22 @@ pub fn write_schema_fixtures(schema_root: &Path) -> anyhow::Result<()> {
     write_schema(
         &generated_dir.join(POST_TOOL_USE_OUTPUT_FIXTURE),
         schema_json::<PostToolUseCommandOutputWire>()?,
+    )?;
+    write_schema(
+        &generated_dir.join(POST_TOOL_USE_FAILURE_INPUT_FIXTURE),
+        schema_json::<PostToolUseFailureCommandInput>()?,
+    )?;
+    write_schema(
+        &generated_dir.join(POST_TOOL_USE_FAILURE_OUTPUT_FIXTURE),
+        schema_json::<PostToolUseFailureCommandOutputWire>()?,
+    )?;
+    write_schema(
+        &generated_dir.join(NOTIFICATION_INPUT_FIXTURE),
+        schema_json::<NotificationCommandInput>()?,
+    )?;
+    write_schema(
+        &generated_dir.join(NOTIFICATION_OUTPUT_FIXTURE),
+        schema_json::<NotificationCommandOutputWire>()?,
     )?;
     write_schema(
         &generated_dir.join(PERMISSION_REQUEST_INPUT_FIXTURE),
@@ -508,6 +634,14 @@ fn post_tool_use_tool_name_schema(_gen: &mut SchemaGenerator) -> Schema {
     string_const_schema("Bash")
 }
 
+fn post_tool_use_failure_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
+    string_const_schema("PostToolUseFailure")
+}
+
+fn post_tool_use_failure_tool_name_schema(_gen: &mut SchemaGenerator) -> Schema {
+    string_const_schema("Bash")
+}
+
 fn pre_tool_use_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
     string_const_schema("PreToolUse")
 }
@@ -526,6 +660,10 @@ fn stop_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
 
 fn permission_request_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
     string_const_schema("PermissionRequest")
+}
+
+fn notification_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
+    string_const_schema("Notification")
 }
 
 fn permission_mode_schema(_gen: &mut SchemaGenerator) -> Schema {
@@ -573,8 +711,12 @@ fn default_continue() -> bool {
 mod tests {
     use super::schema_json;
     use super::write_schema_fixtures;
+    use super::NotificationCommandInput;
+    use super::NOTIFICATION_INPUT_FIXTURE;
+    use super::NOTIFICATION_OUTPUT_FIXTURE;
     use super::PermissionRequestCommandInput;
     use super::PostToolUseCommandInput;
+    use super::PostToolUseFailureCommandInput;
     use super::PreToolUseCommandInput;
     use super::StopCommandInput;
     use super::UserPromptSubmitCommandInput;
@@ -582,6 +724,8 @@ mod tests {
     use super::PERMISSION_REQUEST_OUTPUT_FIXTURE;
     use super::POST_TOOL_USE_INPUT_FIXTURE;
     use super::POST_TOOL_USE_OUTPUT_FIXTURE;
+    use super::POST_TOOL_USE_FAILURE_INPUT_FIXTURE;
+    use super::POST_TOOL_USE_FAILURE_OUTPUT_FIXTURE;
     use super::PRE_TOOL_USE_INPUT_FIXTURE;
     use super::PRE_TOOL_USE_OUTPUT_FIXTURE;
     use super::SESSION_START_INPUT_FIXTURE;
@@ -601,6 +745,18 @@ mod tests {
             }
             POST_TOOL_USE_OUTPUT_FIXTURE => {
                 include_str!("../schema/generated/post-tool-use.command.output.schema.json")
+            }
+            POST_TOOL_USE_FAILURE_INPUT_FIXTURE => {
+                include_str!("../schema/generated/post-tool-use-failure.command.input.schema.json")
+            }
+            POST_TOOL_USE_FAILURE_OUTPUT_FIXTURE => {
+                include_str!("../schema/generated/post-tool-use-failure.command.output.schema.json")
+            }
+            NOTIFICATION_INPUT_FIXTURE => {
+                include_str!("../schema/generated/notification.command.input.schema.json")
+            }
+            NOTIFICATION_OUTPUT_FIXTURE => {
+                include_str!("../schema/generated/notification.command.output.schema.json")
             }
             PERMISSION_REQUEST_INPUT_FIXTURE => {
                 include_str!("../schema/generated/permission-request.command.input.schema.json")
@@ -649,6 +805,10 @@ mod tests {
         for fixture in [
             POST_TOOL_USE_INPUT_FIXTURE,
             POST_TOOL_USE_OUTPUT_FIXTURE,
+            POST_TOOL_USE_FAILURE_INPUT_FIXTURE,
+            POST_TOOL_USE_FAILURE_OUTPUT_FIXTURE,
+            NOTIFICATION_INPUT_FIXTURE,
+            NOTIFICATION_OUTPUT_FIXTURE,
             PERMISSION_REQUEST_INPUT_FIXTURE,
             PERMISSION_REQUEST_OUTPUT_FIXTURE,
             PRE_TOOL_USE_INPUT_FIXTURE,
@@ -681,6 +841,11 @@ mod tests {
                 .expect("serialize post tool use input schema"),
         )
         .expect("parse post tool use input schema");
+        let post_tool_use_failure: Value = serde_json::from_slice(
+            &schema_json::<PostToolUseFailureCommandInput>()
+                .expect("serialize post tool use failure input schema"),
+        )
+        .expect("parse post tool use failure input schema");
         let user_prompt_submit: Value = serde_json::from_slice(
             &schema_json::<UserPromptSubmitCommandInput>()
                 .expect("serialize user prompt submit input schema"),
@@ -695,10 +860,17 @@ mod tests {
                 .expect("serialize permission request input schema"),
         )
         .expect("parse permission request input schema");
+        let notification: Value = serde_json::from_slice(
+            &schema_json::<NotificationCommandInput>()
+                .expect("serialize notification input schema"),
+        )
+        .expect("parse notification input schema");
 
         for schema in [
             &pre_tool_use,
             &post_tool_use,
+            &post_tool_use_failure,
+            &notification,
             &user_prompt_submit,
             &stop,
             &permission_request,
@@ -734,6 +906,32 @@ mod tests {
         assert_eq!(
             permission_request["properties"]["tool_input"]["type"],
             "object"
+        );
+    }
+
+    #[test]
+    fn session_start_schema_advertises_codex_hook_capabilities() {
+        let session_start: Value = serde_json::from_slice(
+            &schema_json::<super::SessionStartCommandInput>()
+                .expect("serialize session start input schema"),
+        )
+        .expect("parse session start input schema");
+
+        assert_eq!(
+            session_start["properties"]["codex_hook_capabilities"]["$ref"],
+            "#/definitions/CodexHookCapabilitiesWire"
+        );
+        assert_eq!(
+            session_start["definitions"]["CodexHookCapabilitiesWire"]["type"],
+            "object"
+        );
+        assert_eq!(
+            session_start["definitions"]["CodexHookCapabilitiesWire"]["properties"]["surface_version"]["type"],
+            "integer"
+        );
+        assert_eq!(
+            session_start["definitions"]["CodexHookHandlerFeaturesWire"]["properties"]["command_if"]["type"],
+            "boolean"
         );
     }
 }

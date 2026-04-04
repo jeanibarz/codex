@@ -1198,7 +1198,11 @@ async fn output_text_delta_without_item_added_creates_synthetic_item() -> anyhow
 
     codex
         .submit(Op::UserInput {
-            items: vec![UserInput::text("test")],
+            items: vec![UserInput::Text {
+                text: "test".to_string(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
         })
         .await?;
 

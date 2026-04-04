@@ -9,6 +9,7 @@ use super::config::HooksFile;
 use super::config::MatcherGroup;
 use super::ConfiguredHandler;
 use crate::events::common::matcher_pattern_for_event;
+use crate::events::common::validate_command_handler_condition;
 use crate::events::common::validate_matcher_pattern;
 
 pub(crate) struct DiscoveryResult {
@@ -83,6 +84,8 @@ pub(crate) fn discover_handlers(
         let super::config::HookEvents {
             pre_tool_use,
             post_tool_use,
+            post_tool_use_failure,
+            notification,
             session_start,
             permission_request,
             user_prompt_submit,
@@ -97,6 +100,14 @@ pub(crate) fn discover_handlers(
             (
                 codex_protocol::protocol::HookEventName::PostToolUse,
                 post_tool_use,
+            ),
+            (
+                codex_protocol::protocol::HookEventName::PostToolUseFailure,
+                post_tool_use_failure,
+            ),
+            (
+                codex_protocol::protocol::HookEventName::Notification,
+                notification,
             ),
             (
                 codex_protocol::protocol::HookEventName::SessionStart,
@@ -176,6 +187,8 @@ fn load_hooks_from_file(
     let super::config::HookEvents {
         pre_tool_use,
         post_tool_use,
+        post_tool_use_failure,
+        notification,
         session_start,
         user_prompt_submit,
         stop,
@@ -190,6 +203,14 @@ fn load_hooks_from_file(
         (
             codex_protocol::protocol::HookEventName::PostToolUse,
             post_tool_use,
+        ),
+        (
+            codex_protocol::protocol::HookEventName::PostToolUseFailure,
+            post_tool_use_failure,
+        ),
+        (
+            codex_protocol::protocol::HookEventName::Notification,
+            notification,
         ),
         (
             codex_protocol::protocol::HookEventName::SessionStart,
@@ -239,6 +260,7 @@ fn append_group_handlers(
         match handler {
             HookHandlerConfig::Command {
                 command,
+                condition,
                 timeout_sec,
                 r#async,
                 status_message,
@@ -257,10 +279,20 @@ fn append_group_handlers(
                     ));
                     continue;
                 }
+                if let Some(condition) = condition.as_deref()
+                    && let Err(err) = validate_command_handler_condition(condition)
+                {
+                    warnings.push(format!(
+                        "skipping hook in {} with invalid condition {condition:?}: {err}",
+                        source_path.display()
+                    ));
+                    continue;
+                }
                 let timeout_sec = timeout_sec.unwrap_or(600).max(1);
                 handlers.push(ConfiguredHandler {
                     event_name,
                     matcher: matcher.map(ToOwned::to_owned),
+                    condition,
                     command,
                     timeout_sec,
                     status_message,
@@ -330,6 +362,7 @@ mod tests {
             matcher_pattern_for_event(HookEventName::UserPromptSubmit, Some("[")),
             vec![HookHandlerConfig::Command {
                 command: "echo hello".to_string(),
+                condition: None,
                 timeout_sec: None,
                 r#async: false,
                 status_message: None,
@@ -342,6 +375,7 @@ mod tests {
             vec![ConfiguredHandler {
                 event_name: HookEventName::UserPromptSubmit,
                 matcher: None,
+                condition: None,
                 command: "echo hello".to_string(),
                 timeout_sec: 600,
                 status_message: None,
@@ -366,6 +400,7 @@ mod tests {
             matcher_pattern_for_event(HookEventName::PreToolUse, Some("^Bash$")),
             vec![HookHandlerConfig::Command {
                 command: "echo hello".to_string(),
+                condition: None,
                 timeout_sec: None,
                 r#async: false,
                 status_message: None,
@@ -378,6 +413,7 @@ mod tests {
             vec![ConfiguredHandler {
                 event_name: HookEventName::PreToolUse,
                 matcher: Some("^Bash$".to_string()),
+                condition: None,
                 command: "echo hello".to_string(),
                 timeout_sec: 600,
                 status_message: None,
@@ -402,6 +438,7 @@ mod tests {
             matcher_pattern_for_event(HookEventName::PreToolUse, Some("*")),
             vec![HookHandlerConfig::Command {
                 command: "echo hello".to_string(),
+                condition: None,
                 timeout_sec: None,
                 r#async: false,
                 status_message: None,
@@ -428,6 +465,7 @@ mod tests {
             matcher_pattern_for_event(HookEventName::PostToolUse, Some("Edit|Write")),
             vec![HookHandlerConfig::Command {
                 command: "echo hello".to_string(),
+                condition: None,
                 timeout_sec: None,
                 r#async: false,
                 status_message: None,

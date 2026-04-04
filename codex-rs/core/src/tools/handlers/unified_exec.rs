@@ -15,6 +15,7 @@ use crate::tools::handlers::parse_arguments;
 use crate::tools::handlers::parse_arguments_with_base_path;
 use crate::tools::handlers::resolve_workdir_base_path;
 use crate::tools::registry::PostToolUsePayload;
+use crate::tools::registry::PostToolUseFailurePayload;
 use crate::tools::registry::PreToolUsePayload;
 use crate::tools::registry::ToolHandler;
 use crate::tools::registry::ToolKind;
@@ -155,6 +156,26 @@ impl ToolHandler for UnifiedExecHandler {
         Some(PostToolUsePayload {
             command: args.cmd,
             tool_response,
+        })
+    }
+
+    fn post_tool_use_failure_payload(
+        &self,
+        _call_id: &str,
+        payload: &ToolPayload,
+        error: &FunctionCallError,
+    ) -> Option<PostToolUseFailurePayload> {
+        let ToolPayload::Function { arguments } = payload else {
+            return None;
+        };
+
+        let args = parse_arguments::<ExecCommandArgs>(arguments).ok()?;
+        let tool_input = serde_json::from_str(arguments).ok()?;
+        Some(PostToolUseFailurePayload {
+            command: args.cmd,
+            tool_input,
+            error: error.to_string(),
+            is_interrupt: false,
         })
     }
 

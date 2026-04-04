@@ -46,14 +46,10 @@ pub(crate) fn preview(
     handlers: &[ConfiguredHandler],
     request: &PreToolUseRequest,
 ) -> Vec<HookRunSummary> {
-    dispatcher::select_handlers(
-        handlers,
-        HookEventName::PreToolUse,
-        Some(&request.tool_name),
-    )
-    .into_iter()
-    .map(|handler| dispatcher::running_summary(&handler))
-    .collect()
+    matching_handlers(handlers, request)
+        .into_iter()
+        .map(|handler| dispatcher::running_summary(&handler))
+        .collect()
 }
 
 pub(crate) async fn run(
@@ -61,11 +57,7 @@ pub(crate) async fn run(
     shell: &CommandShell,
     request: PreToolUseRequest,
 ) -> PreToolUseOutcome {
-    let matched = dispatcher::select_handlers(
-        handlers,
-        HookEventName::PreToolUse,
-        Some(&request.tool_name),
-    );
+    let matched = matching_handlers(handlers, &request);
     if matched.is_empty() {
         return PreToolUseOutcome {
             hook_events: Vec::new(),
@@ -118,6 +110,22 @@ pub(crate) async fn run(
         should_block,
         block_reason,
     }
+}
+
+fn matching_handlers(
+    handlers: &[ConfiguredHandler],
+    request: &PreToolUseRequest,
+) -> Vec<ConfiguredHandler> {
+    dispatcher::select_handlers(handlers, HookEventName::PreToolUse, Some(&request.tool_name))
+        .into_iter()
+        .filter(|handler| {
+            common::matches_command_handler_condition(
+                handler.condition.as_deref(),
+                Some(&request.tool_name),
+                Some(&request.command),
+            )
+        })
+        .collect()
 }
 
 fn parse_completed(
@@ -457,6 +465,7 @@ mod tests {
         ConfiguredHandler {
             event_name: HookEventName::PreToolUse,
             matcher: Some("^Bash$".to_string()),
+            condition: None,
             command: "echo hook".to_string(),
             timeout_sec: 5,
             status_message: None,

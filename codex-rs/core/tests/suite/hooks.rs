@@ -309,6 +309,43 @@ elif mode == "exit_2":
     Ok(())
 }
 
+fn write_post_tool_use_failure_hook(home: &Path, matcher: Option<&str>) -> Result<()> {
+    let script_path = home.join("post_tool_use_failure_hook.py");
+    let log_path = home.join("post_tool_use_failure_hook_log.jsonl");
+    let script = format!(
+        r#"import json
+from pathlib import Path
+import sys
+
+payload = json.load(sys.stdin)
+with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(payload) + "\n")
+"#,
+        log_path = log_path.display(),
+    );
+
+    let mut group = serde_json::json!({
+        "hooks": [{
+            "type": "command",
+            "command": format!("python3 {}", script_path.display()),
+            "statusMessage": "running post tool use failure hook",
+        }]
+    });
+    if let Some(matcher) = matcher {
+        group["matcher"] = Value::String(matcher.to_string());
+    }
+
+    let hooks = serde_json::json!({
+        "hooks": {
+            "PostToolUseFailure": [group]
+        }
+    });
+
+    fs::write(&script_path, script).context("write post tool use failure hook script")?;
+    fs::write(home.join("hooks.json"), hooks.to_string()).context("write hooks.json")?;
+    Ok(())
+}
+
 fn write_session_start_hook_recording_transcript(home: &Path) -> Result<()> {
     let script_path = home.join("session_start_hook.py");
     let log_path = home.join("session_start_hook_log.jsonl");
@@ -343,6 +380,47 @@ with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
 
     fs::write(&script_path, script).context("write session start hook script")?;
     fs::write(home.join("hooks.json"), hooks.to_string()).context("write hooks.json")?;
+    Ok(())
+}
+
+fn write_session_start_hook_settings_file_recording_transcript(home: &Path) -> Result<()> {
+    let script_path = home.join("session_start_settings_hook.py");
+    let log_path = home.join("session_start_hook_log.jsonl");
+    let settings_path = home.join("session_start_settings.json");
+    let script = format!(
+        r#"import json
+from pathlib import Path
+import sys
+
+payload = json.load(sys.stdin)
+transcript_path = payload.get("transcript_path")
+record = {{
+    "hook_event_name": payload.get("hook_event_name"),
+    "source": payload.get("source"),
+    "transcript_path": transcript_path,
+    "exists": Path(transcript_path).exists() if transcript_path else False,
+}}
+
+with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(record) + "\n")
+"#,
+        log_path = log_path.display(),
+    );
+    let hooks = serde_json::json!({
+        "hooks": {
+            "SessionStart": [{
+                "matcher": "*",
+                "hooks": [{
+                    "type": "command",
+                    "command": format!("python3 {}", script_path.display()),
+                    "statusMessage": "running session start hook from settings",
+                }]
+            }]
+        }
+    });
+
+    fs::write(&script_path, script).context("write session start settings hook script")?;
+    fs::write(settings_path, hooks.to_string()).context("write session start settings file")?;
     Ok(())
 }
 
@@ -403,6 +481,15 @@ fn read_post_tool_use_hook_inputs(home: &Path) -> Result<Vec<serde_json::Value>>
         .lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| serde_json::from_str(line).context("parse post tool use hook log line"))
+        .collect()
+}
+
+fn read_post_tool_use_failure_hook_inputs(home: &Path) -> Result<Vec<serde_json::Value>> {
+    fs::read_to_string(home.join("post_tool_use_failure_hook_log.jsonl"))
+        .context("read post tool use failure hook log")?
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).context("parse post tool use failure hook log line"))
         .collect()
 }
 
@@ -1000,6 +1087,61 @@ async fn blocked_queued_prompt_does_not_strand_earlier_accepted_prompt() -> Resu
     );
 
     server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_start_hook_can_load_from_settings_file() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-1"),
+            ev_assistant_message("msg-1", "hello from settings"),
+            ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+
+    let mut builder = test_codex()
+        .with_pre_build_hook(|home| {
+            if let Err(error) = write_session_start_hook_settings_file_recording_transcript(home) {
+                panic!("failed to write session start settings hook fixture: {error}");
+            }
+        })
+        .with_config(|config| {
+            config
+                .features
+                .enable(Feature::CodexHooks)
+                .expect("test config should allow feature update");
+            config.settings_file = Some(config.codex_home.join("session_start_settings.json"));
+        });
+    let test = builder.build(&server).await?;
+
+    test.submit_turn("load hooks from settings file").await?;
+
+    let hook_inputs = read_session_start_hook_inputs(test.codex_home_path())?;
+    assert_eq!(hook_inputs.len(), 1);
+    assert_eq!(hook_inputs[0]["hook_event_name"], "SessionStart");
+    assert_eq!(hook_inputs[0]["source"], "startup");
+    let transcript_path = hook_inputs[0]["transcript_path"]
+        .as_str()
+        .expect("session start settings transcript_path");
+    assert!(
+        !transcript_path.is_empty(),
+        "session start settings hook should receive a non-empty transcript_path",
+    );
+    assert!(
+        hook_inputs[0]["exists"].as_bool() == Some(true),
+        "session start settings hook transcript_path should exist on disk",
+    );
+    assert!(
+        Path::new(transcript_path).exists(),
+        "session start settings hook transcript_path should be materialized on disk",
+    );
+
     Ok(())
 }
 
@@ -1811,6 +1953,85 @@ async fn post_tool_use_does_not_fire_for_non_shell_tools() -> Result<()> {
     assert!(
         !hook_log_path.exists(),
         "non-shell tools should not trigger post tool use hooks",
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn post_tool_use_failure_fires_for_failing_shell_command() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let call_id = "posttoolusefailure-shell-command";
+    let command = "printf boom >&2; exit 7".to_string();
+    let args = serde_json::json!({ "command": command });
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                core_test_support::responses::ev_function_call(
+                    call_id,
+                    "shell_command",
+                    &serde_json::to_string(&args)?,
+                ),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message("msg-1", "post tool use failure observed"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    let mut builder = test_codex()
+        .with_pre_build_hook(|home| {
+            if let Err(error) = write_post_tool_use_failure_hook(home, Some("^Bash$")) {
+                panic!("failed to write post tool use failure hook test fixture: {error}");
+            }
+        })
+        .with_config(|config| {
+            config
+                .features
+                .enable(Feature::CodexHooks)
+                .expect("test config should allow feature update");
+        });
+    let test = builder.build(&server).await?;
+
+    test.submit_turn("run the failing shell command").await?;
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 2);
+    let output_item = requests[1].function_call_output(call_id);
+    let output = output_item
+        .get("output")
+        .and_then(Value::as_str)
+        .expect("shell failure output string");
+    assert!(
+        output.contains("Exit code: 7"),
+        "failing shell output should preserve the tool failure for the model",
+    );
+
+    let hook_inputs = read_post_tool_use_failure_hook_inputs(test.codex_home_path())?;
+    assert_eq!(hook_inputs.len(), 1);
+    assert_eq!(hook_inputs[0]["hook_event_name"], "PostToolUseFailure");
+    assert_eq!(hook_inputs[0]["tool_name"], "Bash");
+    assert_eq!(hook_inputs[0]["tool_use_id"], call_id);
+    assert_eq!(hook_inputs[0]["tool_input"]["command"], command);
+    assert_eq!(hook_inputs[0]["is_interrupt"], false);
+    assert!(
+        hook_inputs[0]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("Exit code: 7")),
+        "post tool use failure hook should receive the tool error text",
+    );
+    assert!(
+        hook_inputs[0]["turn_id"]
+            .as_str()
+            .is_some_and(|turn_id| !turn_id.is_empty())
     );
 
     Ok(())

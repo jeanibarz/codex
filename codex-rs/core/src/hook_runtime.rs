@@ -4,9 +4,12 @@ use std::sync::Arc;
 use codex_features::Feature;
 use codex_hooks::Hooks;
 use codex_hooks::HooksConfig;
+use codex_hooks::NotificationRequest;
 use codex_hooks::PermissionRequestRequest;
 use codex_hooks::PostToolUseOutcome;
 use codex_hooks::PostToolUseRequest;
+use codex_hooks::PostToolUseFailureOutcome;
+use codex_hooks::PostToolUseFailureRequest;
 use codex_hooks::PreToolUseOutcome;
 use codex_hooks::PreToolUseRequest;
 use codex_hooks::SessionStartOutcome;
@@ -237,6 +240,37 @@ pub(crate) async fn run_post_tool_use_hooks(
     outcome
 }
 
+pub(crate) async fn run_post_tool_use_failure_hooks(
+    sess: &Arc<Session>,
+    turn_context: &Arc<TurnContext>,
+    tool_use_id: String,
+    command: String,
+    tool_input: Value,
+    error: String,
+    is_interrupt: bool,
+) -> PostToolUseFailureOutcome {
+    let request = PostToolUseFailureRequest {
+        session_id: sess.conversation_id,
+        turn_id: turn_context.sub_id.clone(),
+        cwd: turn_context.cwd.to_path_buf(),
+        transcript_path: sess.hook_transcript_path().await,
+        model: turn_context.model_info.slug.clone(),
+        permission_mode: hook_permission_mode(turn_context),
+        tool_name: "Bash".to_string(),
+        tool_use_id,
+        tool_input,
+        command,
+        error,
+        is_interrupt,
+    };
+    let preview_runs = sess.hooks().preview_post_tool_use_failure(&request);
+    emit_hook_started_events(sess, turn_context, preview_runs).await;
+
+    let outcome = sess.hooks().run_post_tool_use_failure(request).await;
+    emit_hook_completed_events(sess, turn_context, outcome.hook_events.clone()).await;
+    outcome
+}
+
 #[allow(dead_code)]
 pub(crate) async fn run_permission_request_hooks(
     sess: &Arc<Session>,
@@ -260,6 +294,39 @@ pub(crate) async fn run_permission_request_hooks(
 
     let outcome = sess.hooks().run_permission_request(request).await;
     emit_hook_completed_events(sess, turn_context, outcome.hook_events).await;
+}
+
+pub(crate) async fn run_notification_hooks(
+    sess: &Session,
+    turn_context: &TurnContext,
+    notification_type: String,
+    message: String,
+) {
+    let request = NotificationRequest {
+        session_id: sess.conversation_id,
+        turn_id: turn_context.sub_id.clone(),
+        cwd: turn_context.cwd.to_path_buf(),
+        transcript_path: sess.hook_transcript_path().await,
+        model: turn_context.model_info.slug.clone(),
+        notification_type,
+        message,
+    };
+    for run in sess.hooks().preview_notification(&request) {
+        sess.send_event(
+            turn_context,
+            EventMsg::HookStarted(HookStartedEvent {
+                turn_id: Some(turn_context.sub_id.clone()),
+                run,
+            }),
+        )
+        .await;
+    }
+
+    let outcome = sess.hooks().run_notification(request).await;
+    for completed in outcome.hook_events {
+        sess.send_event(turn_context, EventMsg::HookCompleted(completed))
+            .await;
+    }
 }
 
 pub(crate) async fn run_user_prompt_submit_hooks(

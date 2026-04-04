@@ -12,6 +12,10 @@ pub(crate) struct HookEvents {
     pub pre_tool_use: Vec<MatcherGroup>,
     #[serde(rename = "PostToolUse", default)]
     pub post_tool_use: Vec<MatcherGroup>,
+    #[serde(rename = "PostToolUseFailure", default)]
+    pub post_tool_use_failure: Vec<MatcherGroup>,
+    #[serde(rename = "Notification", default)]
+    pub notification: Vec<MatcherGroup>,
     #[serde(rename = "SessionStart", default)]
     pub session_start: Vec<MatcherGroup>,
     #[serde(rename = "UserPromptSubmit", default)]
@@ -36,6 +40,8 @@ pub(crate) enum HookHandlerConfig {
     #[serde(rename = "command")]
     Command {
         command: String,
+        #[serde(default, rename = "if")]
+        condition: Option<String>,
         #[serde(default, rename = "timeout", alias = "timeoutSec")]
         timeout_sec: Option<u64>,
         #[serde(default)]

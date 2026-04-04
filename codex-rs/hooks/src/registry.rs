@@ -3,10 +3,14 @@ use tokio::process::Command;
 
 use crate::engine::ClaudeHooksEngine;
 use crate::engine::CommandShell;
+use crate::events::notification::NotificationOutcome;
+use crate::events::notification::NotificationRequest;
 use crate::events::permission_request::PermissionRequestOutcome;
 use crate::events::permission_request::PermissionRequestRequest;
 use crate::events::post_tool_use::PostToolUseOutcome;
 use crate::events::post_tool_use::PostToolUseRequest;
+use crate::events::post_tool_use_failure::PostToolUseFailureOutcome;
+use crate::events::post_tool_use_failure::PostToolUseFailureRequest;
 use crate::events::pre_tool_use::PreToolUseOutcome;
 use crate::events::pre_tool_use::PreToolUseRequest;
 use crate::events::session_start::SessionStartOutcome;
@@ -116,11 +120,25 @@ impl Hooks {
         self.engine.preview_post_tool_use(request)
     }
 
+    pub fn preview_post_tool_use_failure(
+        &self,
+        request: &PostToolUseFailureRequest,
+    ) -> Vec<codex_protocol::protocol::HookRunSummary> {
+        self.engine.preview_post_tool_use_failure(request)
+    }
+
     pub fn preview_permission_request(
         &self,
         request: &PermissionRequestRequest,
     ) -> Vec<codex_protocol::protocol::HookRunSummary> {
         self.engine.preview_permission_request(request)
+    }
+
+    pub fn preview_notification(
+        &self,
+        request: &NotificationRequest,
+    ) -> Vec<codex_protocol::protocol::HookRunSummary> {
+        self.engine.preview_notification(request)
     }
 
     pub async fn run_session_start(
@@ -137,6 +155,13 @@ impl Hooks {
 
     pub async fn run_post_tool_use(&self, request: PostToolUseRequest) -> PostToolUseOutcome {
         self.engine.run_post_tool_use(request).await
+    }
+
+    pub async fn run_post_tool_use_failure(
+        &self,
+        request: PostToolUseFailureRequest,
+    ) -> PostToolUseFailureOutcome {
+        self.engine.run_post_tool_use_failure(request).await
     }
 
     pub fn preview_user_prompt_submit(
@@ -162,6 +187,10 @@ impl Hooks {
 
     pub async fn run_stop(&self, request: StopRequest) -> StopOutcome {
         self.engine.run_stop(request).await
+    }
+
+    pub async fn run_notification(&self, request: NotificationRequest) -> NotificationOutcome {
+        self.engine.run_notification(request).await
     }
 
     pub async fn run_permission_request(

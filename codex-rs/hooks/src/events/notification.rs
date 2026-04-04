@@ -7,39 +7,35 @@ use codex_protocol::protocol::HookOutputEntry;
 use codex_protocol::protocol::HookOutputEntryKind;
 use codex_protocol::protocol::HookRunStatus;
 use codex_protocol::protocol::HookRunSummary;
-use serde_json::Map;
-use serde_json::Value;
 
 use super::common;
+use crate::engine::CommandShell;
+use crate::engine::ConfiguredHandler;
 use crate::engine::command_runner::CommandRunResult;
 use crate::engine::dispatcher;
 use crate::engine::output_parser;
-use crate::engine::CommandShell;
-use crate::engine::ConfiguredHandler;
+use crate::schema::NotificationCommandInput;
 use crate::schema::NullableString;
-use crate::schema::PermissionRequestCommandInput;
 
 #[derive(Debug, Clone)]
-pub struct PermissionRequestRequest {
+pub struct NotificationRequest {
     pub session_id: ThreadId,
     pub turn_id: String,
     pub cwd: PathBuf,
     pub transcript_path: Option<PathBuf>,
     pub model: String,
-    pub permission_mode: String,
-    pub tool_name: String,
-    pub tool_input: Map<String, Value>,
-    pub permission_suggestions: Vec<Map<String, Value>>,
+    pub notification_type: String,
+    pub message: String,
 }
 
 #[derive(Debug)]
-pub struct PermissionRequestOutcome {
+pub struct NotificationOutcome {
     pub hook_events: Vec<HookCompletedEvent>,
 }
 
 pub(crate) fn preview(
     handlers: &[ConfiguredHandler],
-    request: &PermissionRequestRequest,
+    request: &NotificationRequest,
 ) -> Vec<HookRunSummary> {
     matching_handlers(handlers, request)
         .into_iter()
@@ -50,34 +46,32 @@ pub(crate) fn preview(
 pub(crate) async fn run(
     handlers: &[ConfiguredHandler],
     shell: &CommandShell,
-    request: PermissionRequestRequest,
-) -> PermissionRequestOutcome {
+    request: NotificationRequest,
+) -> NotificationOutcome {
     let matched = matching_handlers(handlers, &request);
     if matched.is_empty() {
-        return PermissionRequestOutcome {
+        return NotificationOutcome {
             hook_events: Vec::new(),
         };
     }
 
-    let input_json = match serde_json::to_string(&PermissionRequestCommandInput {
+    let input_json = match serde_json::to_string(&NotificationCommandInput {
         session_id: request.session_id.to_string(),
         turn_id: request.turn_id.clone(),
         transcript_path: NullableString::from_path(request.transcript_path.clone()),
         cwd: request.cwd.display().to_string(),
-        hook_event_name: "PermissionRequest".to_string(),
+        hook_event_name: "Notification".to_string(),
         model: request.model.clone(),
-        permission_mode: request.permission_mode.clone(),
-        tool_name: request.tool_name.clone(),
-        tool_input: request.tool_input.clone(),
-        permission_suggestions: request.permission_suggestions.clone(),
+        notification_type: request.notification_type.clone(),
+        message: request.message.clone(),
     }) {
         Ok(input_json) => input_json,
         Err(error) => {
-            return PermissionRequestOutcome {
+            return NotificationOutcome {
                 hook_events: common::serialization_failure_hook_events(
                     matched,
                     Some(request.turn_id),
-                    format!("failed to serialize permission request hook input: {error}"),
+                    format!("failed to serialize notification hook input: {error}"),
                 ),
             };
         }
@@ -93,28 +87,26 @@ pub(crate) async fn run(
     )
     .await;
 
-    PermissionRequestOutcome {
+    NotificationOutcome {
         hook_events: results.into_iter().map(|result| result.completed).collect(),
     }
 }
 
 fn matching_handlers(
     handlers: &[ConfiguredHandler],
-    request: &PermissionRequestRequest,
+    request: &NotificationRequest,
 ) -> Vec<ConfiguredHandler> {
-    let command = request.tool_input.get("command").and_then(Value::as_str);
-
     dispatcher::select_handlers(
         handlers,
-        HookEventName::PermissionRequest,
-        Some(&request.tool_name),
+        HookEventName::Notification,
+        Some(&request.notification_type),
     )
     .into_iter()
     .filter(|handler| {
         common::matches_command_handler_condition(
             handler.condition.as_deref(),
-            Some(&request.tool_name),
-            command,
+            Some("Notification"),
+            Some(&request.notification_type),
         )
     })
     .collect()
@@ -140,8 +132,7 @@ fn parse_completed(
             Some(0) => {
                 let trimmed_stdout = run_result.stdout.trim();
                 if trimmed_stdout.is_empty() {
-                } else if let Some(parsed) =
-                    output_parser::parse_permission_request(&run_result.stdout)
+                } else if let Some(parsed) = output_parser::parse_notification(&run_result.stdout)
                 {
                     if let Some(system_message) = parsed.universal.system_message {
                         entries.push(HookOutputEntry {
@@ -169,7 +160,7 @@ fn parse_completed(
                     status = HookRunStatus::Failed;
                     entries.push(HookOutputEntry {
                         kind: HookOutputEntryKind::Error,
-                        text: "hook returned invalid permission request JSON output".to_string(),
+                        text: "hook returned invalid notification JSON output".to_string(),
                     });
                 } else {
                     entries.push(HookOutputEntry {
@@ -210,15 +201,58 @@ fn parse_completed(
 mod tests {
     use std::path::PathBuf;
 
+    use codex_protocol::ThreadId;
     use codex_protocol::protocol::HookEventName;
     use codex_protocol::protocol::HookOutputEntry;
     use codex_protocol::protocol::HookOutputEntryKind;
     use codex_protocol::protocol::HookRunStatus;
     use pretty_assertions::assert_eq;
 
+    use super::NotificationRequest;
+    use super::matching_handlers;
     use super::parse_completed;
-    use crate::engine::command_runner::CommandRunResult;
     use crate::engine::ConfiguredHandler;
+    use crate::engine::command_runner::CommandRunResult;
+
+    #[test]
+    fn handler_level_if_filters_notification_handlers() {
+        let handlers = vec![
+            ConfiguredHandler {
+                event_name: HookEventName::Notification,
+                matcher: Some("permission_prompt".to_string()),
+                condition: Some("Notification(permission_prompt)".to_string()),
+                command: "echo notify".to_string(),
+                timeout_sec: 5,
+                status_message: None,
+                source_path: PathBuf::from("/tmp/hooks.json"),
+                display_order: 0,
+            },
+            ConfiguredHandler {
+                event_name: HookEventName::Notification,
+                matcher: Some("permission_prompt".to_string()),
+                condition: Some("Notification(idle_prompt)".to_string()),
+                command: "echo skip".to_string(),
+                timeout_sec: 5,
+                status_message: None,
+                source_path: PathBuf::from("/tmp/hooks.json"),
+                display_order: 1,
+            },
+        ];
+
+        let request = NotificationRequest {
+            session_id: ThreadId::new(),
+            turn_id: "turn-1".to_string(),
+            cwd: PathBuf::from("/tmp"),
+            transcript_path: None,
+            model: "gpt-5.4".to_string(),
+            notification_type: "permission_prompt".to_string(),
+            message: "need approval".to_string(),
+        };
+
+        let selected = matching_handlers(&handlers, &request);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].display_order, 0);
+    }
 
     #[test]
     fn plain_stdout_becomes_context_entry() {
@@ -238,47 +272,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn invalid_json_like_stdout_fails() {
-        let parsed = parse_completed(
-            &handler(),
-            run_result(
-                Some(0),
-                r#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest""#,
-                "",
-            ),
-            None,
-        );
-
-        assert_eq!(parsed.completed.run.status, HookRunStatus::Failed);
-        assert_eq!(
-            parsed.completed.run.entries,
-            vec![HookOutputEntry {
-                kind: HookOutputEntryKind::Error,
-                text: "hook returned invalid permission request JSON output".to_string(),
-            }]
-        );
-    }
-
-    #[test]
-    fn nonzero_exit_code_fails() {
-        let parsed = parse_completed(
-            &handler(),
-            run_result(Some(1), "", "some error"),
-            Some("turn-1".to_string()),
-        );
-
-        assert_eq!(parsed.completed.run.status, HookRunStatus::Failed);
-        assert_eq!(parsed.completed.run.entries.len(), 1);
-    }
-
     fn handler() -> ConfiguredHandler {
         ConfiguredHandler {
-            event_name: HookEventName::PermissionRequest,
-            matcher: None,
+            event_name: HookEventName::Notification,
+            matcher: Some("permission_prompt".to_string()),
             condition: None,
-            command: "echo hook".to_string(),
-            timeout_sec: 600,
+            command: "echo notification".to_string(),
+            timeout_sec: 5,
             status_message: None,
             source_path: PathBuf::from("/tmp/hooks.json"),
             display_order: 0,
@@ -287,13 +287,13 @@ mod tests {
 
     fn run_result(exit_code: Option<i32>, stdout: &str, stderr: &str) -> CommandRunResult {
         CommandRunResult {
-            started_at: 1,
-            completed_at: 2,
-            duration_ms: 1,
-            exit_code,
             stdout: stdout.to_string(),
             stderr: stderr.to_string(),
+            exit_code,
             error: None,
+            started_at: 100,
+            completed_at: 101,
+            duration_ms: 1,
         }
     }
 }

@@ -2,6 +2,56 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "definitions": {
+    "CodexHookCapabilitiesWire": {
+      "additionalProperties": false,
+      "properties": {
+        "handler_features": {
+          "$ref": "#/definitions/CodexHookHandlerFeaturesWire"
+        },
+        "supported_events": {
+          "items": {
+            "$ref": "#/definitions/HookEventNameWire"
+          },
+          "type": "array"
+        },
+        "surface_version": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "handler_features",
+        "supported_events",
+        "surface_version"
+      ],
+      "type": "object"
+    },
+    "CodexHookHandlerFeaturesWire": {
+      "additionalProperties": false,
+      "properties": {
+        "command_if": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "command_if"
+      ],
+      "type": "object"
+    },
+    "HookEventNameWire": {
+      "enum": [
+        "PreToolUse",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "Notification",
+        "SessionStart",
+        "UserPromptSubmit",
+        "Stop",
+        "PermissionRequest"
+      ],
+      "type": "string"
+    },
     "NullableString": {
       "type": [
         "string",
@@ -10,6 +60,9 @@
     }
   },
   "properties": {
+    "codex_hook_capabilities": {
+      "$ref": "#/definitions/CodexHookCapabilitiesWire"
+    },
     "cwd": {
       "type": "string"
     },
@@ -46,6 +99,7 @@
     }
   },
   "required": [
+    "codex_hook_capabilities",
     "cwd",
     "hook_event_name",
     "model",

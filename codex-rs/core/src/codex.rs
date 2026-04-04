@@ -3035,8 +3035,16 @@ impl Session {
                 additional_permissions.as_ref(),
             )
         });
-        // Fire PermissionRequest hook so external supervisors (e.g. Looper)
+        // Fire Notification + PermissionRequest hooks so external supervisors
         // can detect that the agent is blocked waiting for human approval.
+        crate::hook_runtime::run_notification_hooks(
+            self,
+            turn_context,
+            "permission_prompt".to_string(),
+            "Codex is waiting for your approval".to_string(),
+        )
+        .await;
+
         let perm_request = codex_hooks::PermissionRequestRequest {
             session_id: self.conversation_id,
             turn_id: turn_context.sub_id.clone(),

@@ -33,6 +33,8 @@ pub(crate) fn select_handlers(
         .filter(|handler| match event_name {
             HookEventName::PreToolUse
             | HookEventName::PostToolUse
+            | HookEventName::PostToolUseFailure
+            | HookEventName::Notification
             | HookEventName::SessionStart
             | HookEventName::PermissionRequest => {
                 matches_matcher(handler.matcher.as_deref(), matcher_input)
@@ -111,6 +113,8 @@ fn scope_for_event(event_name: HookEventName) -> HookScope {
         HookEventName::SessionStart => HookScope::Thread,
         HookEventName::PreToolUse
         | HookEventName::PostToolUse
+        | HookEventName::PostToolUseFailure
+        | HookEventName::Notification
         | HookEventName::PermissionRequest
         | HookEventName::UserPromptSubmit
         | HookEventName::Stop => HookScope::Turn,
@@ -135,6 +139,7 @@ mod tests {
         ConfiguredHandler {
             event_name,
             matcher: matcher.map(str::to_owned),
+            condition: None,
             command: command.to_string(),
             timeout_sec: 5,
             status_message: None,
@@ -238,6 +243,29 @@ mod tests {
     }
 
     #[test]
+    fn post_tool_use_failure_matches_tool_name() {
+        let handlers = vec![
+            make_handler(
+                HookEventName::PostToolUseFailure,
+                Some("^Bash$"),
+                "echo same",
+                /*display_order*/ 0,
+            ),
+            make_handler(
+                HookEventName::PostToolUseFailure,
+                Some("^Edit$"),
+                "echo same",
+                /*display_order*/ 1,
+            ),
+        ];
+
+        let selected = select_handlers(&handlers, HookEventName::PostToolUseFailure, Some("Bash"));
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].display_order, 0);
+    }
+
+    #[test]
     fn permission_request_matches_tool_name() {
         let handlers = vec![
             make_handler(
@@ -258,6 +286,28 @@ mod tests {
             &handlers,
             HookEventName::PermissionRequest,
             Some("WorkspaceTrust"),
+        );
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].display_order, 0);
+    }
+
+    #[test]
+    fn notification_matches_notification_type() {
+        let handlers = vec![
+            make_handler(
+                HookEventName::Notification,
+                Some("^permission_prompt$"),
+                "echo same",
+                0,
+            ),
+            make_handler(HookEventName::Notification, Some("^idle_prompt$"), "echo same", 1),
+        ];
+
+        let selected = select_handlers(
+            &handlers,
+            HookEventName::Notification,
+            Some("permission_prompt"),
         );
 
         assert_eq!(selected.len(), 1);

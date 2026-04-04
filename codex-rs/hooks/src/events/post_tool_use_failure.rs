@@ -15,11 +15,10 @@ use crate::engine::ConfiguredHandler;
 use crate::engine::command_runner::CommandRunResult;
 use crate::engine::dispatcher;
 use crate::engine::output_parser;
-use crate::schema::PostToolUseCommandInput;
-use crate::schema::PostToolUseToolInput;
+use crate::schema::PostToolUseFailureCommandInput;
 
 #[derive(Debug, Clone)]
-pub struct PostToolUseRequest {
+pub struct PostToolUseFailureRequest {
     pub session_id: ThreadId,
     pub turn_id: String,
     pub cwd: PathBuf,
@@ -28,12 +27,14 @@ pub struct PostToolUseRequest {
     pub permission_mode: String,
     pub tool_name: String,
     pub tool_use_id: String,
+    pub tool_input: Value,
     pub command: String,
-    pub tool_response: Value,
+    pub error: String,
+    pub is_interrupt: bool,
 }
 
 #[derive(Debug)]
-pub struct PostToolUseOutcome {
+pub struct PostToolUseFailureOutcome {
     pub hook_events: Vec<HookCompletedEvent>,
     pub should_stop: bool,
     pub stop_reason: Option<String>,
@@ -42,7 +43,7 @@ pub struct PostToolUseOutcome {
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
-struct PostToolUseHandlerData {
+struct PostToolUseFailureHandlerData {
     should_stop: bool,
     stop_reason: Option<String>,
     additional_contexts_for_model: Vec<String>,
@@ -51,7 +52,7 @@ struct PostToolUseHandlerData {
 
 pub(crate) fn preview(
     handlers: &[ConfiguredHandler],
-    request: &PostToolUseRequest,
+    request: &PostToolUseFailureRequest,
 ) -> Vec<HookRunSummary> {
     matching_handlers(handlers, request)
         .into_iter()
@@ -62,11 +63,11 @@ pub(crate) fn preview(
 pub(crate) async fn run(
     handlers: &[ConfiguredHandler],
     shell: &CommandShell,
-    request: PostToolUseRequest,
-) -> PostToolUseOutcome {
+    request: PostToolUseFailureRequest,
+) -> PostToolUseFailureOutcome {
     let matched = matching_handlers(handlers, &request);
     if matched.is_empty() {
-        return PostToolUseOutcome {
+        return PostToolUseFailureOutcome {
             hook_events: Vec::new(),
             should_stop: false,
             stop_reason: None,
@@ -75,27 +76,26 @@ pub(crate) async fn run(
         };
     }
 
-    let input_json = match serde_json::to_string(&PostToolUseCommandInput {
+    let input_json = match serde_json::to_string(&PostToolUseFailureCommandInput {
         session_id: request.session_id.to_string(),
         turn_id: request.turn_id.clone(),
         transcript_path: crate::schema::NullableString::from_path(request.transcript_path.clone()),
         cwd: request.cwd.display().to_string(),
-        hook_event_name: "PostToolUse".to_string(),
+        hook_event_name: "PostToolUseFailure".to_string(),
         model: request.model.clone(),
         permission_mode: request.permission_mode.clone(),
         tool_name: "Bash".to_string(),
-        tool_input: PostToolUseToolInput {
-            command: request.command.clone(),
-        },
-        tool_response: request.tool_response.clone(),
+        tool_input: request.tool_input.clone(),
         tool_use_id: request.tool_use_id.clone(),
+        error: request.error.clone(),
+        is_interrupt: request.is_interrupt,
     }) {
         Ok(input_json) => input_json,
         Err(error) => {
             return serialization_failure_outcome(common::serialization_failure_hook_events(
                 matched,
                 Some(request.turn_id),
-                format!("failed to serialize post tool use hook input: {error}"),
+                format!("failed to serialize post tool use failure hook input: {error}"),
             ));
         }
     };
@@ -126,7 +126,7 @@ pub(crate) async fn run(
             .collect(),
     );
 
-    PostToolUseOutcome {
+    PostToolUseFailureOutcome {
         hook_events: results.into_iter().map(|result| result.completed).collect(),
         should_stop,
         stop_reason,
@@ -137,25 +137,29 @@ pub(crate) async fn run(
 
 fn matching_handlers(
     handlers: &[ConfiguredHandler],
-    request: &PostToolUseRequest,
+    request: &PostToolUseFailureRequest,
 ) -> Vec<ConfiguredHandler> {
-    dispatcher::select_handlers(handlers, HookEventName::PostToolUse, Some(&request.tool_name))
-        .into_iter()
-        .filter(|handler| {
-            common::matches_command_handler_condition(
-                handler.condition.as_deref(),
-                Some(&request.tool_name),
-                Some(&request.command),
-            )
-        })
-        .collect()
+    dispatcher::select_handlers(
+        handlers,
+        HookEventName::PostToolUseFailure,
+        Some(&request.tool_name),
+    )
+    .into_iter()
+    .filter(|handler| {
+        common::matches_command_handler_condition(
+            handler.condition.as_deref(),
+            Some(&request.tool_name),
+            Some(&request.command),
+        )
+    })
+    .collect()
 }
 
 fn parse_completed(
     handler: &ConfiguredHandler,
     run_result: CommandRunResult,
     turn_id: Option<String>,
-) -> dispatcher::ParsedHandler<PostToolUseHandlerData> {
+) -> dispatcher::ParsedHandler<PostToolUseFailureHandlerData> {
     let mut entries = Vec::new();
     let mut status = HookRunStatus::Completed;
     let mut should_stop = false;
@@ -175,7 +179,8 @@ fn parse_completed(
             Some(0) => {
                 let trimmed_stdout = run_result.stdout.trim();
                 if trimmed_stdout.is_empty() {
-                } else if let Some(parsed) = output_parser::parse_post_tool_use(&run_result.stdout)
+                } else if let Some(parsed) =
+                    output_parser::parse_post_tool_use_failure(&run_result.stdout)
                 {
                     if let Some(system_message) = parsed.universal.system_message {
                         entries.push(HookOutputEntry {
@@ -197,10 +202,9 @@ fn parse_completed(
                         status = HookRunStatus::Stopped;
                         should_stop = true;
                         stop_reason = parsed.universal.stop_reason.clone();
-                        let stop_text = parsed
-                            .universal
-                            .stop_reason
-                            .unwrap_or_else(|| "PostToolUse hook stopped execution".to_string());
+                        let stop_text = parsed.universal.stop_reason.unwrap_or_else(|| {
+                            "PostToolUseFailure hook stopped execution".to_string()
+                        });
                         entries.push(HookOutputEntry {
                             kind: HookOutputEntryKind::Stop,
                             text: stop_text.clone(),
@@ -224,63 +228,62 @@ fn parse_completed(
                             text: invalid_block_reason,
                         });
                     } else if parsed.should_block {
-                        status = HookRunStatus::Blocked;
-                        if let Some(reason) = parsed.reason {
-                            entries.push(HookOutputEntry {
-                                kind: HookOutputEntryKind::Feedback,
-                                text: reason.clone(),
-                            });
-                            feedback_messages_for_model.push(reason);
-                        }
+                        status = HookRunStatus::Stopped;
+                        should_stop = true;
+                        stop_reason = parsed.reason.clone();
+                        let stop_text = parsed.reason.unwrap_or_else(|| {
+                            "PostToolUseFailure hook blocked execution".to_string()
+                        });
+                        entries.push(HookOutputEntry {
+                            kind: HookOutputEntryKind::Stop,
+                            text: stop_text.clone(),
+                        });
+                        feedback_messages_for_model.push(stop_text);
                     }
-                } else if trimmed_stdout.starts_with('{') || trimmed_stdout.starts_with('[') {
-                    status = HookRunStatus::Failed;
+                } else {
                     entries.push(HookOutputEntry {
-                        kind: HookOutputEntryKind::Error,
-                        text: "hook returned invalid post-tool-use JSON output".to_string(),
+                        kind: HookOutputEntryKind::Context,
+                        text: trimmed_stdout.to_string(),
                     });
                 }
             }
             Some(2) => {
-                if let Some(reason) = common::trimmed_non_empty(&run_result.stderr) {
-                    entries.push(HookOutputEntry {
-                        kind: HookOutputEntryKind::Feedback,
-                        text: reason.clone(),
-                    });
-                    feedback_messages_for_model.push(reason);
-                } else {
-                    status = HookRunStatus::Failed;
-                    entries.push(HookOutputEntry {
-                        kind: HookOutputEntryKind::Error,
-                        text: "PostToolUse hook exited with code 2 but did not write feedback to stderr".to_string(),
-                    });
-                }
+                status = HookRunStatus::Stopped;
+                should_stop = true;
+                let feedback = common::trimmed_non_empty(&run_result.stderr).unwrap_or_else(|| {
+                    "PostToolUseFailure hook exited with code 2 but did not write feedback to stderr"
+                        .to_string()
+                });
+                stop_reason = Some(feedback.clone());
+                feedback_messages_for_model.push(feedback.clone());
+                entries.push(HookOutputEntry {
+                    kind: HookOutputEntryKind::Stop,
+                    text: feedback,
+                });
             }
-            Some(exit_code) => {
+            Some(code) => {
                 status = HookRunStatus::Failed;
                 entries.push(HookOutputEntry {
                     kind: HookOutputEntryKind::Error,
-                    text: format!("hook exited with code {exit_code}"),
+                    text: format!("hook exited with code {code}"),
                 });
             }
             None => {
                 status = HookRunStatus::Failed;
                 entries.push(HookOutputEntry {
                     kind: HookOutputEntryKind::Error,
-                    text: "hook exited without a status code".to_string(),
+                    text: "hook terminated without exit code".to_string(),
                 });
             }
         },
     }
 
-    let completed = HookCompletedEvent {
-        turn_id,
-        run: dispatcher::completed_summary(handler, &run_result, status, entries),
-    };
-
     dispatcher::ParsedHandler {
-        completed,
-        data: PostToolUseHandlerData {
+        completed: HookCompletedEvent {
+            turn_id,
+            run: dispatcher::completed_summary(handler, &run_result, status, entries),
+        },
+        data: PostToolUseFailureHandlerData {
             should_stop,
             stop_reason,
             additional_contexts_for_model,
@@ -289,8 +292,10 @@ fn parse_completed(
     }
 }
 
-fn serialization_failure_outcome(hook_events: Vec<HookCompletedEvent>) -> PostToolUseOutcome {
-    PostToolUseOutcome {
+fn serialization_failure_outcome(
+    hook_events: Vec<HookCompletedEvent>,
+) -> PostToolUseFailureOutcome {
+    PostToolUseFailureOutcome {
         hook_events,
         should_stop: false,
         stop_reason: None,
@@ -303,182 +308,91 @@ fn serialization_failure_outcome(hook_events: Vec<HookCompletedEvent>) -> PostTo
 mod tests {
     use std::path::PathBuf;
 
+    use codex_protocol::ThreadId;
     use codex_protocol::protocol::HookEventName;
     use codex_protocol::protocol::HookOutputEntry;
     use codex_protocol::protocol::HookOutputEntryKind;
     use codex_protocol::protocol::HookRunStatus;
     use pretty_assertions::assert_eq;
+    use serde_json::json;
 
-    use super::PostToolUseHandlerData;
+    use super::PostToolUseFailureRequest;
+    use super::matching_handlers;
     use super::parse_completed;
     use crate::engine::ConfiguredHandler;
     use crate::engine::command_runner::CommandRunResult;
 
     #[test]
-    fn block_decision_stops_normal_processing() {
-        let parsed = parse_completed(
-            &handler(),
-            run_result(
-                Some(0),
-                r#"{"decision":"block","reason":"bash output looked sketchy"}"#,
-                "",
-            ),
-            Some("turn-1".to_string()),
-        );
+    fn handler_level_if_filters_post_tool_use_failure_handlers() {
+        let handlers = vec![
+            ConfiguredHandler {
+                event_name: HookEventName::PostToolUseFailure,
+                matcher: Some("Bash".to_string()),
+                condition: Some("Bash(git push*)".to_string()),
+                command: "echo notify".to_string(),
+                timeout_sec: 5,
+                status_message: None,
+                source_path: PathBuf::from("/tmp/hooks.json"),
+                display_order: 0,
+            },
+            ConfiguredHandler {
+                event_name: HookEventName::PostToolUseFailure,
+                matcher: Some("Bash".to_string()),
+                condition: Some("Bash(gh pr create*)".to_string()),
+                command: "echo skip".to_string(),
+                timeout_sec: 5,
+                status_message: None,
+                source_path: PathBuf::from("/tmp/hooks.json"),
+                display_order: 1,
+            },
+        ];
 
-        assert_eq!(
-            parsed.data,
-            PostToolUseHandlerData {
-                should_stop: false,
-                stop_reason: None,
-                additional_contexts_for_model: Vec::new(),
-                feedback_messages_for_model: vec!["bash output looked sketchy".to_string()],
-            }
-        );
-        assert_eq!(parsed.completed.run.status, HookRunStatus::Blocked);
+        let request = PostToolUseFailureRequest {
+            session_id: ThreadId::new(),
+            turn_id: "turn-1".to_string(),
+            cwd: PathBuf::from("/tmp"),
+            transcript_path: None,
+            model: "gpt-5.4".to_string(),
+            permission_mode: "default".to_string(),
+            tool_name: "Bash".to_string(),
+            tool_use_id: "tool-1".to_string(),
+            tool_input: json!({ "command": "git push origin main" }),
+            command: "git push origin main".to_string(),
+            error: "push failed".to_string(),
+            is_interrupt: false,
+        };
+
+        let selected = matching_handlers(&handlers, &request);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].display_order, 0);
     }
 
     #[test]
-    fn additional_context_is_recorded() {
+    fn plain_stdout_becomes_context_entry() {
         let parsed = parse_completed(
             &handler(),
-            run_result(
-                Some(0),
-                r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"Remember the bash cleanup note."}}"#,
-                "",
-            ),
-            Some("turn-1".to_string()),
+            run_result(Some(0), "needs attention\n", ""),
+            None,
         );
 
-        assert_eq!(
-            parsed.data,
-            PostToolUseHandlerData {
-                should_stop: false,
-                stop_reason: None,
-                additional_contexts_for_model: vec!["Remember the bash cleanup note.".to_string()],
-                feedback_messages_for_model: Vec::new(),
-            }
-        );
+        assert_eq!(parsed.completed.run.status, HookRunStatus::Completed);
         assert_eq!(
             parsed.completed.run.entries,
             vec![HookOutputEntry {
                 kind: HookOutputEntryKind::Context,
-                text: "Remember the bash cleanup note.".to_string(),
+                text: "needs attention".to_string(),
             }]
         );
-    }
-
-    #[test]
-    fn unsupported_updated_mcp_tool_output_fails_open() {
-        let parsed = parse_completed(
-            &handler(),
-            run_result(
-                Some(0),
-                r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","updatedMCPToolOutput":{"ok":true}}}"#,
-                "",
-            ),
-            Some("turn-1".to_string()),
-        );
-
-        assert_eq!(
-            parsed.data,
-            PostToolUseHandlerData {
-                should_stop: false,
-                stop_reason: None,
-                additional_contexts_for_model: Vec::new(),
-                feedback_messages_for_model: Vec::new(),
-            }
-        );
-        assert_eq!(parsed.completed.run.status, HookRunStatus::Failed);
-        assert_eq!(
-            parsed.completed.run.entries,
-            vec![HookOutputEntry {
-                kind: HookOutputEntryKind::Error,
-                text: "PostToolUse hook returned unsupported updatedMCPToolOutput".to_string(),
-            }]
-        );
-    }
-
-    #[test]
-    fn exit_two_surfaces_feedback_to_model_without_blocking() {
-        let parsed = parse_completed(
-            &handler(),
-            run_result(Some(2), "", "post hook says pause"),
-            Some("turn-1".to_string()),
-        );
-
-        assert_eq!(
-            parsed.data,
-            PostToolUseHandlerData {
-                should_stop: false,
-                stop_reason: None,
-                additional_contexts_for_model: Vec::new(),
-                feedback_messages_for_model: vec!["post hook says pause".to_string()],
-            }
-        );
-        assert_eq!(parsed.completed.run.status, HookRunStatus::Completed);
-    }
-
-    #[test]
-    fn continue_false_stops_with_reason() {
-        let parsed = parse_completed(
-            &handler(),
-            run_result(
-                Some(0),
-                r#"{"continue":false,"stopReason":"halt after bash output","reason":"post-tool hook says stop"}"#,
-                "",
-            ),
-            Some("turn-1".to_string()),
-        );
-
-        assert_eq!(
-            parsed.data,
-            PostToolUseHandlerData {
-                should_stop: true,
-                stop_reason: Some("halt after bash output".to_string()),
-                additional_contexts_for_model: Vec::new(),
-                feedback_messages_for_model: vec!["post-tool hook says stop".to_string()],
-            }
-        );
-        assert_eq!(parsed.completed.run.status, HookRunStatus::Stopped);
-        assert_eq!(
-            parsed.completed.run.entries,
-            vec![HookOutputEntry {
-                kind: HookOutputEntryKind::Stop,
-                text: "halt after bash output".to_string(),
-            }]
-        );
-    }
-
-    #[test]
-    fn plain_stdout_is_ignored_for_post_tool_use() {
-        let parsed = parse_completed(
-            &handler(),
-            run_result(Some(0), "plain text only", ""),
-            Some("turn-1".to_string()),
-        );
-
-        assert_eq!(
-            parsed.data,
-            PostToolUseHandlerData {
-                should_stop: false,
-                stop_reason: None,
-                additional_contexts_for_model: Vec::new(),
-                feedback_messages_for_model: Vec::new(),
-            }
-        );
-        assert_eq!(parsed.completed.run.status, HookRunStatus::Completed);
-        assert_eq!(parsed.completed.run.entries, Vec::<HookOutputEntry>::new());
     }
 
     fn handler() -> ConfiguredHandler {
         ConfiguredHandler {
-            event_name: HookEventName::PostToolUse,
-            matcher: Some("^Bash$".to_string()),
+            event_name: HookEventName::PostToolUseFailure,
+            matcher: Some("Bash".to_string()),
             condition: None,
-            command: "python3 post_tool_use_hook.py".to_string(),
+            command: "echo failure".to_string(),
             timeout_sec: 5,
-            status_message: Some("running post tool use hook".to_string()),
+            status_message: None,
             source_path: PathBuf::from("/tmp/hooks.json"),
             display_order: 0,
         }
@@ -486,13 +400,13 @@ mod tests {
 
     fn run_result(exit_code: Option<i32>, stdout: &str, stderr: &str) -> CommandRunResult {
         CommandRunResult {
-            started_at: 1_700_000_000,
-            completed_at: 1_700_000_001,
-            duration_ms: 12,
-            exit_code,
             stdout: stdout.to_string(),
             stderr: stderr.to_string(),
+            exit_code,
             error: None,
+            started_at: 1,
+            completed_at: 2,
+            duration_ms: 1,
         }
     }
 }

@@ -76,9 +76,40 @@ pub(crate) fn matcher_pattern_for_event(
     match event_name {
         HookEventName::PreToolUse
         | HookEventName::PostToolUse
+        | HookEventName::PostToolUseFailure
+        | HookEventName::Notification
         | HookEventName::SessionStart
         | HookEventName::PermissionRequest => matcher,
         HookEventName::UserPromptSubmit | HookEventName::Stop => None,
+    }
+}
+
+pub(crate) fn validate_command_handler_condition(condition: &str) -> Result<(), String> {
+    parse_command_handler_condition(condition).map(|_| ())
+}
+
+pub(crate) fn matches_command_handler_condition(
+    condition: Option<&str>,
+    tool_name: Option<&str>,
+    command: Option<&str>,
+) -> bool {
+    let Some(condition) = condition else {
+        return true;
+    };
+
+    let Ok((expected_tool_name, command_pattern)) = parse_command_handler_condition(condition) else {
+        return false;
+    };
+
+    if tool_name != Some(expected_tool_name) {
+        return false;
+    }
+
+    match command_pattern {
+        Some(pattern) => command
+            .map(|command| wildcard_pattern_matches(pattern, command))
+            .unwrap_or(false),
+        None => true,
     }
 }
 
@@ -107,13 +138,58 @@ fn is_match_all_matcher(matcher: &str) -> bool {
     matcher.is_empty() || matcher == "*"
 }
 
+fn parse_command_handler_condition(condition: &str) -> Result<(&str, Option<&str>), String> {
+    let trimmed = condition.trim();
+    if trimmed.is_empty() {
+        return Err("condition cannot be empty".to_string());
+    }
+
+    match trimmed.split_once('(') {
+        Some((tool_name, rest)) => {
+            if tool_name.trim().is_empty() {
+                return Err("condition is missing a tool name".to_string());
+            }
+            if !rest.ends_with(')') {
+                return Err("condition must end with ')'".to_string());
+            }
+            let pattern = &rest[..rest.len() - 1];
+            if pattern.contains('(') {
+                return Err("nested '(' is not supported in conditions".to_string());
+            }
+            Ok((tool_name.trim(), (!pattern.is_empty()).then_some(pattern)))
+        }
+        None => Ok((trimmed, None)),
+    }
+}
+
+fn wildcard_pattern_matches(pattern: &str, value: &str) -> bool {
+    if is_match_all_matcher(pattern) {
+        return true;
+    }
+
+    let mut regex_pattern = String::from("^");
+    for ch in pattern.chars() {
+        match ch {
+            '*' => regex_pattern.push_str(".*"),
+            _ => regex_pattern.push_str(&regex::escape(&ch.to_string())),
+        }
+    }
+    regex_pattern.push('$');
+
+    regex::Regex::new(&regex_pattern)
+        .map(|regex| regex.is_match(value))
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use codex_protocol::protocol::HookEventName;
     use pretty_assertions::assert_eq;
 
     use super::matcher_pattern_for_event;
+    use super::matches_command_handler_condition;
     use super::matches_matcher;
+    use super::validate_command_handler_condition;
     use super::validate_matcher_pattern;
 
     #[test]
@@ -180,6 +256,10 @@ mod tests {
             Some("Edit|Write")
         );
         assert_eq!(
+            matcher_pattern_for_event(HookEventName::Notification, Some("permission_prompt")),
+            Some("permission_prompt")
+        );
+        assert_eq!(
             matcher_pattern_for_event(HookEventName::SessionStart, Some("startup|resume")),
             Some("startup|resume")
         );
@@ -187,5 +267,38 @@ mod tests {
             matcher_pattern_for_event(HookEventName::PermissionRequest, Some("WorkspaceTrust")),
             Some("WorkspaceTrust")
         );
+    }
+
+    #[test]
+    fn validates_command_handler_conditions() {
+        assert_eq!(validate_command_handler_condition("Bash(git push*)"), Ok(()));
+        assert_eq!(validate_command_handler_condition("Notification(permission_prompt)"), Ok(()));
+        assert!(validate_command_handler_condition("").is_err());
+        assert!(validate_command_handler_condition("(git push*)").is_err());
+        assert!(validate_command_handler_condition("Bash(git push*").is_err());
+    }
+
+    #[test]
+    fn command_handler_conditions_match_tool_name_and_command_pattern() {
+        assert!(matches_command_handler_condition(
+            Some("Bash(gh pr create*)"),
+            Some("Bash"),
+            Some("gh pr create --fill")
+        ));
+        assert!(!matches_command_handler_condition(
+            Some("Bash(gh pr create*)"),
+            Some("Bash"),
+            Some("git push origin main")
+        ));
+        assert!(matches_command_handler_condition(
+            Some("Notification(permission_prompt)"),
+            Some("Notification"),
+            Some("permission_prompt")
+        ));
+        assert!(matches_command_handler_condition(
+            Some("WorkspaceTrust"),
+            Some("WorkspaceTrust"),
+            None
+        ));
     }
 }

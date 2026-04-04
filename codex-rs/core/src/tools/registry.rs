@@ -6,6 +6,7 @@ use std::time::Instant;
 use crate::function_tool::FunctionCallError;
 use crate::hook_runtime::record_additional_contexts;
 use crate::hook_runtime::run_post_tool_use_hooks;
+use crate::hook_runtime::run_post_tool_use_failure_hooks;
 use crate::hook_runtime::run_pre_tool_use_hooks;
 use crate::memories::usage::emit_metric_for_tool_read;
 use crate::sandbox_tags::sandbox_tag;
@@ -71,6 +72,15 @@ pub trait ToolHandler: Send + Sync {
         None
     }
 
+    fn post_tool_use_failure_payload(
+        &self,
+        _call_id: &str,
+        _payload: &ToolPayload,
+        _error: &FunctionCallError,
+    ) -> Option<PostToolUseFailurePayload> {
+        None
+    }
+
     /// Perform the actual [ToolInvocation] and returns a [ToolOutput] containing
     /// the final output to return to the model.
     async fn handle(&self, invocation: ToolInvocation) -> Result<Self::Output, FunctionCallError>;
@@ -112,6 +122,14 @@ pub(crate) struct PostToolUsePayload {
     pub(crate) tool_response: Value,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PostToolUseFailurePayload {
+    pub(crate) command: String,
+    pub(crate) tool_input: Value,
+    pub(crate) error: String,
+    pub(crate) is_interrupt: bool,
+}
+
 #[async_trait]
 trait AnyToolHandler: Send + Sync {
     fn matches_kind(&self, payload: &ToolPayload) -> bool;
@@ -126,6 +144,13 @@ trait AnyToolHandler: Send + Sync {
         payload: &ToolPayload,
         result: &dyn ToolOutput,
     ) -> Option<PostToolUsePayload>;
+
+    fn post_tool_use_failure_payload(
+        &self,
+        call_id: &str,
+        payload: &ToolPayload,
+        error: &FunctionCallError,
+    ) -> Option<PostToolUseFailurePayload>;
 
     async fn handle_any(
         &self,
@@ -157,6 +182,15 @@ where
         result: &dyn ToolOutput,
     ) -> Option<PostToolUsePayload> {
         ToolHandler::post_tool_use_payload(self, call_id, payload, result)
+    }
+
+    fn post_tool_use_failure_payload(
+        &self,
+        call_id: &str,
+        payload: &ToolPayload,
+        error: &FunctionCallError,
+    ) -> Option<PostToolUseFailurePayload> {
+        ToolHandler::post_tool_use_failure_payload(self, call_id, payload, error)
     }
 
     async fn handle_any(
@@ -365,6 +399,20 @@ impl ToolRegistry {
         } else {
             None
         };
+        let post_tool_use_failure_payload = if success {
+            None
+        } else {
+            result
+                .as_ref()
+                .err()
+                .and_then(|error| {
+                    handler.post_tool_use_failure_payload(
+                        &invocation.call_id,
+                        &invocation.payload,
+                        error,
+                    )
+                })
+        };
         let post_tool_use_outcome = if let Some(post_tool_use_payload) = post_tool_use_payload {
             Some(
                 run_post_tool_use_hooks(
@@ -379,6 +427,23 @@ impl ToolRegistry {
         } else {
             None
         };
+        let post_tool_use_failure_outcome =
+            if let Some(post_tool_use_failure_payload) = post_tool_use_failure_payload {
+                Some(
+                    run_post_tool_use_failure_hooks(
+                        &invocation.session,
+                        &invocation.turn,
+                        invocation.call_id.clone(),
+                        post_tool_use_failure_payload.command,
+                        post_tool_use_failure_payload.tool_input,
+                        post_tool_use_failure_payload.error,
+                        post_tool_use_failure_payload.is_interrupt,
+                    )
+                    .await,
+                )
+            } else {
+                None
+            };
         // Deprecated: this is the legacy AfterToolUse hook. Prefer the new PostToolUse
         let hook_abort_error = dispatch_after_tool_use_hook(AfterToolUseHookDispatch {
             invocation: &invocation,
@@ -422,6 +487,15 @@ impl ToolRegistry {
                     ));
                 }
             }
+        }
+
+        if let Some(outcome) = &post_tool_use_failure_outcome {
+            record_additional_contexts(
+                &invocation.session,
+                &invocation.turn,
+                outcome.additional_contexts.clone(),
+            )
+            .await;
         }
 
         match result {

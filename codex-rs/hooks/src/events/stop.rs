@@ -523,6 +523,7 @@ mod tests {
         ConfiguredHandler {
             event_name: HookEventName::Stop,
             matcher: None,
+            condition: None,
             command: "echo hook".to_string(),
             timeout_sec: 600,
             status_message: None,
