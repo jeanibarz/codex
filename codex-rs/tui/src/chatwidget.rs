@@ -3943,6 +3943,9 @@ impl ChatWidget {
     }
 
     fn on_hook_started(&mut self, event: codex_protocol::protocol::HookStartedEvent) {
+        if !should_render_hook_started(&event) {
+            return;
+        }
         let label = hook_event_label(event.run.event_name);
         let mut message = format!("Running {label} hook");
         if let Some(status_message) = event.run.status_message
@@ -3956,6 +3959,9 @@ impl ChatWidget {
     }
 
     fn on_hook_completed(&mut self, event: codex_protocol::protocol::HookCompletedEvent) {
+        if !should_render_hook_completed(&event.run) {
+            return;
+        }
         let status = format!("{:?}", event.run.status).to_lowercase();
         let header = format!("{} hook ({status})", hook_event_label(event.run.event_name));
         let mut lines: Vec<ratatui::text::Line<'static>> = vec![header.into()];
@@ -11029,6 +11035,23 @@ fn hook_event_label(event_name: codex_protocol::protocol::HookEventName) -> &'st
         codex_protocol::protocol::HookEventName::UserPromptSubmit => "UserPromptSubmit",
         codex_protocol::protocol::HookEventName::Stop => "Stop",
     }
+}
+
+fn should_render_hook_started(event: &codex_protocol::protocol::HookStartedEvent) -> bool {
+    event
+        .run
+        .status_message
+        .as_ref()
+        .is_some_and(|message| !message.is_empty())
+}
+
+fn should_render_hook_completed(run: &codex_protocol::protocol::HookRunSummary) -> bool {
+    run.status != codex_protocol::protocol::HookRunStatus::Completed
+        || !run.entries.is_empty()
+        || run
+            .status_message
+            .as_ref()
+            .is_some_and(|message| !message.is_empty())
 }
 
 #[cfg(test)]
