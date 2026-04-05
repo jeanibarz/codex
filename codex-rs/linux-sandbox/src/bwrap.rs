@@ -435,13 +435,23 @@ fn append_read_only_subpath_args(
     }
 
     if !subpath.exists() {
-        if let Some(first_missing_component) = find_first_non_existent_component(subpath)
-            && is_within_allowed_write_paths(&first_missing_component, allowed_write_paths)
-        {
-            args.push("--ro-bind".to_string());
-            args.push("/dev/null".to_string());
-            args.push(path_to_string(&first_missing_component));
-        }
+        // Intentionally do NOT emit `--ro-bind /dev/null <missing_path>` here.
+        //
+        // When the protected path lives inside a writable workspace root
+        // (e.g. `<cwd>/.codex` before it exists), bwrap creates the bind
+        // target as an empty 0444 file on the host before mounting
+        // `/dev/null` over it — the workspace is bind-mounted from the host,
+        // so the target creation persists after the sandbox exits. That
+        // leaves a stray `.codex` artifact in the user's worktree every
+        // time a sandboxed command runs.
+        //
+        // Writes to protected paths are still rejected by the protocol
+        // layer: `FileSystemSandboxPolicy::can_write_path_with_cwd` returns
+        // false for anything under `.codex/`, so tool calls that try to
+        // create the directory or write under it are blocked by Codex
+        // itself before reaching the sandbox.
+        //
+        // Context: https://github.com/jeanibarz/looper/issues/234
         return;
     }
 
@@ -781,12 +791,13 @@ mod tests {
                 "--bind".to_string(),
                 "/".to_string(),
                 "/".to_string(),
-                // Mask the default protected .codex subpath under that writable
-                // root. Because the root is `/` in this test, the carveout path
-                // appears as `/.codex`.
-                "--ro-bind".to_string(),
-                "/dev/null".to_string(),
-                "/.codex".to_string(),
+                // The default protected `.codex` carveout under the writable
+                // root is NOT emitted here: since `/.codex` does not exist on
+                // the test host, `append_read_only_subpath_args` returns
+                // early to avoid bwrap creating a stray stub file at the
+                // bind target. Writes to `.codex/*` are still blocked by
+                // the protocol layer. See issue looper#234.
+                //
                 // Rebind /dev after the root bind so device nodes remain
                 // writable/usable inside the writable root.
                 "--bind".to_string(),
