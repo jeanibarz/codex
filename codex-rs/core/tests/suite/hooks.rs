@@ -1666,7 +1666,7 @@ async fn pre_tool_use_blocks_exec_command_before_execution() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn pre_tool_use_does_not_fire_for_non_shell_tools() -> Result<()> {
+async fn pre_tool_use_fires_for_non_shell_tools() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -1677,7 +1677,7 @@ async fn pre_tool_use_does_not_fire_for_non_shell_tools() -> Result<()> {
             "status": "pending",
         }]
     });
-    let responses = mount_sse_sequence(
+    let _responses = mount_sse_sequence(
         &server,
         vec![
             sse(vec![
@@ -1700,9 +1700,12 @@ async fn pre_tool_use_does_not_fire_for_non_shell_tools() -> Result<()> {
 
     let mut builder = test_codex()
         .with_pre_build_hook(|home| {
-            if let Err(error) =
-                write_pre_tool_use_hook(home, /*matcher*/ None, "json_deny", "should not fire")
-            {
+            if let Err(error) = write_pre_tool_use_hook(
+                home,
+                /*matcher*/ None,
+                "record_only",
+                "unused",
+            ) {
                 panic!("failed to write pre tool use hook test fixture: {error}");
             }
         })
@@ -1716,22 +1719,16 @@ async fn pre_tool_use_does_not_fire_for_non_shell_tools() -> Result<()> {
 
     test.submit_turn("update the plan").await?;
 
-    let requests = responses.requests();
-    assert_eq!(requests.len(), 2);
-    let output_item = requests[1].function_call_output(call_id);
-    let output = output_item
-        .get("output")
-        .and_then(Value::as_str)
-        .expect("update plan output string");
+    let hook_inputs = read_pre_tool_use_hook_inputs(test.codex_home_path())?;
     assert!(
-        !output.contains("should not fire"),
-        "non-shell tool output should not be blocked by PreToolUse",
+        !hook_inputs.is_empty(),
+        "uniform hook dispatch should fire PreToolUse for non-shell tools"
     );
-
-    let hook_log_path = test.codex_home_path().join("pre_tool_use_hook_log.jsonl");
     assert!(
-        !hook_log_path.exists(),
-        "non-shell tools should not trigger pre tool use hooks",
+        hook_inputs.iter().any(|input| {
+            input.get("tool_name").and_then(Value::as_str) == Some("update_plan")
+        }),
+        "PreToolUse payload should carry tool_name=update_plan, got {hook_inputs:?}"
     );
 
     Ok(())
@@ -2121,7 +2118,7 @@ async fn post_tool_use_exit_two_replaces_one_shot_exec_command_output_with_feedb
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn post_tool_use_does_not_fire_for_non_shell_tools() -> Result<()> {
+async fn post_tool_use_fires_for_non_shell_tools() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -2132,7 +2129,7 @@ async fn post_tool_use_does_not_fire_for_non_shell_tools() -> Result<()> {
             "status": "pending",
         }]
     });
-    let responses = mount_sse_sequence(
+    let _responses = mount_sse_sequence(
         &server,
         vec![
             sse(vec![
@@ -2158,8 +2155,8 @@ async fn post_tool_use_does_not_fire_for_non_shell_tools() -> Result<()> {
             if let Err(error) = write_post_tool_use_hook(
                 home,
                 /*matcher*/ None,
-                "decision_block",
-                "should not fire",
+                "record_only",
+                "unused",
             ) {
                 panic!("failed to write post tool use hook test fixture: {error}");
             }
@@ -2174,22 +2171,16 @@ async fn post_tool_use_does_not_fire_for_non_shell_tools() -> Result<()> {
 
     test.submit_turn("update the plan").await?;
 
-    let requests = responses.requests();
-    assert_eq!(requests.len(), 2);
-    let output_item = requests[1].function_call_output(call_id);
-    let output = output_item
-        .get("output")
-        .and_then(Value::as_str)
-        .expect("update plan output string");
+    let hook_inputs = read_post_tool_use_hook_inputs(test.codex_home_path())?;
     assert!(
-        !output.contains("should not fire"),
-        "non-shell tool output should not be affected by PostToolUse",
+        !hook_inputs.is_empty(),
+        "uniform hook dispatch should fire PostToolUse for non-shell tools"
     );
-
-    let hook_log_path = test.codex_home_path().join("post_tool_use_hook_log.jsonl");
     assert!(
-        !hook_log_path.exists(),
-        "non-shell tools should not trigger post tool use hooks",
+        hook_inputs.iter().any(|input| {
+            input.get("tool_name").and_then(Value::as_str) == Some("update_plan")
+        }),
+        "PostToolUse payload should carry tool_name=update_plan, got {hook_inputs:?}"
     );
 
     Ok(())

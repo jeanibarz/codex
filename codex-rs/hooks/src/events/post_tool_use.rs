@@ -83,7 +83,7 @@ pub(crate) async fn run(
         hook_event_name: "PostToolUse".to_string(),
         model: request.model.clone(),
         permission_mode: request.permission_mode.clone(),
-        tool_name: "Bash".to_string(),
+        tool_name: request.tool_name.clone(),
         tool_input: PostToolUseToolInput {
             command: request.command.clone(),
         },

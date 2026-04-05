@@ -134,16 +134,18 @@ impl ToolHandler for UnifiedExecHandler {
 
         parse_arguments::<ExecCommandArgs>(arguments)
             .ok()
-            .map(|args| PreToolUsePayload { command: args.cmd })
+            .map(|args| PreToolUsePayload {
+                tool_name: "Bash".to_string(),
+                command: args.cmd,
+            })
     }
 
     fn post_tool_use_payload(
         &self,
-        call_id: &str,
-        payload: &ToolPayload,
+        invocation: &ToolInvocation,
         result: &dyn ToolOutput,
     ) -> Option<PostToolUsePayload> {
-        let ToolPayload::Function { arguments } = payload else {
+        let ToolPayload::Function { arguments } = &invocation.payload else {
             return None;
         };
 
@@ -152,8 +154,9 @@ impl ToolHandler for UnifiedExecHandler {
             return None;
         }
 
-        let tool_response = result.post_tool_use_response(call_id, payload)?;
+        let tool_response = result.post_tool_use_response(&invocation.call_id, &invocation.payload)?;
         Some(PostToolUsePayload {
+            tool_name: "Bash".to_string(),
             command: args.cmd,
             tool_response,
         })
@@ -161,17 +164,17 @@ impl ToolHandler for UnifiedExecHandler {
 
     fn post_tool_use_failure_payload(
         &self,
-        _call_id: &str,
-        payload: &ToolPayload,
+        invocation: &ToolInvocation,
         error: &FunctionCallError,
     ) -> Option<PostToolUseFailurePayload> {
-        let ToolPayload::Function { arguments } = payload else {
+        let ToolPayload::Function { arguments } = &invocation.payload else {
             return None;
         };
 
         let args = parse_arguments::<ExecCommandArgs>(arguments).ok()?;
         let tool_input = serde_json::from_str(arguments).ok()?;
         Some(PostToolUseFailurePayload {
+            tool_name: "Bash".to_string(),
             command: args.cmd,
             tool_input,
             error: error.to_string(),

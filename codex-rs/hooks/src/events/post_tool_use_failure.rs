@@ -84,7 +84,7 @@ pub(crate) async fn run(
         hook_event_name: "PostToolUseFailure".to_string(),
         model: request.model.clone(),
         permission_mode: request.permission_mode.clone(),
-        tool_name: "Bash".to_string(),
+        tool_name: request.tool_name.clone(),
         tool_input: request.tool_input.clone(),
         tool_use_id: request.tool_use_id.clone(),
         error: request.error.clone(),

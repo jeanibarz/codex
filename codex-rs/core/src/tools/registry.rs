@@ -59,26 +59,42 @@ pub trait ToolHandler: Send + Sync {
         false
     }
 
-    fn pre_tool_use_payload(&self, _invocation: &ToolInvocation) -> Option<PreToolUsePayload> {
-        None
+    /// Default payload used when the tool handler does not provide a
+    /// specialized implementation. This lets every tool invocation surface
+    /// through the PreToolUse hook uniformly (Claude Code compatibility).
+    fn pre_tool_use_payload(&self, invocation: &ToolInvocation) -> Option<PreToolUsePayload> {
+        Some(PreToolUsePayload {
+            tool_name: invocation.tool_name.clone(),
+            command: invocation.payload.log_payload().into_owned(),
+        })
     }
 
     fn post_tool_use_payload(
         &self,
-        _call_id: &str,
-        _payload: &ToolPayload,
-        _result: &dyn ToolOutput,
+        invocation: &ToolInvocation,
+        result: &dyn ToolOutput,
     ) -> Option<PostToolUsePayload> {
-        None
+        Some(PostToolUsePayload {
+            tool_name: invocation.tool_name.clone(),
+            command: invocation.payload.log_payload().into_owned(),
+            tool_response: result
+                .post_tool_use_response(&invocation.call_id, &invocation.payload)
+                .unwrap_or(Value::Null),
+        })
     }
 
     fn post_tool_use_failure_payload(
         &self,
-        _call_id: &str,
-        _payload: &ToolPayload,
-        _error: &FunctionCallError,
+        invocation: &ToolInvocation,
+        error: &FunctionCallError,
     ) -> Option<PostToolUseFailurePayload> {
-        None
+        Some(PostToolUseFailurePayload {
+            tool_name: invocation.tool_name.clone(),
+            command: invocation.payload.log_payload().into_owned(),
+            tool_input: Value::Null,
+            error: error.to_string(),
+            is_interrupt: false,
+        })
     }
 
     /// Perform the actual [ToolInvocation] and returns a [ToolOutput] containing
@@ -113,17 +129,20 @@ impl AnyToolResult {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PreToolUsePayload {
+    pub(crate) tool_name: String,
     pub(crate) command: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PostToolUsePayload {
+    pub(crate) tool_name: String,
     pub(crate) command: String,
     pub(crate) tool_response: Value,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PostToolUseFailurePayload {
+    pub(crate) tool_name: String,
     pub(crate) command: String,
     pub(crate) tool_input: Value,
     pub(crate) error: String,
@@ -140,15 +159,13 @@ trait AnyToolHandler: Send + Sync {
 
     fn post_tool_use_payload(
         &self,
-        call_id: &str,
-        payload: &ToolPayload,
+        invocation: &ToolInvocation,
         result: &dyn ToolOutput,
     ) -> Option<PostToolUsePayload>;
 
     fn post_tool_use_failure_payload(
         &self,
-        call_id: &str,
-        payload: &ToolPayload,
+        invocation: &ToolInvocation,
         error: &FunctionCallError,
     ) -> Option<PostToolUseFailurePayload>;
 
@@ -177,20 +194,18 @@ where
 
     fn post_tool_use_payload(
         &self,
-        call_id: &str,
-        payload: &ToolPayload,
+        invocation: &ToolInvocation,
         result: &dyn ToolOutput,
     ) -> Option<PostToolUsePayload> {
-        ToolHandler::post_tool_use_payload(self, call_id, payload, result)
+        ToolHandler::post_tool_use_payload(self, invocation, result)
     }
 
     fn post_tool_use_failure_payload(
         &self,
-        call_id: &str,
-        payload: &ToolPayload,
+        invocation: &ToolInvocation,
         error: &FunctionCallError,
     ) -> Option<PostToolUseFailurePayload> {
-        ToolHandler::post_tool_use_failure_payload(self, call_id, payload, error)
+        ToolHandler::post_tool_use_failure_payload(self, invocation, error)
     }
 
     async fn handle_any(
@@ -335,6 +350,7 @@ impl ToolRegistry {
                 &invocation.session,
                 &invocation.turn,
                 invocation.call_id.clone(),
+                pre_tool_use_payload.tool_name.clone(),
                 pre_tool_use_payload.command.clone(),
             )
             .await
@@ -389,13 +405,9 @@ impl ToolRegistry {
         emit_metric_for_tool_read(&invocation, success).await;
         let post_tool_use_payload = if success {
             let guard = response_cell.lock().await;
-            guard.as_ref().and_then(|result| {
-                handler.post_tool_use_payload(
-                    &result.call_id,
-                    &result.payload,
-                    result.result.as_ref(),
-                )
-            })
+            guard
+                .as_ref()
+                .and_then(|result| handler.post_tool_use_payload(&invocation, result.result.as_ref()))
         } else {
             None
         };
@@ -405,13 +417,7 @@ impl ToolRegistry {
             result
                 .as_ref()
                 .err()
-                .and_then(|error| {
-                    handler.post_tool_use_failure_payload(
-                        &invocation.call_id,
-                        &invocation.payload,
-                        error,
-                    )
-                })
+                .and_then(|error| handler.post_tool_use_failure_payload(&invocation, error))
         };
         let post_tool_use_outcome = if let Some(post_tool_use_payload) = post_tool_use_payload {
             Some(
@@ -419,6 +425,7 @@ impl ToolRegistry {
                     &invocation.session,
                     &invocation.turn,
                     invocation.call_id.clone(),
+                    post_tool_use_payload.tool_name,
                     post_tool_use_payload.command,
                     post_tool_use_payload.tool_response,
                 )
@@ -434,6 +441,7 @@ impl ToolRegistry {
                         &invocation.session,
                         &invocation.turn,
                         invocation.call_id.clone(),
+                        post_tool_use_failure_payload.tool_name,
                         post_tool_use_failure_payload.command,
                         post_tool_use_failure_payload.tool_input,
                         post_tool_use_failure_payload.error,

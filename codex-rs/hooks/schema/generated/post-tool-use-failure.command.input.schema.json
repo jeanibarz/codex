@@ -41,7 +41,6 @@
     },
     "tool_input": true,
     "tool_name": {
-      "const": "Bash",
       "type": "string"
     },
     "tool_use_id": {

@@ -217,6 +217,7 @@ async fn exec_command_pre_tool_use_payload_uses_raw_command() {
             payload,
         }),
         Some(crate::tools::registry::PreToolUsePayload {
+            tool_name: "Bash".to_string(),
             command: "printf exec command".to_string(),
         })
     );
@@ -244,8 +245,21 @@ async fn exec_command_pre_tool_use_payload_skips_write_stdin() {
     );
 }
 
-#[test]
-fn exec_command_post_tool_use_payload_uses_output_for_noninteractive_one_shot_commands() {
+async fn make_exec_invocation(call_id: &str, payload: ToolPayload) -> ToolInvocation {
+    let (session, turn) = make_session_and_context().await;
+    ToolInvocation {
+        session: session.into(),
+        turn: turn.into(),
+        tracker: Arc::new(Mutex::new(TurnDiffTracker::new())),
+        call_id: call_id.to_string(),
+        tool_name: "exec_command".to_string(),
+        tool_namespace: None,
+        payload,
+    }
+}
+
+#[tokio::test]
+async fn exec_command_post_tool_use_payload_uses_output_for_noninteractive_one_shot_commands() {
     let payload = ToolPayload::Function {
         arguments: serde_json::json!({ "cmd": "echo three", "tty": false }).to_string(),
     };
@@ -264,18 +278,20 @@ fn exec_command_post_tool_use_payload_uses_output_for_noninteractive_one_shot_co
             "echo three".to_string(),
         ]),
     };
+    let invocation = make_exec_invocation("call-43", payload).await;
 
     assert_eq!(
-        UnifiedExecHandler.post_tool_use_payload("call-43", &payload, &output),
+        UnifiedExecHandler.post_tool_use_payload(&invocation, &output),
         Some(crate::tools::registry::PostToolUsePayload {
+            tool_name: "Bash".to_string(),
             command: "echo three".to_string(),
             tool_response: serde_json::json!("three"),
         })
     );
 }
 
-#[test]
-fn exec_command_post_tool_use_payload_skips_interactive_exec() {
+#[tokio::test]
+async fn exec_command_post_tool_use_payload_skips_interactive_exec() {
     let payload = ToolPayload::Function {
         arguments: serde_json::json!({ "cmd": "echo three", "tty": true }).to_string(),
     };
@@ -294,15 +310,16 @@ fn exec_command_post_tool_use_payload_skips_interactive_exec() {
             "echo three".to_string(),
         ]),
     };
+    let invocation = make_exec_invocation("call-44", payload).await;
 
     assert_eq!(
-        UnifiedExecHandler.post_tool_use_payload("call-44", &payload, &output),
+        UnifiedExecHandler.post_tool_use_payload(&invocation, &output),
         None
     );
 }
 
-#[test]
-fn exec_command_post_tool_use_payload_skips_running_sessions() {
+#[tokio::test]
+async fn exec_command_post_tool_use_payload_skips_running_sessions() {
     let payload = ToolPayload::Function {
         arguments: serde_json::json!({ "cmd": "echo three", "tty": false }).to_string(),
     };
@@ -321,26 +338,28 @@ fn exec_command_post_tool_use_payload_skips_running_sessions() {
             "echo three".to_string(),
         ]),
     };
+    let invocation = make_exec_invocation("call-45", payload).await;
 
     assert_eq!(
-        UnifiedExecHandler.post_tool_use_payload("call-45", &payload, &output),
+        UnifiedExecHandler.post_tool_use_payload(&invocation, &output),
         None
     );
 }
 
-#[test]
-fn exec_command_post_tool_use_failure_payload_uses_original_input() {
+#[tokio::test]
+async fn exec_command_post_tool_use_failure_payload_uses_original_input() {
     let payload = ToolPayload::Function {
         arguments: serde_json::json!({ "cmd": "echo three", "tty": false }).to_string(),
     };
+    let invocation = make_exec_invocation("call-46", payload).await;
 
     assert_eq!(
         UnifiedExecHandler.post_tool_use_failure_payload(
-            "call-46",
-            &payload,
+            &invocation,
             &FunctionCallError::RespondToModel("exec failed".to_string()),
         ),
         Some(crate::tools::registry::PostToolUseFailurePayload {
+            tool_name: "Bash".to_string(),
             command: "echo three".to_string(),
             tool_input: serde_json::json!({ "cmd": "echo three", "tty": false }),
             error: "exec failed".to_string(),

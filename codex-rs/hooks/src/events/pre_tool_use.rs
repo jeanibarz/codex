@@ -74,7 +74,7 @@ pub(crate) async fn run(
         hook_event_name: "PreToolUse".to_string(),
         model: request.model.clone(),
         permission_mode: request.permission_mode.clone(),
-        tool_name: "Bash".to_string(),
+        tool_name: request.tool_name.clone(),
         tool_input: crate::schema::PreToolUseToolInput {
             command: request.command.clone(),
         },
