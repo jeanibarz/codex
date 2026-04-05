@@ -122,7 +122,7 @@ async fn plugin_install_returns_invalid_request_for_not_available_plugin() -> Re
     )?;
     write_plugin_source(repo_root.path(), "sample-plugin", &[])?;
     let marketplace_path =
-        AbsolutePathBuf::try_from(repo_root.path().join(".agents/plugins/marketplace.json"))?;
+        AbsolutePathBuf::try_from(repo_root.path().join(".claude/plugins/marketplace.json"))?;
 
     let mut mcp = McpProcess::new(codex_home.path()).await?;
     timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
@@ -150,9 +150,9 @@ async fn plugin_install_returns_invalid_request_for_not_available_plugin() -> Re
 async fn plugin_install_returns_invalid_request_for_disallowed_product_plugin() -> Result<()> {
     let codex_home = TempDir::new()?;
     let repo_root = TempDir::new()?;
-    std::fs::create_dir_all(repo_root.path().join(".agents/plugins"))?;
+    std::fs::create_dir_all(repo_root.path().join(".claude/plugins"))?;
     std::fs::write(
-        repo_root.path().join(".agents/plugins/marketplace.json"),
+        repo_root.path().join(".claude/plugins/marketplace.json"),
         r#"{
   "name": "debug",
   "plugins": [
@@ -171,7 +171,7 @@ async fn plugin_install_returns_invalid_request_for_disallowed_product_plugin() 
     )?;
     write_plugin_source(repo_root.path(), "sample-plugin", &[])?;
     let marketplace_path =
-        AbsolutePathBuf::try_from(repo_root.path().join(".agents/plugins/marketplace.json"))?;
+        AbsolutePathBuf::try_from(repo_root.path().join(".claude/plugins/marketplace.json"))?;
 
     let mut mcp =
         McpProcess::new_with_args(codex_home.path(), &["--session-source", "atlas"]).await?;
@@ -222,7 +222,7 @@ async fn plugin_install_force_remote_sync_enables_remote_plugin_before_local_ins
     )?;
     write_plugin_source(repo_root.path(), "sample-plugin", &[])?;
     let marketplace_path =
-        AbsolutePathBuf::try_from(repo_root.path().join(".agents/plugins/marketplace.json"))?;
+        AbsolutePathBuf::try_from(repo_root.path().join(".claude/plugins/marketplace.json"))?;
 
     Mock::given(method("POST"))
         .and(path("/backend-api/plugins/sample-plugin@debug/enable"))
@@ -291,7 +291,7 @@ async fn plugin_install_tracks_analytics_event() -> Result<()> {
     )?;
     write_plugin_source(repo_root.path(), "sample-plugin", &[])?;
     let marketplace_path =
-        AbsolutePathBuf::try_from(repo_root.path().join(".agents/plugins/marketplace.json"))?;
+        AbsolutePathBuf::try_from(repo_root.path().join(".claude/plugins/marketplace.json"))?;
 
     let mut mcp = McpProcess::new(codex_home.path()).await?;
     timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
@@ -406,7 +406,7 @@ async fn plugin_install_returns_apps_needing_auth() -> Result<()> {
     )?;
     write_plugin_source(repo_root.path(), "sample-plugin", &["alpha", "beta"])?;
     let marketplace_path =
-        AbsolutePathBuf::try_from(repo_root.path().join(".agents/plugins/marketplace.json"))?;
+        AbsolutePathBuf::try_from(repo_root.path().join(".claude/plugins/marketplace.json"))?;
 
     let mut mcp = McpProcess::new(codex_home.path()).await?;
     timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
@@ -490,7 +490,7 @@ async fn plugin_install_filters_disallowed_apps_needing_auth() -> Result<()> {
         &["alpha", "asdk_app_6938a94a61d881918ef32cb999ff937c"],
     )?;
     let marketplace_path =
-        AbsolutePathBuf::try_from(repo_root.path().join(".agents/plugins/marketplace.json"))?;
+        AbsolutePathBuf::try_from(repo_root.path().join(".claude/plugins/marketplace.json"))?;
 
     let mut mcp = McpProcess::new(codex_home.path()).await?;
     timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
@@ -557,7 +557,7 @@ async fn plugin_install_makes_bundled_mcp_servers_available_to_followup_requests
 }"#,
     )?;
     let marketplace_path =
-        AbsolutePathBuf::try_from(repo_root.path().join(".agents/plugins/marketplace.json"))?;
+        AbsolutePathBuf::try_from(repo_root.path().join(".claude/plugins/marketplace.json"))?;
 
     let mut mcp = McpProcess::new(codex_home.path()).await?;
     timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
@@ -800,9 +800,9 @@ fn write_plugin_marketplace(
         String::new()
     };
     std::fs::create_dir_all(repo_root.join(".git"))?;
-    std::fs::create_dir_all(repo_root.join(".agents/plugins"))?;
+    std::fs::create_dir_all(repo_root.join(".claude/plugins"))?;
     std::fs::write(
-        repo_root.join(".agents/plugins/marketplace.json"),
+        repo_root.join(".claude/plugins/marketplace.json"),
         format!(
             r#"{{
   "name": "{marketplace_name}",

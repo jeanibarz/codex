@@ -67,7 +67,7 @@ pub(crate) fn write_openai_curated_marketplace(root: &Path, plugin_names: &[&str
         .collect::<Vec<_>>()
         .join(",\n");
     write_file(
-        &root.join(".agents/plugins/marketplace.json"),
+        &root.join(".claude/plugins/marketplace.json"),
         &format!(
             r#"{{
   "name": "{OPENAI_CURATED_MARKETPLACE_NAME}",

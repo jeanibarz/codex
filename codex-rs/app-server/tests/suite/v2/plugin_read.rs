@@ -51,12 +51,12 @@ async fn plugin_read_returns_plugin_details_with_bundle_contents() -> Result<()>
     let repo_root = TempDir::new()?;
     let plugin_root = repo_root.path().join("plugins/demo-plugin");
     std::fs::create_dir_all(repo_root.path().join(".git"))?;
-    std::fs::create_dir_all(repo_root.path().join(".agents/plugins"))?;
+    std::fs::create_dir_all(repo_root.path().join(".claude/plugins"))?;
     std::fs::create_dir_all(plugin_root.join(".codex-plugin"))?;
     std::fs::create_dir_all(plugin_root.join("skills/thread-summarizer"))?;
     std::fs::create_dir_all(plugin_root.join("skills/chatgpt-only"))?;
     std::fs::write(
-        repo_root.path().join(".agents/plugins/marketplace.json"),
+        repo_root.path().join(".claude/plugins/marketplace.json"),
         r#"{
   "name": "codex-curated",
   "plugins": [
@@ -176,7 +176,7 @@ enabled = true
     timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
 
     let marketplace_path =
-        AbsolutePathBuf::try_from(repo_root.path().join(".agents/plugins/marketplace.json"))?;
+        AbsolutePathBuf::try_from(repo_root.path().join(".claude/plugins/marketplace.json"))?;
     let request_id = mcp
         .send_plugin_read_request(PluginReadParams {
             marketplace_path: marketplace_path.clone(),
@@ -319,7 +319,7 @@ async fn plugin_read_returns_app_needs_auth() -> Result<()> {
     )?;
     write_plugin_source(repo_root.path(), "sample-plugin", &["alpha", "beta"])?;
     let marketplace_path =
-        AbsolutePathBuf::try_from(repo_root.path().join(".agents/plugins/marketplace.json"))?;
+        AbsolutePathBuf::try_from(repo_root.path().join(".claude/plugins/marketplace.json"))?;
 
     let mut mcp = McpProcess::new(codex_home.path()).await?;
     timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
@@ -359,10 +359,10 @@ async fn plugin_read_accepts_legacy_string_default_prompt() -> Result<()> {
     let repo_root = TempDir::new()?;
     let plugin_root = repo_root.path().join("plugins/demo-plugin");
     std::fs::create_dir_all(repo_root.path().join(".git"))?;
-    std::fs::create_dir_all(repo_root.path().join(".agents/plugins"))?;
+    std::fs::create_dir_all(repo_root.path().join(".claude/plugins"))?;
     std::fs::create_dir_all(plugin_root.join(".codex-plugin"))?;
     std::fs::write(
-        repo_root.path().join(".agents/plugins/marketplace.json"),
+        repo_root.path().join(".claude/plugins/marketplace.json"),
         r#"{
   "name": "codex-curated",
   "plugins": [
@@ -393,7 +393,7 @@ async fn plugin_read_accepts_legacy_string_default_prompt() -> Result<()> {
     let request_id = mcp
         .send_plugin_read_request(PluginReadParams {
             marketplace_path: AbsolutePathBuf::try_from(
-                repo_root.path().join(".agents/plugins/marketplace.json"),
+                repo_root.path().join(".claude/plugins/marketplace.json"),
             )?,
             plugin_name: "demo-plugin".to_string(),
         })
@@ -423,9 +423,9 @@ async fn plugin_read_returns_invalid_request_when_plugin_is_missing() -> Result<
     let codex_home = TempDir::new()?;
     let repo_root = TempDir::new()?;
     std::fs::create_dir_all(repo_root.path().join(".git"))?;
-    std::fs::create_dir_all(repo_root.path().join(".agents/plugins"))?;
+    std::fs::create_dir_all(repo_root.path().join(".claude/plugins"))?;
     std::fs::write(
-        repo_root.path().join(".agents/plugins/marketplace.json"),
+        repo_root.path().join(".claude/plugins/marketplace.json"),
         r#"{
   "name": "codex-curated",
   "plugins": [
@@ -447,7 +447,7 @@ async fn plugin_read_returns_invalid_request_when_plugin_is_missing() -> Result<
     let request_id = mcp
         .send_plugin_read_request(PluginReadParams {
             marketplace_path: AbsolutePathBuf::try_from(
-                repo_root.path().join(".agents/plugins/marketplace.json"),
+                repo_root.path().join(".claude/plugins/marketplace.json"),
             )?,
             plugin_name: "missing-plugin".to_string(),
         })
@@ -474,10 +474,10 @@ async fn plugin_read_returns_invalid_request_when_plugin_manifest_is_missing() -
     let repo_root = TempDir::new()?;
     let plugin_root = repo_root.path().join("plugins/demo-plugin");
     std::fs::create_dir_all(repo_root.path().join(".git"))?;
-    std::fs::create_dir_all(repo_root.path().join(".agents/plugins"))?;
+    std::fs::create_dir_all(repo_root.path().join(".claude/plugins"))?;
     std::fs::create_dir_all(&plugin_root)?;
     std::fs::write(
-        repo_root.path().join(".agents/plugins/marketplace.json"),
+        repo_root.path().join(".claude/plugins/marketplace.json"),
         r#"{
   "name": "codex-curated",
   "plugins": [
@@ -499,7 +499,7 @@ async fn plugin_read_returns_invalid_request_when_plugin_manifest_is_missing() -
     let request_id = mcp
         .send_plugin_read_request(PluginReadParams {
             marketplace_path: AbsolutePathBuf::try_from(
-                repo_root.path().join(".agents/plugins/marketplace.json"),
+                repo_root.path().join(".claude/plugins/marketplace.json"),
             )?,
             plugin_name: "demo-plugin".to_string(),
         })
@@ -704,9 +704,9 @@ fn write_plugin_marketplace(
     source_path: &str,
 ) -> std::io::Result<()> {
     std::fs::create_dir_all(repo_root.join(".git"))?;
-    std::fs::create_dir_all(repo_root.join(".agents/plugins"))?;
+    std::fs::create_dir_all(repo_root.join(".claude/plugins"))?;
     std::fs::write(
-        repo_root.join(".agents/plugins/marketplace.json"),
+        repo_root.join(".claude/plugins/marketplace.json"),
         format!(
             r#"{{
   "name": "{marketplace_name}",

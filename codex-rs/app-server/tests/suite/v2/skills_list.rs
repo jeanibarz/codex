@@ -27,6 +27,51 @@ fn write_skill(root: &TempDir, name: &str) -> Result<()> {
 }
 
 #[tokio::test]
+async fn skills_list_includes_repo_local_claude_skills() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let repo = TempDir::new()?;
+    std::fs::write(repo.path().join(".git"), "gitdir: fake\n")?;
+
+    let skill_dir = repo
+        .path()
+        .join(".claude")
+        .join("skills")
+        .join("claude-local");
+    std::fs::create_dir_all(&skill_dir)?;
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: claude-local\ndescription: claude-local description\n---\n\n# Body\n",
+    )?;
+
+    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+
+    let request_id = mcp
+        .send_skills_list_request(SkillsListParams {
+            cwds: vec![repo.path().to_path_buf()],
+            force_reload: true,
+            per_cwd_extra_user_roots: None,
+        })
+        .await?;
+
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    let SkillsListResponse { data } = to_response(response)?;
+    assert_eq!(data.len(), 1);
+    assert_eq!(data[0].cwd, repo.path().to_path_buf());
+    assert!(
+        data[0]
+            .skills
+            .iter()
+            .any(|skill| skill.name == "claude-local")
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn skills_list_includes_skills_from_per_cwd_extra_user_roots() -> Result<()> {
     let codex_home = TempDir::new()?;
     let cwd = TempDir::new()?;

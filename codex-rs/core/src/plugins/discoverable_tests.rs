@@ -95,7 +95,7 @@ async fn list_tool_suggest_discoverable_plugins_omits_installed_curated_plugins(
         .install_plugin(PluginInstallRequest {
             plugin_name: "slack".to_string(),
             marketplace_path: AbsolutePathBuf::try_from(
-                curated_root.join(".agents/plugins/marketplace.json"),
+                curated_root.join(".claude/plugins/marketplace.json"),
             )
             .expect("marketplace path"),
         })

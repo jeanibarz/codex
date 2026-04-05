@@ -906,10 +906,10 @@ async fn install_plugin_updates_config_with_relative_path_and_plugin_key() {
     let tmp = tempfile::tempdir().unwrap();
     let repo_root = tmp.path().join("repo");
     fs::create_dir_all(repo_root.join(".git")).unwrap();
-    fs::create_dir_all(repo_root.join(".agents/plugins")).unwrap();
+    fs::create_dir_all(repo_root.join(".claude/plugins")).unwrap();
     write_plugin(&repo_root, "sample-plugin", "sample-plugin");
     fs::write(
-        repo_root.join(".agents/plugins/marketplace.json"),
+        repo_root.join(".claude/plugins/marketplace.json"),
         r#"{
   "name": "debug",
   "plugins": [
@@ -932,7 +932,7 @@ async fn install_plugin_updates_config_with_relative_path_and_plugin_key() {
         .install_plugin(PluginInstallRequest {
             plugin_name: "sample-plugin".to_string(),
             marketplace_path: AbsolutePathBuf::try_from(
-                repo_root.join(".agents/plugins/marketplace.json"),
+                repo_root.join(".claude/plugins/marketplace.json"),
             )
             .unwrap(),
         })
@@ -997,7 +997,7 @@ async fn list_marketplaces_includes_enabled_state() {
     let tmp = tempfile::tempdir().unwrap();
     let repo_root = tmp.path().join("repo");
     fs::create_dir_all(repo_root.join(".git")).unwrap();
-    fs::create_dir_all(repo_root.join(".agents/plugins")).unwrap();
+    fs::create_dir_all(repo_root.join(".claude/plugins")).unwrap();
     write_plugin(
         &tmp.path().join("plugins/cache/debug"),
         "enabled-plugin/local",
@@ -1009,7 +1009,7 @@ async fn list_marketplaces_includes_enabled_state() {
         "disabled-plugin",
     );
     fs::write(
-        repo_root.join(".agents/plugins/marketplace.json"),
+        repo_root.join(".claude/plugins/marketplace.json"),
         r#"{
   "name": "debug",
   "plugins": [
@@ -1055,7 +1055,7 @@ enabled = false
         .find(|marketplace| {
             marketplace.path
                 == AbsolutePathBuf::try_from(
-                    tmp.path().join("repo/.agents/plugins/marketplace.json"),
+                    tmp.path().join("repo/.claude/plugins/marketplace.json"),
                 )
                 .unwrap()
         })
@@ -1066,7 +1066,7 @@ enabled = false
         ConfiguredMarketplace {
             name: "debug".to_string(),
             path: AbsolutePathBuf::try_from(
-                tmp.path().join("repo/.agents/plugins/marketplace.json"),
+                tmp.path().join("repo/.claude/plugins/marketplace.json"),
             )
             .unwrap(),
             interface: None,
@@ -1113,9 +1113,9 @@ async fn list_marketplaces_returns_empty_when_feature_disabled() {
     let tmp = tempfile::tempdir().unwrap();
     let repo_root = tmp.path().join("repo");
     fs::create_dir_all(repo_root.join(".git")).unwrap();
-    fs::create_dir_all(repo_root.join(".agents/plugins")).unwrap();
+    fs::create_dir_all(repo_root.join(".claude/plugins")).unwrap();
     fs::write(
-        repo_root.join(".agents/plugins/marketplace.json"),
+        repo_root.join(".claude/plugins/marketplace.json"),
         r#"{
   "name": "debug",
   "plugins": [
@@ -1154,9 +1154,9 @@ async fn list_marketplaces_excludes_plugins_with_explicit_empty_products() {
     let tmp = tempfile::tempdir().unwrap();
     let repo_root = tmp.path().join("repo");
     fs::create_dir_all(repo_root.join(".git")).unwrap();
-    fs::create_dir_all(repo_root.join(".agents/plugins")).unwrap();
+    fs::create_dir_all(repo_root.join(".claude/plugins")).unwrap();
     fs::write(
-        repo_root.join(".agents/plugins/marketplace.json"),
+        repo_root.join(".claude/plugins/marketplace.json"),
         r#"{
   "name": "debug",
   "plugins": [
@@ -1199,7 +1199,7 @@ plugins = true
         .find(|marketplace| {
             marketplace.path
                 == AbsolutePathBuf::try_from(
-                    tmp.path().join("repo/.agents/plugins/marketplace.json"),
+                    tmp.path().join("repo/.claude/plugins/marketplace.json"),
                 )
                 .unwrap()
         })
@@ -1229,9 +1229,9 @@ async fn read_plugin_for_config_returns_plugins_disabled_when_feature_disabled()
     let tmp = tempfile::tempdir().unwrap();
     let repo_root = tmp.path().join("repo");
     fs::create_dir_all(repo_root.join(".git")).unwrap();
-    fs::create_dir_all(repo_root.join(".agents/plugins")).unwrap();
+    fs::create_dir_all(repo_root.join(".claude/plugins")).unwrap();
     let marketplace_path =
-        AbsolutePathBuf::try_from(repo_root.join(".agents/plugins/marketplace.json")).unwrap();
+        AbsolutePathBuf::try_from(repo_root.join(".claude/plugins/marketplace.json")).unwrap();
     fs::write(
         marketplace_path.as_path(),
         r#"{
@@ -1278,9 +1278,9 @@ async fn read_plugin_for_config_uses_user_layer_skill_settings_only() {
     let repo_root = tmp.path().join("repo");
     let plugin_root = repo_root.join("enabled-plugin");
     fs::create_dir_all(repo_root.join(".git")).unwrap();
-    fs::create_dir_all(repo_root.join(".agents/plugins")).unwrap();
+    fs::create_dir_all(repo_root.join(".claude/plugins")).unwrap();
     write_file(
-        &repo_root.join(".agents/plugins/marketplace.json"),
+        &repo_root.join(".claude/plugins/marketplace.json"),
         r#"{
   "name": "debug",
   "plugins": [
@@ -1326,7 +1326,7 @@ enabled = false
             &PluginReadRequest {
                 plugin_name: "enabled-plugin".to_string(),
                 marketplace_path: AbsolutePathBuf::try_from(
-                    repo_root.join(".agents/plugins/marketplace.json"),
+                    repo_root.join(".claude/plugins/marketplace.json"),
                 )
                 .unwrap(),
             },
@@ -1367,10 +1367,10 @@ async fn list_marketplaces_includes_curated_repo_marketplace() {
 plugins = true
 "#,
     );
-    fs::create_dir_all(curated_root.join(".agents/plugins")).unwrap();
+    fs::create_dir_all(curated_root.join(".claude/plugins")).unwrap();
     fs::create_dir_all(plugin_root.join(".codex-plugin")).unwrap();
     fs::write(
-        curated_root.join(".agents/plugins/marketplace.json"),
+        curated_root.join(".claude/plugins/marketplace.json"),
         r#"{
   "name": "openai-curated",
   "interface": {
@@ -1409,7 +1409,7 @@ plugins = true
         curated_marketplace,
         ConfiguredMarketplace {
             name: "openai-curated".to_string(),
-            path: AbsolutePathBuf::try_from(curated_root.join(".agents/plugins/marketplace.json"))
+            path: AbsolutePathBuf::try_from(curated_root.join(".claude/plugins/marketplace.json"))
                 .unwrap(),
             interface: Some(MarketplaceInterface {
                 display_name: Some(OPENAI_CURATED_MARKETPLACE_DISPLAY_NAME.to_string()),
@@ -1440,10 +1440,10 @@ async fn list_marketplaces_uses_first_duplicate_plugin_entry() {
     let repo_b_root = tmp.path().join("repo-b");
     fs::create_dir_all(repo_a_root.join(".git")).unwrap();
     fs::create_dir_all(repo_b_root.join(".git")).unwrap();
-    fs::create_dir_all(repo_a_root.join(".agents/plugins")).unwrap();
-    fs::create_dir_all(repo_b_root.join(".agents/plugins")).unwrap();
+    fs::create_dir_all(repo_a_root.join(".claude/plugins")).unwrap();
+    fs::create_dir_all(repo_b_root.join(".claude/plugins")).unwrap();
     fs::write(
-        repo_a_root.join(".agents/plugins/marketplace.json"),
+        repo_a_root.join(".claude/plugins/marketplace.json"),
         r#"{
   "name": "debug",
   "plugins": [
@@ -1459,7 +1459,7 @@ async fn list_marketplaces_uses_first_duplicate_plugin_entry() {
     )
     .unwrap();
     fs::write(
-        repo_b_root.join(".agents/plugins/marketplace.json"),
+        repo_b_root.join(".claude/plugins/marketplace.json"),
         r#"{
   "name": "debug",
   "plugins": [
@@ -1511,7 +1511,7 @@ enabled = false
         .find(|marketplace| {
             marketplace.path
                 == AbsolutePathBuf::try_from(
-                    tmp.path().join("repo-a/.agents/plugins/marketplace.json"),
+                    tmp.path().join("repo-a/.claude/plugins/marketplace.json"),
                 )
                 .unwrap()
         })
@@ -1540,7 +1540,7 @@ enabled = false
         .find(|marketplace| {
             marketplace.path
                 == AbsolutePathBuf::try_from(
-                    tmp.path().join("repo-b/.agents/plugins/marketplace.json"),
+                    tmp.path().join("repo-b/.claude/plugins/marketplace.json"),
                 )
                 .unwrap()
         })
@@ -1577,9 +1577,9 @@ async fn list_marketplaces_marks_configured_plugin_uninstalled_when_cache_is_mis
     let tmp = tempfile::tempdir().unwrap();
     let repo_root = tmp.path().join("repo");
     fs::create_dir_all(repo_root.join(".git")).unwrap();
-    fs::create_dir_all(repo_root.join(".agents/plugins")).unwrap();
+    fs::create_dir_all(repo_root.join(".claude/plugins")).unwrap();
     fs::write(
-        repo_root.join(".agents/plugins/marketplace.json"),
+        repo_root.join(".claude/plugins/marketplace.json"),
         r#"{
   "name": "debug",
   "plugins": [
@@ -1615,7 +1615,7 @@ enabled = true
         .find(|marketplace| {
             marketplace.path
                 == AbsolutePathBuf::try_from(
-                    tmp.path().join("repo/.agents/plugins/marketplace.json"),
+                    tmp.path().join("repo/.claude/plugins/marketplace.json"),
                 )
                 .unwrap()
         })
@@ -1626,7 +1626,7 @@ enabled = true
         ConfiguredMarketplace {
             name: "debug".to_string(),
             path: AbsolutePathBuf::try_from(
-                tmp.path().join("repo/.agents/plugins/marketplace.json"),
+                tmp.path().join("repo/.claude/plugins/marketplace.json"),
             )
             .unwrap(),
             interface: None,
@@ -1994,9 +1994,9 @@ async fn sync_plugins_from_remote_uses_first_duplicate_local_plugin_entry() {
     let tmp = tempfile::tempdir().unwrap();
     let curated_root = curated_plugins_repo_path(tmp.path());
     write_curated_plugin_sha(tmp.path(), TEST_CURATED_PLUGIN_SHA);
-    fs::create_dir_all(curated_root.join(".agents/plugins")).unwrap();
+    fs::create_dir_all(curated_root.join(".claude/plugins")).unwrap();
     fs::write(
-        curated_root.join(".agents/plugins/marketplace.json"),
+        curated_root.join(".claude/plugins/marketplace.json"),
         r#"{
   "name": "openai-curated",
   "plugins": [

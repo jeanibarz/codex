@@ -4,6 +4,7 @@ use super::PluginManifestPaths;
 use super::curated_plugins_repo_path;
 use super::load_plugin_manifest;
 use super::manifest::PluginManifestInterface;
+use super::marketplace::MARKETPLACE_RELATIVE_PATH;
 use super::marketplace::MarketplaceError;
 use super::marketplace::MarketplaceInterface;
 use super::marketplace::MarketplaceListError;
@@ -659,10 +660,9 @@ impl PluginsManager {
             .map_err(PluginRemoteSyncError::from)?;
         let configured_plugins = configured_plugins_from_stack(&config.config_layer_stack);
         let curated_marketplace_root = curated_plugins_repo_path(self.codex_home.as_path());
-        let curated_marketplace_path = AbsolutePathBuf::try_from(
-            curated_marketplace_root.join(".agents/plugins/marketplace.json"),
-        )
-        .map_err(|_| PluginRemoteSyncError::LocalMarketplaceNotFound)?;
+        let curated_marketplace_path =
+            AbsolutePathBuf::try_from(curated_marketplace_root.join(MARKETPLACE_RELATIVE_PATH))
+                .map_err(|_| PluginRemoteSyncError::LocalMarketplaceNotFound)?;
         let curated_marketplace = match load_marketplace(&curated_marketplace_path) {
             Ok(marketplace) => marketplace,
             Err(MarketplaceError::MarketplaceNotFound { .. }) => {
@@ -1256,7 +1256,7 @@ fn refresh_curated_plugin_cache(
 ) -> Result<bool, String> {
     let store = PluginStore::new(codex_home.to_path_buf());
     let curated_marketplace_path = AbsolutePathBuf::try_from(
-        curated_plugins_repo_path(codex_home).join(".agents/plugins/marketplace.json"),
+        curated_plugins_repo_path(codex_home).join(MARKETPLACE_RELATIVE_PATH),
     )
     .map_err(|_| "local curated marketplace is not available".to_string())?;
     let curated_marketplace = load_marketplace(&curated_marketplace_path)

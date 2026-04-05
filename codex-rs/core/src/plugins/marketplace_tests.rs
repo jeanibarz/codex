@@ -8,10 +8,10 @@ fn resolve_marketplace_plugin_finds_repo_marketplace_plugin() {
     let tmp = tempdir().unwrap();
     let repo_root = tmp.path().join("repo");
     fs::create_dir_all(repo_root.join(".git")).unwrap();
-    fs::create_dir_all(repo_root.join(".agents/plugins")).unwrap();
+    fs::create_dir_all(repo_root.join(".claude/plugins")).unwrap();
     fs::create_dir_all(repo_root.join("nested")).unwrap();
     fs::write(
-        repo_root.join(".agents/plugins/marketplace.json"),
+        repo_root.join(".claude/plugins/marketplace.json"),
         r#"{
   "name": "codex-curated",
   "plugins": [
@@ -28,7 +28,7 @@ fn resolve_marketplace_plugin_finds_repo_marketplace_plugin() {
     .unwrap();
 
     let resolved = resolve_marketplace_plugin(
-        &AbsolutePathBuf::try_from(repo_root.join(".agents/plugins/marketplace.json")).unwrap(),
+        &AbsolutePathBuf::try_from(repo_root.join(".claude/plugins/marketplace.json")).unwrap(),
         "local-plugin",
         Some(Product::Codex),
     )
@@ -50,15 +50,15 @@ fn resolve_marketplace_plugin_reports_missing_plugin() {
     let tmp = tempdir().unwrap();
     let repo_root = tmp.path().join("repo");
     fs::create_dir_all(repo_root.join(".git")).unwrap();
-    fs::create_dir_all(repo_root.join(".agents/plugins")).unwrap();
+    fs::create_dir_all(repo_root.join(".claude/plugins")).unwrap();
     fs::write(
-        repo_root.join(".agents/plugins/marketplace.json"),
+        repo_root.join(".claude/plugins/marketplace.json"),
         r#"{"name":"codex-curated","plugins":[]}"#,
     )
     .unwrap();
 
     let err = resolve_marketplace_plugin(
-        &AbsolutePathBuf::try_from(repo_root.join(".agents/plugins/marketplace.json")).unwrap(),
+        &AbsolutePathBuf::try_from(repo_root.join(".claude/plugins/marketplace.json")).unwrap(),
         "missing",
         Some(Product::Codex),
     )
@@ -77,10 +77,10 @@ fn list_marketplaces_returns_home_and_repo_marketplaces() {
     let repo_root = tmp.path().join("repo");
 
     fs::create_dir_all(repo_root.join(".git")).unwrap();
-    fs::create_dir_all(home_root.join(".agents/plugins")).unwrap();
-    fs::create_dir_all(repo_root.join(".agents/plugins")).unwrap();
+    fs::create_dir_all(home_root.join(".claude/plugins")).unwrap();
+    fs::create_dir_all(repo_root.join(".claude/plugins")).unwrap();
     fs::write(
-        home_root.join(".agents/plugins/marketplace.json"),
+        home_root.join(".claude/plugins/marketplace.json"),
         r#"{
   "name": "codex-curated",
   "plugins": [
@@ -103,7 +103,7 @@ fn list_marketplaces_returns_home_and_repo_marketplaces() {
     )
     .unwrap();
     fs::write(
-        repo_root.join(".agents/plugins/marketplace.json"),
+        repo_root.join(".claude/plugins/marketplace.json"),
         r#"{
   "name": "codex-curated",
   "plugins": [
@@ -139,7 +139,7 @@ fn list_marketplaces_returns_home_and_repo_marketplaces() {
             Marketplace {
                 name: "codex-curated".to_string(),
                 path:
-                    AbsolutePathBuf::try_from(home_root.join(".agents/plugins/marketplace.json"),)
+                    AbsolutePathBuf::try_from(home_root.join(".claude/plugins/marketplace.json"),)
                         .unwrap(),
                 interface: None,
                 plugins: vec![
@@ -172,7 +172,7 @@ fn list_marketplaces_returns_home_and_repo_marketplaces() {
             Marketplace {
                 name: "codex-curated".to_string(),
                 path:
-                    AbsolutePathBuf::try_from(repo_root.join(".agents/plugins/marketplace.json"),)
+                    AbsolutePathBuf::try_from(repo_root.join(".claude/plugins/marketplace.json"),)
                         .unwrap(),
                 interface: None,
                 plugins: vec![
@@ -207,16 +207,54 @@ fn list_marketplaces_returns_home_and_repo_marketplaces() {
 }
 
 #[test]
+fn list_marketplaces_falls_back_to_legacy_marketplace_path() {
+    let tmp = tempdir().unwrap();
+    let repo_root = tmp.path().join("repo");
+
+    fs::create_dir_all(repo_root.join(".git")).unwrap();
+    fs::create_dir_all(repo_root.join(".agents/plugins")).unwrap();
+    fs::write(
+        repo_root.join(".agents/plugins/marketplace.json"),
+        r#"{
+  "name": "codex-curated",
+  "plugins": [
+    {
+      "name": "legacy-plugin",
+      "source": {
+        "source": "local",
+        "path": "./legacy-plugin"
+      }
+    }
+  ]
+}"#,
+    )
+    .unwrap();
+
+    let marketplaces = list_marketplaces_with_home(
+        &[AbsolutePathBuf::try_from(repo_root.clone()).unwrap()],
+        None,
+    )
+    .unwrap()
+    .marketplaces;
+
+    assert_eq!(marketplaces.len(), 1);
+    assert_eq!(
+        marketplaces[0].path,
+        AbsolutePathBuf::try_from(repo_root.join(".agents/plugins/marketplace.json")).unwrap()
+    );
+}
+
+#[test]
 fn list_marketplaces_keeps_distinct_entries_for_same_name() {
     let tmp = tempdir().unwrap();
     let home_root = tmp.path().join("home");
     let repo_root = tmp.path().join("repo");
-    let home_marketplace = home_root.join(".agents/plugins/marketplace.json");
-    let repo_marketplace = repo_root.join(".agents/plugins/marketplace.json");
+    let home_marketplace = home_root.join(".claude/plugins/marketplace.json");
+    let repo_marketplace = repo_root.join(".claude/plugins/marketplace.json");
 
     fs::create_dir_all(repo_root.join(".git")).unwrap();
-    fs::create_dir_all(home_root.join(".agents/plugins")).unwrap();
-    fs::create_dir_all(repo_root.join(".agents/plugins")).unwrap();
+    fs::create_dir_all(home_root.join(".claude/plugins")).unwrap();
+    fs::create_dir_all(repo_root.join(".claude/plugins")).unwrap();
 
     fs::write(
         home_marketplace.clone(),
@@ -318,10 +356,10 @@ fn list_marketplaces_dedupes_multiple_roots_in_same_repo() {
     let nested_root = repo_root.join("nested/project");
 
     fs::create_dir_all(repo_root.join(".git")).unwrap();
-    fs::create_dir_all(repo_root.join(".agents/plugins")).unwrap();
+    fs::create_dir_all(repo_root.join(".claude/plugins")).unwrap();
     fs::create_dir_all(&nested_root).unwrap();
     fs::write(
-        repo_root.join(".agents/plugins/marketplace.json"),
+        repo_root.join(".claude/plugins/marketplace.json"),
         r#"{
   "name": "codex-curated",
   "plugins": [
@@ -351,7 +389,7 @@ fn list_marketplaces_dedupes_multiple_roots_in_same_repo() {
         marketplaces,
         vec![Marketplace {
             name: "codex-curated".to_string(),
-            path: AbsolutePathBuf::try_from(repo_root.join(".agents/plugins/marketplace.json"))
+            path: AbsolutePathBuf::try_from(repo_root.join(".claude/plugins/marketplace.json"))
                 .unwrap(),
             interface: None,
             plugins: vec![MarketplacePlugin {
@@ -376,9 +414,9 @@ fn list_marketplaces_reads_marketplace_display_name() {
     let repo_root = tmp.path().join("repo");
 
     fs::create_dir_all(repo_root.join(".git")).unwrap();
-    fs::create_dir_all(repo_root.join(".agents/plugins")).unwrap();
+    fs::create_dir_all(repo_root.join(".claude/plugins")).unwrap();
     fs::write(
-        repo_root.join(".agents/plugins/marketplace.json"),
+        repo_root.join(".claude/plugins/marketplace.json"),
         r#"{
   "name": "openai-curated",
   "interface": {
@@ -419,11 +457,11 @@ fn list_marketplaces_skips_marketplaces_that_fail_to_load() {
     let invalid_repo_root = tmp.path().join("invalid-repo");
 
     fs::create_dir_all(valid_repo_root.join(".git")).unwrap();
-    fs::create_dir_all(valid_repo_root.join(".agents/plugins")).unwrap();
+    fs::create_dir_all(valid_repo_root.join(".claude/plugins")).unwrap();
     fs::create_dir_all(invalid_repo_root.join(".git")).unwrap();
-    fs::create_dir_all(invalid_repo_root.join(".agents/plugins")).unwrap();
+    fs::create_dir_all(invalid_repo_root.join(".claude/plugins")).unwrap();
     fs::write(
-        valid_repo_root.join(".agents/plugins/marketplace.json"),
+        valid_repo_root.join(".claude/plugins/marketplace.json"),
         r#"{
   "name": "valid-marketplace",
   "plugins": [
@@ -439,7 +477,7 @@ fn list_marketplaces_skips_marketplaces_that_fail_to_load() {
     )
     .unwrap();
     fs::write(
-        invalid_repo_root.join(".agents/plugins/marketplace.json"),
+        invalid_repo_root.join(".claude/plugins/marketplace.json"),
         r#"{
   "name": "invalid-marketplace",
   "plugins": [
@@ -476,11 +514,11 @@ fn list_marketplaces_reports_marketplace_load_errors() {
     let invalid_repo_root = tmp.path().join("invalid-repo");
 
     fs::create_dir_all(valid_repo_root.join(".git")).unwrap();
-    fs::create_dir_all(valid_repo_root.join(".agents/plugins")).unwrap();
+    fs::create_dir_all(valid_repo_root.join(".claude/plugins")).unwrap();
     fs::create_dir_all(invalid_repo_root.join(".git")).unwrap();
-    fs::create_dir_all(invalid_repo_root.join(".agents/plugins")).unwrap();
+    fs::create_dir_all(invalid_repo_root.join(".claude/plugins")).unwrap();
     fs::write(
-        valid_repo_root.join(".agents/plugins/marketplace.json"),
+        valid_repo_root.join(".claude/plugins/marketplace.json"),
         r#"{
   "name": "valid-marketplace",
   "plugins": [
@@ -496,7 +534,7 @@ fn list_marketplaces_reports_marketplace_load_errors() {
     )
     .unwrap();
     let invalid_marketplace_path =
-        AbsolutePathBuf::try_from(invalid_repo_root.join(".agents/plugins/marketplace.json"))
+        AbsolutePathBuf::try_from(invalid_repo_root.join(".claude/plugins/marketplace.json"))
             .unwrap();
     fs::write(invalid_marketplace_path.as_path(), "{not json").unwrap();
 
@@ -528,10 +566,10 @@ fn list_marketplaces_resolves_plugin_interface_paths_to_absolute() {
     let repo_root = tmp.path().join("repo");
     let plugin_root = repo_root.join("plugins/demo-plugin");
     fs::create_dir_all(repo_root.join(".git")).unwrap();
-    fs::create_dir_all(repo_root.join(".agents/plugins")).unwrap();
+    fs::create_dir_all(repo_root.join(".claude/plugins")).unwrap();
     fs::create_dir_all(plugin_root.join(".codex-plugin")).unwrap();
     fs::write(
-        repo_root.join(".agents/plugins/marketplace.json"),
+        repo_root.join(".claude/plugins/marketplace.json"),
         r#"{
   "name": "codex-curated",
   "plugins": [
@@ -618,9 +656,9 @@ fn list_marketplaces_ignores_legacy_top_level_policy_fields() {
     let repo_root = tmp.path().join("repo");
 
     fs::create_dir_all(repo_root.join(".git")).unwrap();
-    fs::create_dir_all(repo_root.join(".agents/plugins")).unwrap();
+    fs::create_dir_all(repo_root.join(".claude/plugins")).unwrap();
     fs::write(
-        repo_root.join(".agents/plugins/marketplace.json"),
+        repo_root.join(".claude/plugins/marketplace.json"),
         r#"{
   "name": "codex-curated",
   "plugins": [
@@ -663,10 +701,10 @@ fn list_marketplaces_ignores_plugin_interface_assets_without_dot_slash() {
     let plugin_root = repo_root.join("plugins/demo-plugin");
 
     fs::create_dir_all(repo_root.join(".git")).unwrap();
-    fs::create_dir_all(repo_root.join(".agents/plugins")).unwrap();
+    fs::create_dir_all(repo_root.join(".claude/plugins")).unwrap();
     fs::create_dir_all(plugin_root.join(".codex-plugin")).unwrap();
     fs::write(
-        repo_root.join(".agents/plugins/marketplace.json"),
+        repo_root.join(".claude/plugins/marketplace.json"),
         r#"{
   "name": "codex-curated",
   "plugins": [
@@ -738,9 +776,9 @@ fn resolve_marketplace_plugin_rejects_non_relative_local_paths() {
     let tmp = tempdir().unwrap();
     let repo_root = tmp.path().join("repo");
     fs::create_dir_all(repo_root.join(".git")).unwrap();
-    fs::create_dir_all(repo_root.join(".agents/plugins")).unwrap();
+    fs::create_dir_all(repo_root.join(".claude/plugins")).unwrap();
     fs::write(
-        repo_root.join(".agents/plugins/marketplace.json"),
+        repo_root.join(".claude/plugins/marketplace.json"),
         r#"{
   "name": "codex-curated",
   "plugins": [
@@ -757,7 +795,7 @@ fn resolve_marketplace_plugin_rejects_non_relative_local_paths() {
     .unwrap();
 
     let err = resolve_marketplace_plugin(
-        &AbsolutePathBuf::try_from(repo_root.join(".agents/plugins/marketplace.json")).unwrap(),
+        &AbsolutePathBuf::try_from(repo_root.join(".claude/plugins/marketplace.json")).unwrap(),
         "local-plugin",
         Some(Product::Codex),
     )
@@ -767,7 +805,7 @@ fn resolve_marketplace_plugin_rejects_non_relative_local_paths() {
         err.to_string(),
         format!(
             "invalid marketplace file `{}`: local plugin source path must start with `./`",
-            repo_root.join(".agents/plugins/marketplace.json").display()
+            repo_root.join(".claude/plugins/marketplace.json").display()
         )
     );
 }
@@ -777,9 +815,9 @@ fn resolve_marketplace_plugin_uses_first_duplicate_entry() {
     let tmp = tempdir().unwrap();
     let repo_root = tmp.path().join("repo");
     fs::create_dir_all(repo_root.join(".git")).unwrap();
-    fs::create_dir_all(repo_root.join(".agents/plugins")).unwrap();
+    fs::create_dir_all(repo_root.join(".claude/plugins")).unwrap();
     fs::write(
-        repo_root.join(".agents/plugins/marketplace.json"),
+        repo_root.join(".claude/plugins/marketplace.json"),
         r#"{
   "name": "codex-curated",
   "plugins": [
@@ -803,7 +841,7 @@ fn resolve_marketplace_plugin_uses_first_duplicate_entry() {
     .unwrap();
 
     let resolved = resolve_marketplace_plugin(
-        &AbsolutePathBuf::try_from(repo_root.join(".agents/plugins/marketplace.json")).unwrap(),
+        &AbsolutePathBuf::try_from(repo_root.join(".claude/plugins/marketplace.json")).unwrap(),
         "local-plugin",
         Some(Product::Codex),
     )
@@ -820,9 +858,9 @@ fn resolve_marketplace_plugin_rejects_disallowed_product() {
     let tmp = tempdir().unwrap();
     let repo_root = tmp.path().join("repo");
     fs::create_dir_all(repo_root.join(".git")).unwrap();
-    fs::create_dir_all(repo_root.join(".agents/plugins")).unwrap();
+    fs::create_dir_all(repo_root.join(".claude/plugins")).unwrap();
     fs::write(
-        repo_root.join(".agents/plugins/marketplace.json"),
+        repo_root.join(".claude/plugins/marketplace.json"),
         r#"{
   "name": "codex-curated",
   "plugins": [
@@ -842,7 +880,7 @@ fn resolve_marketplace_plugin_rejects_disallowed_product() {
     .unwrap();
 
     let err = resolve_marketplace_plugin(
-        &AbsolutePathBuf::try_from(repo_root.join(".agents/plugins/marketplace.json")).unwrap(),
+        &AbsolutePathBuf::try_from(repo_root.join(".claude/plugins/marketplace.json")).unwrap(),
         "chatgpt-plugin",
         Some(Product::Atlas),
     )
@@ -859,9 +897,9 @@ fn resolve_marketplace_plugin_allows_missing_products_field() {
     let tmp = tempdir().unwrap();
     let repo_root = tmp.path().join("repo");
     fs::create_dir_all(repo_root.join(".git")).unwrap();
-    fs::create_dir_all(repo_root.join(".agents/plugins")).unwrap();
+    fs::create_dir_all(repo_root.join(".claude/plugins")).unwrap();
     fs::write(
-        repo_root.join(".agents/plugins/marketplace.json"),
+        repo_root.join(".claude/plugins/marketplace.json"),
         r#"{
   "name": "codex-curated",
   "plugins": [
@@ -879,7 +917,7 @@ fn resolve_marketplace_plugin_allows_missing_products_field() {
     .unwrap();
 
     let resolved = resolve_marketplace_plugin(
-        &AbsolutePathBuf::try_from(repo_root.join(".agents/plugins/marketplace.json")).unwrap(),
+        &AbsolutePathBuf::try_from(repo_root.join(".claude/plugins/marketplace.json")).unwrap(),
         "default-plugin",
         Some(Product::Codex),
     )
@@ -893,9 +931,9 @@ fn resolve_marketplace_plugin_rejects_explicit_empty_products() {
     let tmp = tempdir().unwrap();
     let repo_root = tmp.path().join("repo");
     fs::create_dir_all(repo_root.join(".git")).unwrap();
-    fs::create_dir_all(repo_root.join(".agents/plugins")).unwrap();
+    fs::create_dir_all(repo_root.join(".claude/plugins")).unwrap();
     fs::write(
-        repo_root.join(".agents/plugins/marketplace.json"),
+        repo_root.join(".claude/plugins/marketplace.json"),
         r#"{
   "name": "codex-curated",
   "plugins": [
@@ -915,7 +953,7 @@ fn resolve_marketplace_plugin_rejects_explicit_empty_products() {
     .unwrap();
 
     let err = resolve_marketplace_plugin(
-        &AbsolutePathBuf::try_from(repo_root.join(".agents/plugins/marketplace.json")).unwrap(),
+        &AbsolutePathBuf::try_from(repo_root.join(".claude/plugins/marketplace.json")).unwrap(),
         "disabled-plugin",
         Some(Product::Codex),
     )

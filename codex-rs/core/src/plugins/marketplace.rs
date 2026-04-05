@@ -16,7 +16,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use tracing::warn;
 
-const MARKETPLACE_RELATIVE_PATH: &str = ".agents/plugins/marketplace.json";
+pub(crate) const MARKETPLACE_RELATIVE_PATH: &str = ".claude/plugins/marketplace.json";
+pub(crate) const LEGACY_MARKETPLACE_RELATIVE_PATH: &str = ".agents/plugins/marketplace.json";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedMarketplacePlugin {
@@ -287,20 +288,16 @@ fn discover_marketplace_paths_from_roots(
 ) -> Vec<AbsolutePathBuf> {
     let mut paths = Vec::new();
 
-    if let Some(home) = home_dir {
-        let path = home.join(MARKETPLACE_RELATIVE_PATH);
-        if path.is_file()
-            && let Ok(path) = AbsolutePathBuf::try_from(path)
-        {
-            paths.push(path);
-        }
+    if let Some(home) = home_dir
+        && let Some(path) = discover_marketplace_path(home)
+    {
+        paths.push(path);
     }
 
     for root in additional_roots {
         // Curated marketplaces can now come from an HTTP-downloaded directory that is not a git
         // checkout, so check the root directly before falling back to repo-root discovery.
-        if let Ok(path) = root.join(MARKETPLACE_RELATIVE_PATH)
-            && path.as_path().is_file()
+        if let Some(path) = discover_marketplace_path(root.as_path())
             && !paths.contains(&path)
         {
             paths.push(path);
@@ -308,8 +305,7 @@ fn discover_marketplace_paths_from_roots(
         }
         if let Some(repo_root) = get_git_repo_root(root.as_path())
             && let Ok(repo_root) = AbsolutePathBuf::try_from(repo_root)
-            && let Ok(path) = repo_root.join(MARKETPLACE_RELATIVE_PATH)
-            && path.as_path().is_file()
+            && let Some(path) = discover_marketplace_path(repo_root.as_path())
             && !paths.contains(&path)
         {
             paths.push(path);
@@ -317,6 +313,19 @@ fn discover_marketplace_paths_from_roots(
     }
 
     paths
+}
+
+fn discover_marketplace_path(root: &Path) -> Option<AbsolutePathBuf> {
+    for relative_path in [MARKETPLACE_RELATIVE_PATH, LEGACY_MARKETPLACE_RELATIVE_PATH] {
+        let path = root.join(relative_path);
+        if path.is_file()
+            && let Ok(path) = AbsolutePathBuf::try_from(path)
+        {
+            return Some(path);
+        }
+    }
+
+    None
 }
 
 fn load_raw_marketplace_manifest(
@@ -368,7 +377,7 @@ fn resolve_plugin_source_path(
                 });
             }
 
-            // `marketplace.json` lives under `<root>/.agents/plugins/`, but local plugin paths
+            // `marketplace.json` lives under `<root>/.claude/plugins/`, but local plugin paths
             // are resolved relative to `<root>`, not relative to the `plugins/` directory.
             marketplace_root_dir(marketplace_path)?
                 .join(relative_source_path)
@@ -386,32 +395,34 @@ fn marketplace_root_dir(
     let Some(plugins_dir) = marketplace_path.parent() else {
         return Err(MarketplaceError::InvalidMarketplaceFile {
             path: marketplace_path.to_path_buf(),
-            message: "marketplace file must live under `<root>/.agents/plugins/`".to_string(),
+            message: "marketplace file must live under `<root>/.claude/plugins/`".to_string(),
         });
     };
-    let Some(dot_agents_dir) = plugins_dir.parent() else {
+    let Some(dot_metadata_dir) = plugins_dir.parent() else {
         return Err(MarketplaceError::InvalidMarketplaceFile {
             path: marketplace_path.to_path_buf(),
-            message: "marketplace file must live under `<root>/.agents/plugins/`".to_string(),
+            message: "marketplace file must live under `<root>/.claude/plugins/`".to_string(),
         });
     };
-    let Some(marketplace_root) = dot_agents_dir.parent() else {
+    let Some(marketplace_root) = dot_metadata_dir.parent() else {
         return Err(MarketplaceError::InvalidMarketplaceFile {
             path: marketplace_path.to_path_buf(),
-            message: "marketplace file must live under `<root>/.agents/plugins/`".to_string(),
+            message: "marketplace file must live under `<root>/.claude/plugins/`".to_string(),
         });
     };
 
     if plugins_dir.as_path().file_name().and_then(|s| s.to_str()) != Some("plugins")
-        || dot_agents_dir
-            .as_path()
-            .file_name()
-            .and_then(|s| s.to_str())
-            != Some(".agents")
+        || !matches!(
+            dot_metadata_dir
+                .as_path()
+                .file_name()
+                .and_then(|s| s.to_str()),
+            Some(".claude" | ".agents")
+        )
     {
         return Err(MarketplaceError::InvalidMarketplaceFile {
             path: marketplace_path.to_path_buf(),
-            message: "marketplace file must live under `<root>/.agents/plugins/`".to_string(),
+            message: "marketplace file must live under `<root>/.claude/plugins/`".to_string(),
         });
     }
 
@@ -445,20 +456,21 @@ struct RawMarketplaceManifestPlugin {
     category: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Deserialize)]
+#[serde(tag = "source", rename_all = "lowercase")]
+enum RawMarketplaceManifestPluginSource {
+    Local { path: String },
+}
+
+#[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawMarketplaceManifestPluginPolicy {
     #[serde(default)]
     installation: MarketplacePluginInstallPolicy,
     #[serde(default)]
     authentication: MarketplacePluginAuthPolicy,
+    #[serde(default)]
     products: Option<Vec<Product>>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "source", rename_all = "lowercase")]
-enum RawMarketplaceManifestPluginSource {
-    Local { path: String },
 }
 
 fn resolve_marketplace_interface(

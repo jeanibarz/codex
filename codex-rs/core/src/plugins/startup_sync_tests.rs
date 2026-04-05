@@ -154,7 +154,7 @@ exit 1
     assert!(curated_plugins_repo_path(tmp.path()).join(".git").is_dir());
     assert!(
         curated_plugins_repo_path(tmp.path())
-            .join(".agents/plugins/marketplace.json")
+            .join(".claude/plugins/marketplace.json")
             .is_file()
     );
     assert_eq!(read_curated_plugins_sha(tmp.path()).as_deref(), Some(sha));
@@ -204,7 +204,7 @@ async fn sync_openai_plugins_repo_falls_back_to_http_when_git_is_unavailable() {
 
     let repo_path = curated_plugins_repo_path(tmp.path());
     assert_eq!(synced_sha, sha);
-    assert!(repo_path.join(".agents/plugins/marketplace.json").is_file());
+    assert!(repo_path.join(".claude/plugins/marketplace.json").is_file());
     assert!(
         repo_path
             .join("plugins/gmail/.codex-plugin/plugin.json")
@@ -279,7 +279,7 @@ exit 1
 
     let repo_path = curated_plugins_repo_path(tmp.path());
     assert_eq!(synced_sha, sha);
-    assert!(repo_path.join(".agents/plugins/marketplace.json").is_file());
+    assert!(repo_path.join(".claude/plugins/marketplace.json").is_file());
     assert!(
         repo_path
             .join("plugins/gmail/.codex-plugin/plugin.json")
@@ -419,7 +419,7 @@ async fn sync_openai_plugins_repo_skips_archive_download_when_sha_matches() {
     .expect("sync should succeed");
 
     assert_eq!(read_curated_plugins_sha(tmp.path()).as_deref(), Some(sha));
-    assert!(repo_path.join(".agents/plugins/marketplace.json").is_file());
+    assert!(repo_path.join(".claude/plugins/marketplace.json").is_file());
 }
 
 #[tokio::test]

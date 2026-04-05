@@ -1115,7 +1115,7 @@ fn default_read_only_subpaths_for_writable_root(
     }
 
     #[allow(clippy::expect_used)]
-    let top_level_agents = writable_root.join(".agents").expect("valid relative path");
+    let top_level_agents = writable_root.join(".claude").expect("valid relative path");
     if top_level_agents.as_path().is_dir() {
         subpaths.push(top_level_agents);
     }
@@ -4028,7 +4028,7 @@ mod tests {
     #[test]
     fn restricted_file_system_policy_derives_effective_paths() {
         let cwd = TempDir::new().expect("tempdir");
-        std::fs::create_dir_all(cwd.path().join(".agents")).expect("create .agents");
+        std::fs::create_dir_all(cwd.path().join(".claude")).expect("create .claude");
         std::fs::create_dir_all(cwd.path().join(".codex")).expect("create .codex");
         let canonical_cwd = cwd.path().canonicalize().expect("canonicalize cwd");
         let cwd_absolute =
@@ -4037,8 +4037,8 @@ mod tests {
             .expect("resolve unreadable path");
         let expected_secret = AbsolutePathBuf::from_absolute_path(canonical_cwd.join("secret"))
             .expect("canonical secret");
-        let expected_agents = AbsolutePathBuf::from_absolute_path(canonical_cwd.join(".agents"))
-            .expect("canonical .agents");
+        let expected_agents = AbsolutePathBuf::from_absolute_path(canonical_cwd.join(".claude"))
+            .expect("canonical .claude");
         let expected_codex = AbsolutePathBuf::from_absolute_path(canonical_cwd.join(".codex"))
             .expect("canonical .codex");
         let policy = FileSystemSandboxPolicy::restricted(vec![

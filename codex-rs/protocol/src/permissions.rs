@@ -1120,7 +1120,7 @@ fn default_read_only_subpaths_for_writable_root(
     }
 
     #[allow(clippy::expect_used)]
-    let top_level_agents = writable_root.join(".agents").expect("valid relative path");
+    let top_level_agents = writable_root.join(".claude").expect("valid relative path");
     if top_level_agents.as_path().is_dir() {
         subpaths.push(top_level_agents);
     }
@@ -1503,11 +1503,11 @@ mod tests {
         let real_root = cwd.path().join("real");
         let link_root = cwd.path().join("link");
         let blocked = real_root.join("blocked");
-        let agents_dir = real_root.join(".agents");
+        let agents_dir = real_root.join(".claude");
         let codex_dir = real_root.join(".codex");
 
         fs::create_dir_all(&blocked).expect("create blocked");
-        fs::create_dir_all(&agents_dir).expect("create .agents");
+        fs::create_dir_all(&agents_dir).expect("create .claude");
         fs::create_dir_all(&codex_dir).expect("create .codex");
         symlink_dir(&real_root, &link_root).expect("create symlinked cwd");
 
@@ -1524,7 +1524,7 @@ mod tests {
         let expected_agents = AbsolutePathBuf::from_absolute_path(
             agents_dir.canonicalize().expect("canonicalize .agents"),
         )
-        .expect("absolute canonical .agents");
+        .expect("absolute canonical .claude");
         let expected_codex = AbsolutePathBuf::from_absolute_path(
             codex_dir.canonicalize().expect("canonicalize .codex"),
         )
