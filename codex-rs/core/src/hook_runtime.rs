@@ -363,6 +363,49 @@ pub(crate) async fn run_permission_request_hooks(
     emit_hook_completed_events(sess, turn_context, outcome.hook_events).await;
 }
 
+/// Fires a Notification hook during session bootstrap, before any turn
+/// context exists. Used to signal MCP server startup progress so
+/// supervisors (e.g. Looper) can suppress stuck-detection heuristics while
+/// servers are initializing.
+pub(crate) async fn run_session_bootstrap_notification_hooks(
+    sess: &Session,
+    sub_id: String,
+    cwd: std::path::PathBuf,
+    model: String,
+    notification_type: String,
+    message: String,
+) {
+    let request = NotificationRequest {
+        session_id: sess.conversation_id,
+        turn_id: sub_id.clone(),
+        cwd,
+        transcript_path: sess.hook_transcript_path().await,
+        model,
+        notification_type,
+        message,
+    };
+
+    for run in sess.hooks().preview_notification(&request) {
+        let event = Event {
+            id: sub_id.clone(),
+            msg: EventMsg::HookStarted(HookStartedEvent {
+                turn_id: None,
+                run,
+            }),
+        };
+        sess.send_event_raw(event).await;
+    }
+
+    let outcome = sess.hooks().run_notification(request).await;
+    for completed in outcome.hook_events {
+        let event = Event {
+            id: sub_id.clone(),
+            msg: EventMsg::HookCompleted(completed),
+        };
+        sess.send_event_raw(event).await;
+    }
+}
+
 pub(crate) async fn run_notification_hooks(
     sess: &Session,
     turn_context: &TurnContext,
