@@ -80,7 +80,9 @@ pub(crate) fn matcher_pattern_for_event(
         | HookEventName::Notification
         | HookEventName::SessionStart
         | HookEventName::PermissionRequest => matcher,
-        HookEventName::UserPromptSubmit | HookEventName::Stop => None,
+        HookEventName::UserPromptSubmit
+        | HookEventName::Stop
+        | HookEventName::SessionEnd => None,
     }
 }
 

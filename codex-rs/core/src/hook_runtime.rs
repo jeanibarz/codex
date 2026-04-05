@@ -12,6 +12,8 @@ use codex_hooks::PostToolUseFailureOutcome;
 use codex_hooks::PostToolUseFailureRequest;
 use codex_hooks::PreToolUseOutcome;
 use codex_hooks::PreToolUseRequest;
+use codex_hooks::SessionEndReason;
+use codex_hooks::SessionEndRequest;
 use codex_hooks::SessionStartOutcome;
 use codex_hooks::UserPromptSubmitOutcome;
 use codex_hooks::UserPromptSubmitRequest;
@@ -20,6 +22,7 @@ use codex_protocol::models::DeveloperInstructions;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::HookCompletedEvent;
 use codex_protocol::protocol::HookRunStatus;
@@ -147,6 +150,42 @@ pub async fn emit_workspace_trust_permission_request_hook(config: &Config) {
                 "workspace trust hook completed with non-success status"
             );
         }
+    }
+}
+
+pub(crate) async fn run_session_end_hooks(
+    sess: &Arc<Session>,
+    sub_id: String,
+    reason: SessionEndReason,
+) {
+    let turn_context = sess.new_default_turn_with_sub_id(sub_id.clone()).await;
+    let request = SessionEndRequest {
+        session_id: sess.conversation_id,
+        cwd: turn_context.cwd.to_path_buf(),
+        transcript_path: sess.hook_transcript_path().await,
+        model: turn_context.model_info.slug.clone(),
+        permission_mode: hook_permission_mode(&turn_context),
+        reason,
+    };
+
+    for run in sess.hooks().preview_session_end(&request) {
+        let event = Event {
+            id: sub_id.clone(),
+            msg: EventMsg::HookStarted(HookStartedEvent {
+                turn_id: None,
+                run,
+            }),
+        };
+        sess.send_event_raw(event).await;
+    }
+
+    let outcome = sess.hooks().run_session_end(request).await;
+    for completed in outcome.hook_events {
+        let event = Event {
+            id: sub_id.clone(),
+            msg: EventMsg::HookCompleted(completed),
+        };
+        sess.send_event_raw(event).await;
     }
 }
 

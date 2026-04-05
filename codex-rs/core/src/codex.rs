@@ -5389,6 +5389,16 @@ mod handlers {
             .await;
         sess.guardian_review_session.shutdown().await;
         info!("Shutting down Codex instance");
+
+        // Fire the SessionEnd hook before tearing down the rollout recorder so
+        // supervisors can observe the session-terminated signal even when the
+        // shell exited abruptly.
+        crate::hook_runtime::run_session_end_hooks(
+            sess,
+            sub_id.clone(),
+            codex_hooks::SessionEndReason::Other,
+        )
+        .await;
         let history = sess.clone_history().await;
         let turn_count = history
             .raw_items()

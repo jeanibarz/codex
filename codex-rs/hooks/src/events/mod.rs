@@ -4,6 +4,7 @@ pub mod permission_request;
 pub mod post_tool_use;
 pub mod post_tool_use_failure;
 pub mod pre_tool_use;
+pub mod session_end;
 pub mod session_start;
 pub mod stop;
 pub mod user_prompt_submit;

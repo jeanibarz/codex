@@ -25,6 +25,7 @@ const PRE_TOOL_USE_INPUT_FIXTURE: &str = "pre-tool-use.command.input.schema.json
 const PRE_TOOL_USE_OUTPUT_FIXTURE: &str = "pre-tool-use.command.output.schema.json";
 const SESSION_START_INPUT_FIXTURE: &str = "session-start.command.input.schema.json";
 const SESSION_START_OUTPUT_FIXTURE: &str = "session-start.command.output.schema.json";
+const SESSION_END_INPUT_FIXTURE: &str = "session-end.command.input.schema.json";
 const USER_PROMPT_SUBMIT_INPUT_FIXTURE: &str = "user-prompt-submit.command.input.schema.json";
 const USER_PROMPT_SUBMIT_OUTPUT_FIXTURE: &str = "user-prompt-submit.command.output.schema.json";
 const STOP_INPUT_FIXTURE: &str = "stop.command.input.schema.json";
@@ -83,6 +84,8 @@ pub(crate) enum HookEventNameWire {
     Notification,
     #[serde(rename = "SessionStart")]
     SessionStart,
+    #[serde(rename = "SessionEnd")]
+    SessionEnd,
     #[serde(rename = "UserPromptSubmit")]
     UserPromptSubmit,
     #[serde(rename = "Stop")]
@@ -466,6 +469,22 @@ pub(crate) struct StopCommandInput {
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(rename = "session-end.command.input")]
+pub(crate) struct SessionEndCommandInput {
+    pub session_id: String,
+    pub transcript_path: NullableString,
+    pub cwd: String,
+    #[schemars(schema_with = "session_end_hook_event_name_schema")]
+    pub hook_event_name: String,
+    pub model: String,
+    #[schemars(schema_with = "permission_mode_schema")]
+    pub permission_mode: String,
+    #[schemars(schema_with = "session_end_reason_schema")]
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[schemars(rename = "permission-request.command.input")]
 pub(crate) struct PermissionRequestCommandInput {
     pub session_id: String,
@@ -552,6 +571,10 @@ pub fn write_schema_fixtures(schema_root: &Path) -> anyhow::Result<()> {
         schema_json::<SessionStartCommandOutputWire>()?,
     )?;
     write_schema(
+        &generated_dir.join(SESSION_END_INPUT_FIXTURE),
+        schema_json::<SessionEndCommandInput>()?,
+    )?;
+    write_schema(
         &generated_dir.join(USER_PROMPT_SUBMIT_INPUT_FIXTURE),
         schema_json::<UserPromptSubmitCommandInput>()?,
     )?;
@@ -624,6 +647,14 @@ fn canonicalize_json(value: &Value) -> Value {
 
 fn session_start_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
     string_const_schema("SessionStart")
+}
+
+fn session_end_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
+    string_const_schema("SessionEnd")
+}
+
+fn session_end_reason_schema(_gen: &mut SchemaGenerator) -> Schema {
+    string_enum_schema(&["other", "clear", "logout", "prompt_input_exit"])
 }
 
 fn post_tool_use_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {

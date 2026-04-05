@@ -1428,6 +1428,7 @@ pub enum HookEventName {
     PostToolUseFailure,
     Notification,
     SessionStart,
+    SessionEnd,
     PermissionRequest,
     UserPromptSubmit,
     Stop,

@@ -13,6 +13,8 @@ use crate::events::post_tool_use_failure::PostToolUseFailureOutcome;
 use crate::events::post_tool_use_failure::PostToolUseFailureRequest;
 use crate::events::pre_tool_use::PreToolUseOutcome;
 use crate::events::pre_tool_use::PreToolUseRequest;
+use crate::events::session_end::SessionEndOutcome;
+use crate::events::session_end::SessionEndRequest;
 use crate::events::session_start::SessionStartOutcome;
 use crate::events::session_start::SessionStartRequest;
 use crate::events::stop::StopOutcome;
@@ -106,6 +108,13 @@ impl Hooks {
         self.engine.preview_session_start(request)
     }
 
+    pub fn preview_session_end(
+        &self,
+        request: &SessionEndRequest,
+    ) -> Vec<codex_protocol::protocol::HookRunSummary> {
+        self.engine.preview_session_end(request)
+    }
+
     pub fn preview_pre_tool_use(
         &self,
         request: &PreToolUseRequest,
@@ -147,6 +156,10 @@ impl Hooks {
         turn_id: Option<String>,
     ) -> SessionStartOutcome {
         self.engine.run_session_start(request, turn_id).await
+    }
+
+    pub async fn run_session_end(&self, request: SessionEndRequest) -> SessionEndOutcome {
+        self.engine.run_session_end(request).await
     }
 
     pub async fn run_pre_tool_use(&self, request: PreToolUseRequest) -> PreToolUseOutcome {

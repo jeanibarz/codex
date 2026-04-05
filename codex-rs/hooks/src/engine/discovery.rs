@@ -87,6 +87,7 @@ pub(crate) fn discover_handlers(
             post_tool_use_failure,
             notification,
             session_start,
+            session_end,
             permission_request,
             user_prompt_submit,
             stop,
@@ -112,6 +113,10 @@ pub(crate) fn discover_handlers(
             (
                 codex_protocol::protocol::HookEventName::SessionStart,
                 session_start,
+            ),
+            (
+                codex_protocol::protocol::HookEventName::SessionEnd,
+                session_end,
             ),
             (
                 codex_protocol::protocol::HookEventName::PermissionRequest,
@@ -190,6 +195,7 @@ fn load_hooks_from_file(
         post_tool_use_failure,
         notification,
         session_start,
+        session_end,
         user_prompt_submit,
         stop,
         permission_request,
@@ -215,6 +221,10 @@ fn load_hooks_from_file(
         (
             codex_protocol::protocol::HookEventName::SessionStart,
             session_start,
+        ),
+        (
+            codex_protocol::protocol::HookEventName::SessionEnd,
+            session_end,
         ),
         (
             codex_protocol::protocol::HookEventName::UserPromptSubmit,

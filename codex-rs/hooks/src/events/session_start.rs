@@ -145,6 +145,7 @@ fn supported_capabilities_wire() -> CodexHookCapabilitiesWire {
         surface_version: 2,
         supported_events: vec![
             HookEventNameWire::SessionStart,
+            HookEventNameWire::SessionEnd,
             HookEventNameWire::PreToolUse,
             HookEventNameWire::PostToolUse,
             HookEventNameWire::PostToolUseFailure,

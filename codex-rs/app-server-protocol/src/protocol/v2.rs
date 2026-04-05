@@ -378,6 +378,7 @@ v2_enum_from_core!(
         PostToolUse,
         PostToolUseFailure,
         SessionStart,
+        SessionEnd,
         UserPromptSubmit,
         Stop,
         PermissionRequest,

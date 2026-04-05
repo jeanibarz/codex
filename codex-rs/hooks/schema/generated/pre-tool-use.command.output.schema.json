@@ -9,6 +9,7 @@
         "PostToolUseFailure",
         "Notification",
         "SessionStart",
+        "SessionEnd",
         "UserPromptSubmit",
         "Stop",
         "PermissionRequest"

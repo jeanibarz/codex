@@ -14,16 +14,29 @@
       "type": "string"
     },
     "hook_event_name": {
-      "const": "Notification",
-      "type": "string"
-    },
-    "message": {
+      "const": "SessionEnd",
       "type": "string"
     },
     "model": {
       "type": "string"
     },
-    "notification_type": {
+    "permission_mode": {
+      "enum": [
+        "default",
+        "acceptEdits",
+        "plan",
+        "dontAsk",
+        "bypassPermissions"
+      ],
+      "type": "string"
+    },
+    "reason": {
+      "enum": [
+        "other",
+        "clear",
+        "logout",
+        "prompt_input_exit"
+      ],
       "type": "string"
     },
     "session_id": {
@@ -31,22 +44,17 @@
     },
     "transcript_path": {
       "$ref": "#/definitions/NullableString"
-    },
-    "turn_id": {
-      "description": "Codex extension: expose the active turn id to internal turn-scoped hooks.",
-      "type": "string"
     }
   },
   "required": [
     "cwd",
     "hook_event_name",
-    "message",
     "model",
-    "notification_type",
+    "permission_mode",
+    "reason",
     "session_id",
-    "transcript_path",
-    "turn_id"
+    "transcript_path"
   ],
-  "title": "notification.command.input",
+  "title": "session-end.command.input",
   "type": "object"
 }
