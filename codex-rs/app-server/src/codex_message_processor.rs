@@ -2852,7 +2852,11 @@ impl CodexMessageProcessor {
             );
             builder.model_provider = Some(model_provider.clone());
             builder.cwd = config_snapshot.cwd.clone();
-            builder.cli_version = Some(env!("CARGO_PKG_VERSION").to_string());
+            builder.cli_version = Some(
+                option_env!("CODEX_BUILD_VERSION")
+                    .unwrap_or(env!("CARGO_PKG_VERSION"))
+                    .to_string(),
+            );
             builder.sandbox_policy = config_snapshot.sandbox_policy.clone();
             builder.approval_mode = config_snapshot.approval_policy;
             let metadata = builder.build(model_provider.as_str());
@@ -8665,7 +8669,9 @@ fn build_thread_from_snapshot(
         status: ThreadStatus::NotLoaded,
         path,
         cwd: config_snapshot.cwd.clone(),
-        cli_version: env!("CARGO_PKG_VERSION").to_string(),
+        cli_version: option_env!("CODEX_BUILD_VERSION")
+            .unwrap_or(env!("CARGO_PKG_VERSION"))
+            .to_string(),
         agent_nickname: config_snapshot.session_source.get_nickname(),
         agent_role: config_snapshot.session_source.get_agent_role(),
         source: config_snapshot.session_source.clone().into(),

@@ -3,6 +3,7 @@ name = "codex-app-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+build = "../build/build-version.rs"
 
 [[bin]]
 name = "codex-app-server"

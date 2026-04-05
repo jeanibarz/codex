@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 autobins = false
+build = "../build/build-version.rs"
 
 [[bin]]
 name = "codex-tui"

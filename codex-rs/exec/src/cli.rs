@@ -6,7 +6,7 @@ use codex_utils_cli::CliConfigOverrides;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(version)]
+#[command(version = env!("CODEX_BUILD_VERSION"))]
 pub struct Cli {
     /// Action to perform. If omitted, runs a new non-interactive session.
     #[command(subcommand)]
