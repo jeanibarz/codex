@@ -41,6 +41,7 @@ pub(crate) fn select_handlers(
             }
             HookEventName::UserPromptSubmit
             | HookEventName::Stop
+            | HookEventName::StopFailure
             | HookEventName::SessionEnd => true,
         })
         .cloned()
@@ -119,7 +120,8 @@ fn scope_for_event(event_name: HookEventName) -> HookScope {
         | HookEventName::Notification
         | HookEventName::PermissionRequest
         | HookEventName::UserPromptSubmit
-        | HookEventName::Stop => HookScope::Turn,
+        | HookEventName::Stop
+        | HookEventName::StopFailure => HookScope::Turn,
     }
 }
 

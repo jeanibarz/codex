@@ -381,6 +381,7 @@ v2_enum_from_core!(
         SessionEnd,
         UserPromptSubmit,
         Stop,
+        StopFailure,
         PermissionRequest,
         Notification
     }

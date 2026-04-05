@@ -550,6 +550,53 @@ fn read_session_end_hook_inputs(home: &Path) -> Result<Vec<serde_json::Value>> {
         .collect()
 }
 
+fn write_stop_failure_hook_recording(home: &Path) -> Result<()> {
+    let script_path = home.join("stop_failure_hook.py");
+    let log_path = home.join("stop_failure_hook_log.jsonl");
+    let script = format!(
+        r#"import json
+from pathlib import Path
+import sys
+
+payload = json.load(sys.stdin)
+record = {{
+    "hook_event_name": payload.get("hook_event_name"),
+    "error": payload.get("error"),
+    "session_id": payload.get("session_id"),
+    "turn_id": payload.get("turn_id"),
+}}
+
+with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(record) + "\n")
+"#,
+        log_path = log_path.display(),
+    );
+    let hooks = serde_json::json!({
+        "hooks": {
+            "StopFailure": [{
+                "hooks": [{
+                    "type": "command",
+                    "command": format!("python3 {}", script_path.display()),
+                    "statusMessage": "running stop failure hook",
+                }]
+            }]
+        }
+    });
+
+    fs::write(&script_path, script).context("write stop failure hook script")?;
+    fs::write(home.join("hooks.json"), hooks.to_string()).context("write hooks.json")?;
+    Ok(())
+}
+
+fn read_stop_failure_hook_inputs(home: &Path) -> Result<Vec<serde_json::Value>> {
+    fs::read_to_string(home.join("stop_failure_hook_log.jsonl"))
+        .context("read stop failure hook log")?
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).context("parse stop failure hook log line"))
+        .collect()
+}
+
 fn read_user_prompt_submit_hook_inputs(home: &Path) -> Result<Vec<serde_json::Value>> {
     fs::read_to_string(home.join("user_prompt_submit_hook_log.jsonl"))
         .context("read user prompt submit hook log")?
@@ -748,6 +795,93 @@ async fn session_start_hook_sees_materialized_transcript_path() -> Result<()> {
         Some(false)
     );
     assert_eq!(hook_inputs[0].get("exists"), Some(&Value::Bool(true)));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_failure_hook_fires_on_turn_error() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    // Mount a 500 error response so the turn fails with an API error.
+    use wiremock::Mock;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path_regex;
+    Mock::given(method("POST"))
+        .and(path_regex(".*/responses$"))
+        .respond_with(
+            ResponseTemplate::new(500)
+                .insert_header("content-type", "application/json")
+                .set_body_string(
+                    serde_json::json!({
+                        "error": {"type": "server_error", "message": "synthetic test error"}
+                    })
+                    .to_string(),
+                ),
+        )
+        .mount(&server)
+        .await;
+
+    let mut builder = test_codex()
+        .with_pre_build_hook(|home| {
+            if let Err(error) = write_stop_failure_hook_recording(home) {
+                panic!("failed to write stop failure hook test fixture: {error}");
+            }
+        })
+        .with_config(|config| {
+            config
+                .features
+                .enable(Feature::CodexHooks)
+                .expect("test config should allow feature update");
+            config.model_provider.request_max_retries = Some(0);
+            config.model_provider.stream_max_retries = Some(0);
+        });
+    let test = builder.build(&server).await?;
+
+    // Submit a turn which should fail with an API error.
+    use codex_protocol::protocol::AskForApproval;
+    use codex_protocol::protocol::SandboxPolicy;
+    let session_model = test.session_configured.model.clone();
+    test.codex
+        .submit(Op::UserTurn {
+            items: vec![UserInput::Text {
+                text: "hello".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            cwd: test.config.cwd.to_path_buf(),
+            approval_policy: AskForApproval::Never,
+            approvals_reviewer: None,
+            sandbox_policy: SandboxPolicy::DangerFullAccess,
+            model: session_model,
+            effort: None,
+            summary: None,
+            service_tier: None,
+            collaboration_mode: None,
+            personality: None,
+        })
+        .await?;
+
+    // Wait for the Error event indicating the turn failed.
+    wait_for_event(&test.codex, |event| matches!(event, EventMsg::Error(_))).await;
+    // Give the hook a brief moment to write to disk.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let hook_inputs = read_stop_failure_hook_inputs(test.codex_home_path())?;
+    assert_eq!(hook_inputs.len(), 1);
+    assert_eq!(
+        hook_inputs[0].get("hook_event_name"),
+        Some(&Value::String("StopFailure".to_string()))
+    );
+    assert_eq!(
+        hook_inputs[0]
+            .get("error")
+            .and_then(Value::as_str)
+            .map(str::is_empty),
+        Some(false)
+    );
 
     Ok(())
 }

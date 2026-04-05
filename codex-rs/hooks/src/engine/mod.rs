@@ -26,6 +26,8 @@ use crate::events::session_start::SessionStartOutcome;
 use crate::events::session_start::SessionStartRequest;
 use crate::events::stop::StopOutcome;
 use crate::events::stop::StopRequest;
+use crate::events::stop_failure::StopFailureOutcome;
+use crate::events::stop_failure::StopFailureRequest;
 use crate::events::user_prompt_submit::UserPromptSubmitOutcome;
 use crate::events::user_prompt_submit::UserPromptSubmitRequest;
 
@@ -67,6 +69,7 @@ impl ConfiguredHandler {
             codex_protocol::protocol::HookEventName::SessionEnd => "session-end",
             codex_protocol::protocol::HookEventName::UserPromptSubmit => "user-prompt-submit",
             codex_protocol::protocol::HookEventName::Stop => "stop",
+            codex_protocol::protocol::HookEventName::StopFailure => "stop-failure",
             codex_protocol::protocol::HookEventName::PermissionRequest => "permission-request",
         }
     }
@@ -224,6 +227,20 @@ impl ClaudeHooksEngine {
 
     pub(crate) async fn run_stop(&self, request: StopRequest) -> StopOutcome {
         crate::events::stop::run(&self.handlers, &self.shell, request).await
+    }
+
+    pub(crate) fn preview_stop_failure(
+        &self,
+        request: &StopFailureRequest,
+    ) -> Vec<HookRunSummary> {
+        crate::events::stop_failure::preview(&self.handlers, request)
+    }
+
+    pub(crate) async fn run_stop_failure(
+        &self,
+        request: StopFailureRequest,
+    ) -> StopFailureOutcome {
+        crate::events::stop_failure::run(&self.handlers, &self.shell, request).await
     }
 
     pub(crate) async fn run_permission_request(

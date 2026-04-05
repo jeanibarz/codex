@@ -7,4 +7,5 @@ pub mod pre_tool_use;
 pub mod session_end;
 pub mod session_start;
 pub mod stop;
+pub mod stop_failure;
 pub mod user_prompt_submit;

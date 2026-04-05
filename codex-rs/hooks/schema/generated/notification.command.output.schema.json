@@ -12,6 +12,7 @@
         "SessionEnd",
         "UserPromptSubmit",
         "Stop",
+        "StopFailure",
         "PermissionRequest"
       ],
       "type": "string"

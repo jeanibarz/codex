@@ -30,6 +30,7 @@ const USER_PROMPT_SUBMIT_INPUT_FIXTURE: &str = "user-prompt-submit.command.input
 const USER_PROMPT_SUBMIT_OUTPUT_FIXTURE: &str = "user-prompt-submit.command.output.schema.json";
 const STOP_INPUT_FIXTURE: &str = "stop.command.input.schema.json";
 const STOP_OUTPUT_FIXTURE: &str = "stop.command.output.schema.json";
+const STOP_FAILURE_INPUT_FIXTURE: &str = "stop-failure.command.input.schema.json";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(transparent)]
@@ -90,6 +91,8 @@ pub(crate) enum HookEventNameWire {
     UserPromptSubmit,
     #[serde(rename = "Stop")]
     Stop,
+    #[serde(rename = "StopFailure")]
+    StopFailure,
     #[serde(rename = "PermissionRequest")]
     PermissionRequest,
 }
@@ -469,6 +472,24 @@ pub(crate) struct StopCommandInput {
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(rename = "stop-failure.command.input")]
+pub(crate) struct StopFailureCommandInput {
+    pub session_id: String,
+    /// Codex extension: expose the active turn id to internal turn-scoped hooks.
+    pub turn_id: String,
+    pub transcript_path: NullableString,
+    pub cwd: String,
+    #[schemars(schema_with = "stop_failure_hook_event_name_schema")]
+    pub hook_event_name: String,
+    pub model: String,
+    #[schemars(schema_with = "permission_mode_schema")]
+    pub permission_mode: String,
+    pub error: String,
+    pub last_assistant_message: NullableString,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[schemars(rename = "session-end.command.input")]
 pub(crate) struct SessionEndCommandInput {
     pub session_id: String,
@@ -590,6 +611,10 @@ pub fn write_schema_fixtures(schema_root: &Path) -> anyhow::Result<()> {
         &generated_dir.join(STOP_OUTPUT_FIXTURE),
         schema_json::<StopCommandOutputWire>()?,
     )?;
+    write_schema(
+        &generated_dir.join(STOP_FAILURE_INPUT_FIXTURE),
+        schema_json::<StopFailureCommandInput>()?,
+    )?;
 
     Ok(())
 }
@@ -689,6 +714,10 @@ fn stop_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
     string_const_schema("Stop")
 }
 
+fn stop_failure_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
+    string_const_schema("StopFailure")
+}
+
 fn permission_request_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
     string_const_schema("PermissionRequest")
 }
@@ -748,6 +777,7 @@ mod tests {
     use super::PermissionRequestCommandInput;
     use super::PostToolUseCommandInput;
     use super::PostToolUseFailureCommandInput;
+    use super::StopFailureCommandInput;
     use super::PreToolUseCommandInput;
     use super::StopCommandInput;
     use super::UserPromptSubmitCommandInput;
@@ -886,6 +916,11 @@ mod tests {
             &schema_json::<StopCommandInput>().expect("serialize stop input schema"),
         )
         .expect("parse stop input schema");
+        let stop_failure: Value = serde_json::from_slice(
+            &schema_json::<StopFailureCommandInput>()
+                .expect("serialize stop failure input schema"),
+        )
+        .expect("parse stop failure input schema");
         let permission_request: Value = serde_json::from_slice(
             &schema_json::<PermissionRequestCommandInput>()
                 .expect("serialize permission request input schema"),
@@ -904,6 +939,7 @@ mod tests {
             &notification,
             &user_prompt_submit,
             &stop,
+            &stop_failure,
             &permission_request,
         ] {
             assert_eq!(schema["properties"]["turn_id"]["type"], "string");

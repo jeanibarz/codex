@@ -14,6 +14,7 @@ use codex_hooks::PreToolUseOutcome;
 use codex_hooks::PreToolUseRequest;
 use codex_hooks::SessionEndReason;
 use codex_hooks::SessionEndRequest;
+use codex_hooks::StopFailureRequest;
 use codex_hooks::SessionStartOutcome;
 use codex_hooks::UserPromptSubmitOutcome;
 use codex_hooks::UserPromptSubmitRequest;
@@ -151,6 +152,30 @@ pub async fn emit_workspace_trust_permission_request_hook(config: &Config) {
             );
         }
     }
+}
+
+pub(crate) async fn run_stop_failure_hooks(
+    sess: &Arc<Session>,
+    turn_context: &Arc<TurnContext>,
+    error: String,
+    last_assistant_message: Option<String>,
+) {
+    let request = StopFailureRequest {
+        session_id: sess.conversation_id,
+        turn_id: turn_context.sub_id.clone(),
+        cwd: turn_context.cwd.to_path_buf(),
+        transcript_path: sess.hook_transcript_path().await,
+        model: turn_context.model_info.slug.clone(),
+        permission_mode: hook_permission_mode(turn_context),
+        error,
+        last_assistant_message,
+    };
+
+    let preview_runs = sess.hooks().preview_stop_failure(&request);
+    emit_hook_started_events(sess, turn_context, preview_runs).await;
+
+    let outcome = sess.hooks().run_stop_failure(request).await;
+    emit_hook_completed_events(sess, turn_context, outcome.hook_events).await;
 }
 
 pub(crate) async fn run_session_end_hooks(

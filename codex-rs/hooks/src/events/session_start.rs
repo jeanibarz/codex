@@ -153,6 +153,7 @@ fn supported_capabilities_wire() -> CodexHookCapabilitiesWire {
             HookEventNameWire::PermissionRequest,
             HookEventNameWire::UserPromptSubmit,
             HookEventNameWire::Stop,
+            HookEventNameWire::StopFailure,
         ],
         handler_features: CodexHookHandlerFeaturesWire {
             command_if: true,

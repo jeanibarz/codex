@@ -91,6 +91,7 @@ pub(crate) fn discover_handlers(
             permission_request,
             user_prompt_submit,
             stop,
+            stop_failure,
         } = parsed.hooks;
 
         for (event_name, groups) in [
@@ -127,6 +128,10 @@ pub(crate) fn discover_handlers(
                 user_prompt_submit,
             ),
             (codex_protocol::protocol::HookEventName::Stop, stop),
+            (
+                codex_protocol::protocol::HookEventName::StopFailure,
+                stop_failure,
+            ),
         ] {
             append_matcher_groups(
                 &mut handlers,
@@ -198,6 +203,7 @@ fn load_hooks_from_file(
         session_end,
         user_prompt_submit,
         stop,
+        stop_failure,
         permission_request,
     } = parsed.hooks;
 
@@ -231,6 +237,10 @@ fn load_hooks_from_file(
             user_prompt_submit,
         ),
         (codex_protocol::protocol::HookEventName::Stop, stop),
+        (
+            codex_protocol::protocol::HookEventName::StopFailure,
+            stop_failure,
+        ),
         (
             codex_protocol::protocol::HookEventName::PermissionRequest,
             permission_request,

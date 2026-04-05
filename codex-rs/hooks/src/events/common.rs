@@ -82,6 +82,7 @@ pub(crate) fn matcher_pattern_for_event(
         | HookEventName::PermissionRequest => matcher,
         HookEventName::UserPromptSubmit
         | HookEventName::Stop
+        | HookEventName::StopFailure
         | HookEventName::SessionEnd => None,
     }
 }
