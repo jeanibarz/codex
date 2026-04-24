@@ -56,9 +56,15 @@ impl ConfiguredHandler {
             codex_protocol::protocol::HookEventName::PreToolUse => "pre-tool-use",
             codex_protocol::protocol::HookEventName::PermissionRequest => "permission-request",
             codex_protocol::protocol::HookEventName::PostToolUse => "post-tool-use",
+            codex_protocol::protocol::HookEventName::PostToolUseFailure => {
+                "post-tool-use-failure"
+            }
+            codex_protocol::protocol::HookEventName::Notification => "notification",
             codex_protocol::protocol::HookEventName::SessionStart => "session-start",
+            codex_protocol::protocol::HookEventName::SessionEnd => "session-end",
             codex_protocol::protocol::HookEventName::UserPromptSubmit => "user-prompt-submit",
             codex_protocol::protocol::HookEventName::Stop => "stop",
+            codex_protocol::protocol::HookEventName::StopFailure => "stop-failure",
         }
     }
 }
@@ -168,6 +174,34 @@ impl ClaudeHooksEngine {
 
     pub(crate) async fn run_stop(&self, request: StopRequest) -> StopOutcome {
         crate::events::stop::run(&self.handlers, &self.shell, request).await
+    }
+
+    pub(crate) async fn run_stop_failure(
+        &self,
+        request: crate::events::stop_failure::StopFailureRequest,
+    ) -> crate::events::stop_failure::StopFailureOutcome {
+        crate::events::stop_failure::run(&self.handlers, &self.shell, request).await
+    }
+
+    pub(crate) async fn run_session_end(
+        &self,
+        request: crate::events::session_end::SessionEndRequest,
+    ) -> crate::events::session_end::SessionEndOutcome {
+        crate::events::session_end::run(&self.handlers, &self.shell, request).await
+    }
+
+    pub(crate) async fn run_notification(
+        &self,
+        request: crate::events::notification::NotificationRequest,
+    ) -> crate::events::notification::NotificationOutcome {
+        crate::events::notification::run(&self.handlers, &self.shell, request).await
+    }
+
+    pub(crate) async fn run_post_tool_use_failure(
+        &self,
+        request: crate::events::post_tool_use_failure::PostToolUseFailureRequest,
+    ) -> crate::events::post_tool_use_failure::PostToolUseFailureOutcome {
+        crate::events::post_tool_use_failure::run(&self.handlers, &self.shell, request).await
     }
 }
 

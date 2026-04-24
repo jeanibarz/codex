@@ -25,6 +25,11 @@ const USER_PROMPT_SUBMIT_INPUT_FIXTURE: &str = "user-prompt-submit.command.input
 const USER_PROMPT_SUBMIT_OUTPUT_FIXTURE: &str = "user-prompt-submit.command.output.schema.json";
 const STOP_INPUT_FIXTURE: &str = "stop.command.input.schema.json";
 const STOP_OUTPUT_FIXTURE: &str = "stop.command.output.schema.json";
+const STOP_FAILURE_INPUT_FIXTURE: &str = "stop-failure.command.input.schema.json";
+const SESSION_END_INPUT_FIXTURE: &str = "session-end.command.input.schema.json";
+const POST_TOOL_USE_FAILURE_INPUT_FIXTURE: &str =
+    "post-tool-use-failure.command.input.schema.json";
+const NOTIFICATION_INPUT_FIXTURE: &str = "notification.command.input.schema.json";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(transparent)]
@@ -404,6 +409,77 @@ pub(crate) struct StopCommandInput {
     pub last_assistant_message: NullableString,
 }
 
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "stop-failure.command.input")]
+pub(crate) struct StopFailureCommandInput {
+    pub session_id: String,
+    /// Codex extension: expose the active turn id to internal turn-scoped hooks.
+    pub turn_id: String,
+    pub transcript_path: NullableString,
+    pub cwd: String,
+    #[schemars(schema_with = "stop_failure_hook_event_name_schema")]
+    pub hook_event_name: String,
+    pub model: String,
+    #[schemars(schema_with = "permission_mode_schema")]
+    pub permission_mode: String,
+    pub error: String,
+    pub last_assistant_message: NullableString,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "session-end.command.input")]
+pub(crate) struct SessionEndCommandInput {
+    pub session_id: String,
+    pub transcript_path: NullableString,
+    pub cwd: String,
+    #[schemars(schema_with = "session_end_hook_event_name_schema")]
+    pub hook_event_name: String,
+    pub model: String,
+    #[schemars(schema_with = "permission_mode_schema")]
+    pub permission_mode: String,
+    #[schemars(schema_with = "session_end_reason_schema")]
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "post-tool-use-failure.command.input")]
+pub(crate) struct PostToolUseFailureCommandInput {
+    pub session_id: String,
+    /// Codex extension: expose the active turn id to internal turn-scoped hooks.
+    pub turn_id: String,
+    pub transcript_path: NullableString,
+    pub cwd: String,
+    #[schemars(schema_with = "post_tool_use_failure_hook_event_name_schema")]
+    pub hook_event_name: String,
+    pub model: String,
+    #[schemars(schema_with = "permission_mode_schema")]
+    pub permission_mode: String,
+    pub tool_name: String,
+    pub tool_input: Value,
+    pub tool_use_id: String,
+    pub error: String,
+    pub is_interrupt: bool,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "notification.command.input")]
+pub(crate) struct NotificationCommandInput {
+    pub session_id: String,
+    /// Codex extension: expose the active turn id to internal turn-scoped hooks.
+    pub turn_id: String,
+    pub transcript_path: NullableString,
+    pub cwd: String,
+    #[schemars(schema_with = "notification_hook_event_name_schema")]
+    pub hook_event_name: String,
+    pub model: String,
+    pub notification_type: String,
+    pub message: String,
+}
+
 pub fn write_schema_fixtures(schema_root: &Path) -> anyhow::Result<()> {
     let generated_dir = schema_root.join(GENERATED_DIR);
     ensure_empty_dir(&generated_dir)?;
@@ -455,6 +531,22 @@ pub fn write_schema_fixtures(schema_root: &Path) -> anyhow::Result<()> {
     write_schema(
         &generated_dir.join(STOP_OUTPUT_FIXTURE),
         schema_json::<StopCommandOutputWire>()?,
+    )?;
+    write_schema(
+        &generated_dir.join(STOP_FAILURE_INPUT_FIXTURE),
+        schema_json::<StopFailureCommandInput>()?,
+    )?;
+    write_schema(
+        &generated_dir.join(SESSION_END_INPUT_FIXTURE),
+        schema_json::<SessionEndCommandInput>()?,
+    )?;
+    write_schema(
+        &generated_dir.join(POST_TOOL_USE_FAILURE_INPUT_FIXTURE),
+        schema_json::<PostToolUseFailureCommandInput>()?,
+    )?;
+    write_schema(
+        &generated_dir.join(NOTIFICATION_INPUT_FIXTURE),
+        schema_json::<NotificationCommandInput>()?,
     )?;
 
     Ok(())
@@ -533,6 +625,26 @@ fn user_prompt_submit_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Sche
 
 fn stop_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
     string_const_schema("Stop")
+}
+
+fn stop_failure_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
+    string_const_schema("StopFailure")
+}
+
+fn session_end_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
+    string_const_schema("SessionEnd")
+}
+
+fn session_end_reason_schema(_gen: &mut SchemaGenerator) -> Schema {
+    string_enum_schema(&["clear", "logout", "prompt_input_exit", "other"])
+}
+
+fn post_tool_use_failure_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
+    string_const_schema("PostToolUseFailure")
+}
+
+fn notification_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
+    string_const_schema("Notification")
 }
 
 fn permission_mode_schema(_gen: &mut SchemaGenerator) -> Schema {
