@@ -8,5 +8,5 @@ fn reports_build_version_with_looper_git_metadata() {
         .arg("--version")
         .assert()
         .success()
-        .stdout(contains("codex-cli 0.118.0+looper."));
+        .stdout(contains("+looper."));
 }

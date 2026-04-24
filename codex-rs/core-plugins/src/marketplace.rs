@@ -18,6 +18,7 @@ use std::path::PathBuf;
 use tracing::warn;
 
 const MARKETPLACE_MANIFEST_RELATIVE_PATHS: &[&str] = &[
+    ".claude/plugins/marketplace.json",
     ".agents/plugins/marketplace.json",
     ".claude-plugin/marketplace.json",
 ];
