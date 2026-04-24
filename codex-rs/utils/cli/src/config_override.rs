@@ -7,6 +7,8 @@
 //! key/value pairs as well as to apply them onto a mutable
 //! `serde_json::Value` representing the configuration tree.
 
+use std::path::PathBuf;
+
 use clap::ArgAction;
 use clap::Parser;
 use serde::de::Error as SerdeError;
@@ -34,6 +36,12 @@ pub struct CliConfigOverrides {
         global = true,
     )]
     pub raw_overrides: Vec<String>,
+
+    /// Path to a JSON settings file containing additional hook definitions,
+    /// merged additively with existing config. Used by external supervisors
+    /// (e.g. Looper) to inject per-session hooks without editing config.toml.
+    #[arg(long = "settings", value_name = "FILE", global = true)]
+    pub settings_file: Option<PathBuf>,
 }
 
 impl CliConfigOverrides {
