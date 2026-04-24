@@ -117,6 +117,7 @@ with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
             program: String::new(),
             args: Vec::new(),
         },
+        /*settings_file*/ None,
     );
 
     assert!(engine.warnings().is_empty());
@@ -383,6 +384,7 @@ fn requirements_managed_hooks_warn_when_managed_dir_is_missing() {
             program: String::new(),
             args: Vec::new(),
         },
+        /*settings_file*/ None,
     );
 
     assert!(engine.warnings().iter().any(|warning| {
@@ -492,6 +494,7 @@ fn discovers_hooks_from_json_and_toml_in_the_same_layer() {
             program: String::new(),
             args: Vec::new(),
         },
+        /*settings_file*/ None,
     );
 
     assert!(engine.warnings().iter().any(|warning| {
