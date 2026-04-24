@@ -104,6 +104,9 @@ struct DependencyTool {
 
 const SKILLS_FILENAME: &str = "SKILL.md";
 const AGENTS_DIR_NAME: &str = ".agents";
+// Claude-compat: Claude Code installs skills under `.claude/skills`; these
+// are scanned alongside the upstream `.agents/skills` roots so skills from
+// either ecosystem load without migration.
 const CLAUDE_DIR_NAME: &str = ".claude";
 const SKILLS_METADATA_DIR: &str = "agents";
 const SKILLS_METADATA_FILENAME: &str = "openai.yaml";
@@ -272,15 +275,32 @@ fn skill_roots_from_layer_stack_inner(
 
         match &layer.name {
             ConfigLayerSource::Project { .. } => {
-                // Claude compatibility: do not treat project config folder as a skills root.
-                // Repo skills live under `.claude/skills` and are discovered by
-                // `repo_agents_skill_roots` below.
-                let _ = &repo_fs;
+                if let Some(repo_fs) = &repo_fs {
+                    roots.push(SkillRoot {
+                        path: config_folder.join(SKILLS_DIR_NAME),
+                        scope: SkillScope::Repo,
+                        file_system: Arc::clone(repo_fs),
+                    });
+                }
             }
             ConfigLayerSource::User { .. } => {
+                // Deprecated user skills location (`$CODEX_HOME/skills`), kept for backward
+                // compatibility.
+                roots.push(SkillRoot {
+                    path: config_folder.join(SKILLS_DIR_NAME),
+                    scope: SkillScope::User,
+                    file_system: Arc::clone(&LOCAL_FS),
+                });
+
                 // Claude compatibility: `$HOME/.claude/skills` (user-installed Claude-compatible
-                // skills). The legacy `$CODEX_HOME/skills` root is no longer scanned.
+                // skills) is added alongside upstream's `$HOME/.agents/skills` root. Both are
+                // scanned so Claude-installed skills and Codex-installed skills coexist.
                 if let Some(home_dir) = home_dir {
+                    roots.push(SkillRoot {
+                        path: home_dir.join(AGENTS_DIR_NAME).join(SKILLS_DIR_NAME),
+                        scope: SkillScope::User,
+                        file_system: Arc::clone(&LOCAL_FS),
+                    });
                     roots.push(SkillRoot {
                         path: home_dir.join(CLAUDE_DIR_NAME).join(SKILLS_DIR_NAME),
                         scope: SkillScope::User,
@@ -328,20 +348,22 @@ async fn repo_agents_skill_roots(
     let dirs = dirs_between_project_root_and_cwd(cwd, &project_root);
     let mut roots = Vec::new();
     for dir in dirs {
-        let claude_skills = dir.join(CLAUDE_DIR_NAME).join(SKILLS_DIR_NAME);
-        match fs.get_metadata(&claude_skills, /*sandbox*/ None).await {
-            Ok(metadata) if metadata.is_directory => roots.push(SkillRoot {
-                path: claude_skills,
-                scope: SkillScope::Repo,
-                file_system: Arc::clone(&fs),
-            }),
-            Ok(_) => {}
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-            Err(err) => {
-                tracing::warn!(
-                    "failed to stat repo skills root {}: {err:#}",
-                    claude_skills.display()
-                );
+        for relative in [AGENTS_DIR_NAME, CLAUDE_DIR_NAME] {
+            let skills_root = dir.join(relative).join(SKILLS_DIR_NAME);
+            match fs.get_metadata(&skills_root, /*sandbox*/ None).await {
+                Ok(metadata) if metadata.is_directory => roots.push(SkillRoot {
+                    path: skills_root,
+                    scope: SkillScope::Repo,
+                    file_system: Arc::clone(&fs),
+                }),
+                Ok(_) => {}
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    tracing::warn!(
+                        "failed to stat repo skills root {}: {err:#}",
+                        skills_root.display()
+                    );
+                }
             }
         }
     }

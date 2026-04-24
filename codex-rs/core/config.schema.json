@@ -855,6 +855,13 @@
     },
     "HookEventsToml": {
       "properties": {
+        "Notification": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/MatcherGroup"
+          },
+          "type": "array"
+        },
         "PermissionRequest": {
           "default": [],
           "items": {
@@ -869,7 +876,21 @@
           },
           "type": "array"
         },
+        "PostToolUseFailure": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/MatcherGroup"
+          },
+          "type": "array"
+        },
         "PreToolUse": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/MatcherGroup"
+          },
+          "type": "array"
+        },
+        "SessionEnd": {
           "default": [],
           "items": {
             "$ref": "#/definitions/MatcherGroup"
@@ -884,6 +905,13 @@
           "type": "array"
         },
         "Stop": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/MatcherGroup"
+          },
+          "type": "array"
+        },
+        "StopFailure": {
           "default": [],
           "items": {
             "$ref": "#/definitions/MatcherGroup"

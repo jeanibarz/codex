@@ -195,6 +195,10 @@ async fn skill_roots_from_layer_stack_maps_user_to_user_and_system_cache_and_sys
                 home_folder.join(AGENTS_DIR_NAME).join(SKILLS_DIR_NAME)
             ),
             (
+                SkillScope::User,
+                home_folder.join(CLAUDE_DIR_NAME).join(SKILLS_DIR_NAME)
+            ),
+            (
                 SkillScope::System,
                 user_folder.join("skills").join(".system")
             ),
@@ -260,6 +264,10 @@ async fn skill_roots_from_layer_stack_includes_disabled_project_layers() -> anyh
             (
                 SkillScope::User,
                 home_folder.join(AGENTS_DIR_NAME).join(SKILLS_DIR_NAME)
+            ),
+            (
+                SkillScope::User,
+                home_folder.join(CLAUDE_DIR_NAME).join(SKILLS_DIR_NAME)
             ),
             (
                 SkillScope::System,
@@ -1760,7 +1768,9 @@ async fn skill_roots_include_admin_with_lowest_priority() {
     .collect();
     let mut expected = vec![SkillScope::User, SkillScope::System];
     if home_dir().is_some() {
+        // Two extra User roots: `.agents/skills` and `.claude/skills` under $HOME.
         expected.insert(1, SkillScope::User);
+        expected.insert(2, SkillScope::User);
     }
     expected.push(SkillScope::Admin);
     assert_eq!(scopes, expected);
