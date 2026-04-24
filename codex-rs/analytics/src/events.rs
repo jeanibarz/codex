@@ -676,9 +676,13 @@ fn analytics_hook_event_name(event_name: HookEventName) -> &'static str {
         HookEventName::PreToolUse => "PreToolUse",
         HookEventName::PermissionRequest => "PermissionRequest",
         HookEventName::PostToolUse => "PostToolUse",
+        HookEventName::PostToolUseFailure => "PostToolUseFailure",
+        HookEventName::Notification => "Notification",
         HookEventName::SessionStart => "SessionStart",
+        HookEventName::SessionEnd => "SessionEnd",
         HookEventName::UserPromptSubmit => "UserPromptSubmit",
         HookEventName::Stop => "Stop",
+        HookEventName::StopFailure => "StopFailure",
     }
 }
 
