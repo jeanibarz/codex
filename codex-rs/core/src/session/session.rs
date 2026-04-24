@@ -958,6 +958,20 @@ impl Session {
                 cancel_guard.cancel();
                 *cancel_guard = CancellationToken::new();
             }
+            // Emit a Notification hook so supervisors watching via the hook
+            // stream know MCP startup is in progress. Looper suppresses
+            // stuck-detection heuristics during this transitional phase.
+            if enabled_mcp_server_count > 0 {
+                crate::hook_runtime::run_session_bootstrap_notification_hooks(
+                    sess.as_ref(),
+                    INITIAL_SUBMIT_ID.to_owned(),
+                    session_configuration.cwd.to_path_buf(),
+                    session_configuration.collaboration_mode.model().to_string(),
+                    "mcp_startup_starting".to_string(),
+                    format!("Starting {enabled_mcp_server_count} MCP server(s)"),
+                )
+                .await;
+            }
             let turn_environment = crate::environment_selection::resolve_environment_selections(
                 sess.services.environment_manager.as_ref(),
                 &session_configuration.environments,

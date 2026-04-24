@@ -184,11 +184,25 @@ impl Hooks {
         self.engine.run_stop(request).await
     }
 
+    pub fn preview_stop_failure(
+        &self,
+        request: &crate::events::stop_failure::StopFailureRequest,
+    ) -> Vec<codex_protocol::protocol::HookRunSummary> {
+        self.engine.preview_stop_failure(request)
+    }
+
     pub async fn run_stop_failure(
         &self,
         request: crate::events::stop_failure::StopFailureRequest,
     ) -> crate::events::stop_failure::StopFailureOutcome {
         self.engine.run_stop_failure(request).await
+    }
+
+    pub fn preview_session_end(
+        &self,
+        request: &crate::events::session_end::SessionEndRequest,
+    ) -> Vec<codex_protocol::protocol::HookRunSummary> {
+        self.engine.preview_session_end(request)
     }
 
     pub async fn run_session_end(
@@ -198,11 +212,25 @@ impl Hooks {
         self.engine.run_session_end(request).await
     }
 
+    pub fn preview_notification(
+        &self,
+        request: &crate::events::notification::NotificationRequest,
+    ) -> Vec<codex_protocol::protocol::HookRunSummary> {
+        self.engine.preview_notification(request)
+    }
+
     pub async fn run_notification(
         &self,
         request: crate::events::notification::NotificationRequest,
     ) -> crate::events::notification::NotificationOutcome {
         self.engine.run_notification(request).await
+    }
+
+    pub fn preview_post_tool_use_failure(
+        &self,
+        request: &crate::events::post_tool_use_failure::PostToolUseFailureRequest,
+    ) -> Vec<codex_protocol::protocol::HookRunSummary> {
+        self.engine.preview_post_tool_use_failure(request)
     }
 
     pub async fn run_post_tool_use_failure(
