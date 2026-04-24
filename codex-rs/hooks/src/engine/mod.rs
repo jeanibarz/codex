@@ -81,6 +81,7 @@ impl ClaudeHooksEngine {
         enabled: bool,
         config_layer_stack: Option<&ConfigLayerStack>,
         shell: CommandShell,
+        settings_file: Option<&std::path::Path>,
     ) -> Self {
         if !enabled {
             return Self {
@@ -91,7 +92,10 @@ impl ClaudeHooksEngine {
         }
 
         let _ = schema_loader::generated_hook_schemas();
-        let discovered = discovery::discover_handlers(config_layer_stack);
+        let mut discovered = discovery::discover_handlers(config_layer_stack);
+        if let Some(settings_path) = settings_file {
+            discovery::append_settings_file_handlers(&mut discovered, settings_path);
+        }
         Self {
             handlers: discovered.handlers,
             warnings: discovered.warnings,

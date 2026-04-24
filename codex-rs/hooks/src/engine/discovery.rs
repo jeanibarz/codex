@@ -218,6 +218,77 @@ fn load_hooks_json(
     (!parsed.hooks.is_empty()).then_some((source_path, parsed.hooks))
 }
 
+/// Claude-compat: merge hook handlers from a JSON settings file (`--settings FILE`)
+/// into the discovered set. Used by external supervisors (e.g. Looper) to inject
+/// per-session hooks without editing `config.toml`.
+pub(crate) fn append_settings_file_handlers(result: &mut DiscoveryResult, settings_path: &Path) {
+    if !settings_path.is_file() {
+        result.warnings.push(format!(
+            "--settings: file not found at {}",
+            settings_path.display()
+        ));
+        return;
+    }
+
+    let contents = match fs::read_to_string(settings_path) {
+        Ok(contents) => contents,
+        Err(err) => {
+            result.warnings.push(format!(
+                "--settings: failed to read {}: {err}",
+                settings_path.display()
+            ));
+            return;
+        }
+    };
+
+    let parsed: HooksFile = match serde_json::from_str(&contents) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            result.warnings.push(format!(
+                "--settings: failed to parse {} as JSON: {err}",
+                settings_path.display()
+            ));
+            return;
+        }
+    };
+
+    if parsed.hooks.is_empty() {
+        return;
+    }
+
+    let source_path = match AbsolutePathBuf::try_from(settings_path.to_path_buf()) {
+        Ok(path) => path,
+        Err(err) => {
+            result.warnings.push(format!(
+                "--settings: failed to canonicalize {}: {err}",
+                settings_path.display()
+            ));
+            return;
+        }
+    };
+
+    let source = HookHandlerSource {
+        path: &source_path,
+        is_managed: false,
+        source: HookSource::SessionFlags,
+    };
+    let mut display_order = result
+        .handlers
+        .iter()
+        .map(|handler| handler.display_order)
+        .max()
+        .unwrap_or(-1)
+        + 1;
+
+    append_hook_events(
+        &mut result.handlers,
+        &mut result.warnings,
+        &mut display_order,
+        source,
+        parsed.hooks,
+    );
+}
+
 fn load_toml_hooks_from_layer(
     layer: &ConfigLayerEntry,
     warnings: &mut Vec<String>,
