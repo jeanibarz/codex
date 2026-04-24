@@ -638,18 +638,34 @@ pub(crate) async fn run_turn(
                     }
                 }
 
+                let message = "Invalid image in your last message. Please remove it and try again.".to_string();
                 let event = EventMsg::Error(ErrorEvent {
-                    message: "Invalid image in your last message. Please remove it and try again."
-                        .to_string(),
+                    message: message.clone(),
                     codex_error_info: Some(CodexErrorInfo::BadRequest),
                 });
                 sess.send_event(&turn_context, event).await;
+                crate::hook_runtime::run_stop_failure_hooks(
+                    &sess,
+                    &turn_context,
+                    message,
+                    last_agent_message.clone(),
+                )
+                .await;
                 break;
             }
             Err(e) => {
                 info!("Turn error: {e:#}");
-                let event = EventMsg::Error(e.to_error_event(/*message_prefix*/ None));
+                let error_event = e.to_error_event(/*message_prefix*/ None);
+                let error_message = error_event.message.clone();
+                let event = EventMsg::Error(error_event);
                 sess.send_event(&turn_context, event).await;
+                crate::hook_runtime::run_stop_failure_hooks(
+                    &sess,
+                    &turn_context,
+                    error_message,
+                    last_agent_message.clone(),
+                )
+                .await;
                 // let the user continue the conversation
                 break;
             }

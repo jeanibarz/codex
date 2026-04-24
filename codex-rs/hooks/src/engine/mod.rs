@@ -180,11 +180,25 @@ impl ClaudeHooksEngine {
         crate::events::stop::run(&self.handlers, &self.shell, request).await
     }
 
+    pub(crate) fn preview_stop_failure(
+        &self,
+        request: &crate::events::stop_failure::StopFailureRequest,
+    ) -> Vec<HookRunSummary> {
+        crate::events::stop_failure::preview(&self.handlers, request)
+    }
+
     pub(crate) async fn run_stop_failure(
         &self,
         request: crate::events::stop_failure::StopFailureRequest,
     ) -> crate::events::stop_failure::StopFailureOutcome {
         crate::events::stop_failure::run(&self.handlers, &self.shell, request).await
+    }
+
+    pub(crate) fn preview_session_end(
+        &self,
+        request: &crate::events::session_end::SessionEndRequest,
+    ) -> Vec<HookRunSummary> {
+        crate::events::session_end::preview(&self.handlers, request)
     }
 
     pub(crate) async fn run_session_end(
@@ -194,11 +208,25 @@ impl ClaudeHooksEngine {
         crate::events::session_end::run(&self.handlers, &self.shell, request).await
     }
 
+    pub(crate) fn preview_notification(
+        &self,
+        request: &crate::events::notification::NotificationRequest,
+    ) -> Vec<HookRunSummary> {
+        crate::events::notification::preview(&self.handlers, request)
+    }
+
     pub(crate) async fn run_notification(
         &self,
         request: crate::events::notification::NotificationRequest,
     ) -> crate::events::notification::NotificationOutcome {
         crate::events::notification::run(&self.handlers, &self.shell, request).await
+    }
+
+    pub(crate) fn preview_post_tool_use_failure(
+        &self,
+        request: &crate::events::post_tool_use_failure::PostToolUseFailureRequest,
+    ) -> Vec<HookRunSummary> {
+        crate::events::post_tool_use_failure::preview(&self.handlers, request)
     }
 
     pub(crate) async fn run_post_tool_use_failure(

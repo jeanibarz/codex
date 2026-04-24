@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use codex_analytics::HookRunFact;
 use codex_analytics::build_track_events_context;
+use codex_hooks::NotificationRequest;
 use codex_hooks::PermissionRequestDecision;
 use codex_hooks::PermissionRequestOutcome;
 use codex_hooks::PermissionRequestRequest;
@@ -11,7 +12,10 @@ use codex_hooks::PostToolUseOutcome;
 use codex_hooks::PostToolUseRequest;
 use codex_hooks::PreToolUseOutcome;
 use codex_hooks::PreToolUseRequest;
+use codex_hooks::SessionEndReason;
+use codex_hooks::SessionEndRequest;
 use codex_hooks::SessionStartOutcome;
+use codex_hooks::StopFailureRequest;
 use codex_hooks::UserPromptSubmitOutcome;
 use codex_hooks::UserPromptSubmitRequest;
 use codex_otel::HOOK_RUN_DURATION_METRIC;
@@ -505,6 +509,142 @@ fn hook_permission_mode(turn_context: &TurnContext) -> String {
         | AskForApproval::Granular(_) => "default",
     }
     .to_string()
+}
+
+/// Fires a Notification hook during session bootstrap, before any turn
+/// context exists. Used to signal MCP server startup progress so
+/// supervisors (e.g. Looper) can suppress stuck-detection heuristics while
+/// servers are initializing.
+pub(crate) async fn run_session_bootstrap_notification_hooks(
+    sess: &Session,
+    sub_id: String,
+    cwd: std::path::PathBuf,
+    model: String,
+    notification_type: String,
+    message: String,
+) {
+    let request = NotificationRequest {
+        session_id: sess.conversation_id,
+        turn_id: sub_id.clone(),
+        cwd,
+        transcript_path: sess.hook_transcript_path().await,
+        model,
+        notification_type,
+        message,
+    };
+
+    for run in sess.hooks().preview_notification(&request) {
+        let event = codex_protocol::protocol::Event {
+            id: sub_id.clone(),
+            msg: EventMsg::HookStarted(HookStartedEvent {
+                turn_id: None,
+                run,
+            }),
+        };
+        sess.send_event_raw(event).await;
+    }
+
+    let outcome = sess.hooks().run_notification(request).await;
+    for completed in outcome.hook_events {
+        let event = codex_protocol::protocol::Event {
+            id: sub_id.clone(),
+            msg: EventMsg::HookCompleted(completed),
+        };
+        sess.send_event_raw(event).await;
+    }
+}
+
+/// Generic Notification hook emission scoped to an active turn context.
+/// Kept for future use (permission-prompt notifications in fork's codex.rs
+/// were wired differently before upstream's session/ refactor; re-wiring
+/// against the new approval flow is tracked as a follow-up).
+#[allow(dead_code)]
+pub(crate) async fn run_notification_hooks(
+    sess: &Arc<Session>,
+    turn_context: &Arc<TurnContext>,
+    notification_type: String,
+    message: String,
+) {
+    let request = NotificationRequest {
+        session_id: sess.conversation_id,
+        turn_id: turn_context.sub_id.clone(),
+        cwd: turn_context.cwd.to_path_buf(),
+        transcript_path: sess.hook_transcript_path().await,
+        model: turn_context.model_info.slug.clone(),
+        notification_type,
+        message,
+    };
+
+    let preview_runs = sess.hooks().preview_notification(&request);
+    emit_hook_started_events(sess, turn_context, preview_runs).await;
+
+    let outcome = sess.hooks().run_notification(request).await;
+    emit_hook_completed_events(sess, turn_context, outcome.hook_events).await;
+}
+
+/// Fires the SessionEnd hook during Codex shutdown so supervisors can observe
+/// the session-terminated signal even when the shell exited abruptly.
+pub(crate) async fn run_session_end_hooks(
+    sess: &Arc<Session>,
+    sub_id: String,
+    reason: SessionEndReason,
+) {
+    let turn_context = sess.new_default_turn_with_sub_id(sub_id.clone()).await;
+    let request = SessionEndRequest {
+        session_id: sess.conversation_id,
+        cwd: turn_context.cwd.to_path_buf(),
+        transcript_path: sess.hook_transcript_path().await,
+        model: turn_context.model_info.slug.clone(),
+        permission_mode: hook_permission_mode(&turn_context),
+        reason,
+    };
+
+    for run in sess.hooks().preview_session_end(&request) {
+        let event = codex_protocol::protocol::Event {
+            id: sub_id.clone(),
+            msg: EventMsg::HookStarted(HookStartedEvent {
+                turn_id: None,
+                run,
+            }),
+        };
+        sess.send_event_raw(event).await;
+    }
+
+    let outcome = sess.hooks().run_session_end(request).await;
+    for completed in outcome.hook_events {
+        let event = codex_protocol::protocol::Event {
+            id: sub_id.clone(),
+            msg: EventMsg::HookCompleted(completed),
+        };
+        sess.send_event_raw(event).await;
+    }
+}
+
+/// Fires the StopFailure hook when a turn ends via an API error (rate
+/// limit, auth, billing, bad request, etc.). Distinct from Stop, which
+/// fires on normal turn completion.
+pub(crate) async fn run_stop_failure_hooks(
+    sess: &Arc<Session>,
+    turn_context: &Arc<TurnContext>,
+    error: String,
+    last_assistant_message: Option<String>,
+) {
+    let request = StopFailureRequest {
+        session_id: sess.conversation_id,
+        turn_id: turn_context.sub_id.clone(),
+        cwd: turn_context.cwd.to_path_buf(),
+        transcript_path: sess.hook_transcript_path().await,
+        model: turn_context.model_info.slug.clone(),
+        permission_mode: hook_permission_mode(turn_context),
+        error,
+        last_assistant_message,
+    };
+
+    let preview_runs = sess.hooks().preview_stop_failure(&request);
+    emit_hook_started_events(sess, turn_context, preview_runs).await;
+
+    let outcome = sess.hooks().run_stop_failure(request).await;
+    emit_hook_completed_events(sess, turn_context, outcome.hook_events).await;
 }
 
 #[cfg(test)]
