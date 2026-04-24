@@ -644,6 +644,16 @@ fn emit_thread_stop_lifecycle(sess: &Session) {
 pub async fn shutdown(sess: &Arc<Session>, sub_id: String) -> bool {
     shutdown_session_runtime(sess).await;
     info!("Shutting down Codex instance");
+
+    // Fire the SessionEnd hook before tearing down thread persistence so
+    // supervisors can observe the session-terminated signal even when the
+    // shell exited abruptly.
+    crate::hook_runtime::run_session_end_hooks(
+        sess,
+        sub_id.clone(),
+        codex_hooks::SessionEndReason::Other,
+    )
+    .await;
     let history = sess.clone_history().await;
     let turn_count = history
         .raw_items()
