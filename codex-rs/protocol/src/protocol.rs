@@ -1456,9 +1456,14 @@ pub enum HookEventName {
     PostToolUse,
     PreCompact,
     PostCompact,
+    PostToolUseFailure,
+    Notification,
     SessionStart,
+    SessionEnd,
     UserPromptSubmit,
     Stop,
+    StopFailure,
+    FileChanged,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]

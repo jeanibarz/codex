@@ -46,9 +46,11 @@ pub(crate) fn select_handlers_for_matcher_inputs(
             HookEventName::PreToolUse
             | HookEventName::PermissionRequest
             | HookEventName::PostToolUse
-            | HookEventName::SessionStart
             | HookEventName::PreCompact
-            | HookEventName::PostCompact => {
+            | HookEventName::PostCompact
+            | HookEventName::PostToolUseFailure
+            | HookEventName::SessionStart
+            | HookEventName::FileChanged => {
                 if matcher_inputs.is_empty() {
                     matches_matcher(handler.matcher.as_deref(), /*input*/ None)
                 } else {
@@ -57,7 +59,11 @@ pub(crate) fn select_handlers_for_matcher_inputs(
                         .any(|input| matches_matcher(handler.matcher.as_deref(), Some(input)))
                 }
             }
-            HookEventName::UserPromptSubmit | HookEventName::Stop => true,
+            HookEventName::Notification
+            | HookEventName::SessionEnd
+            | HookEventName::UserPromptSubmit
+            | HookEventName::Stop
+            | HookEventName::StopFailure => true,
         })
         .cloned()
         .collect()
@@ -130,14 +136,19 @@ pub(crate) fn completed_summary(
 
 fn scope_for_event(event_name: HookEventName) -> HookScope {
     match event_name {
-        HookEventName::SessionStart => HookScope::Thread,
+        HookEventName::SessionStart | HookEventName::SessionEnd | HookEventName::Notification => {
+            HookScope::Thread
+        }
         HookEventName::PreToolUse
         | HookEventName::PermissionRequest
         | HookEventName::PostToolUse
         | HookEventName::PreCompact
         | HookEventName::PostCompact
+        | HookEventName::PostToolUseFailure
         | HookEventName::UserPromptSubmit
-        | HookEventName::Stop => HookScope::Turn,
+        | HookEventName::Stop
+        | HookEventName::StopFailure
+        | HookEventName::FileChanged => HookScope::Turn,
     }
 }
 
