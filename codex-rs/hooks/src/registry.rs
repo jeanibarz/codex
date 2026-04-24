@@ -35,6 +35,10 @@ pub struct HooksConfig {
     pub plugin_hook_load_warnings: Vec<String>,
     pub shell_program: Option<String>,
     pub shell_args: Vec<String>,
+    /// Optional path to a JSON settings file (Claude-compat `--settings FILE`).
+    /// Hooks defined here are merged additively with `config.toml` hooks so
+    /// external supervisors can inject per-session handlers.
+    pub settings_file: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -73,6 +77,7 @@ impl Hooks {
                 program: config.shell_program.unwrap_or_default(),
                 args: config.shell_args,
             },
+            config.settings_file.as_deref(),
         );
         Self {
             after_agent,
