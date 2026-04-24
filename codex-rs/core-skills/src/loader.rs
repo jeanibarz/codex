@@ -104,6 +104,7 @@ struct DependencyTool {
 
 const SKILLS_FILENAME: &str = "SKILL.md";
 const AGENTS_DIR_NAME: &str = ".agents";
+const CLAUDE_DIR_NAME: &str = ".claude";
 const SKILLS_METADATA_DIR: &str = "agents";
 const SKILLS_METADATA_FILENAME: &str = "openai.yaml";
 const SKILLS_DIR_NAME: &str = "skills";
@@ -271,27 +272,17 @@ fn skill_roots_from_layer_stack_inner(
 
         match &layer.name {
             ConfigLayerSource::Project { .. } => {
-                if let Some(repo_fs) = &repo_fs {
-                    roots.push(SkillRoot {
-                        path: config_folder.join(SKILLS_DIR_NAME),
-                        scope: SkillScope::Repo,
-                        file_system: Arc::clone(repo_fs),
-                    });
-                }
+                // Claude compatibility: do not treat project config folder as a skills root.
+                // Repo skills live under `.claude/skills` and are discovered by
+                // `repo_agents_skill_roots` below.
+                let _ = &repo_fs;
             }
             ConfigLayerSource::User { .. } => {
-                // Deprecated user skills location (`$CODEX_HOME/skills`), kept for backward
-                // compatibility.
-                roots.push(SkillRoot {
-                    path: config_folder.join(SKILLS_DIR_NAME),
-                    scope: SkillScope::User,
-                    file_system: Arc::clone(&LOCAL_FS),
-                });
-
-                // `$HOME/.agents/skills` (user-installed skills).
+                // Claude compatibility: `$HOME/.claude/skills` (user-installed Claude-compatible
+                // skills). The legacy `$CODEX_HOME/skills` root is no longer scanned.
                 if let Some(home_dir) = home_dir {
                     roots.push(SkillRoot {
-                        path: home_dir.join(AGENTS_DIR_NAME).join(SKILLS_DIR_NAME),
+                        path: home_dir.join(CLAUDE_DIR_NAME).join(SKILLS_DIR_NAME),
                         scope: SkillScope::User,
                         file_system: Arc::clone(&LOCAL_FS),
                     });
@@ -337,10 +328,10 @@ async fn repo_agents_skill_roots(
     let dirs = dirs_between_project_root_and_cwd(cwd, &project_root);
     let mut roots = Vec::new();
     for dir in dirs {
-        let agents_skills = dir.join(AGENTS_DIR_NAME).join(SKILLS_DIR_NAME);
-        match fs.get_metadata(&agents_skills, /*sandbox*/ None).await {
+        let claude_skills = dir.join(CLAUDE_DIR_NAME).join(SKILLS_DIR_NAME);
+        match fs.get_metadata(&claude_skills, /*sandbox*/ None).await {
             Ok(metadata) if metadata.is_directory => roots.push(SkillRoot {
-                path: agents_skills,
+                path: claude_skills,
                 scope: SkillScope::Repo,
                 file_system: Arc::clone(&fs),
             }),
@@ -349,7 +340,7 @@ async fn repo_agents_skill_roots(
             Err(err) => {
                 tracing::warn!(
                     "failed to stat repo skills root {}: {err:#}",
-                    agents_skills.display()
+                    claude_skills.display()
                 );
             }
         }
@@ -591,8 +582,7 @@ async fn parse_skill_file(
 
     let frontmatter = extract_frontmatter(&contents).ok_or(SkillParseError::MissingFrontmatter)?;
 
-    let parsed: SkillFrontmatter =
-        serde_yaml::from_str(&frontmatter).map_err(SkillParseError::InvalidYaml)?;
+    let parsed = parse_skill_frontmatter(&frontmatter)?;
 
     let base_name = parsed
         .name
@@ -640,6 +630,130 @@ async fn parse_skill_file(
         path_to_skills_md: resolved_path,
         scope,
     })
+}
+
+fn parse_skill_frontmatter(frontmatter: &str) -> Result<SkillFrontmatter, SkillParseError> {
+    match serde_yaml::from_str(frontmatter) {
+        Ok(parsed) => Ok(parsed),
+        Err(original_error) => {
+            let filtered_frontmatter = filter_supported_skill_frontmatter(frontmatter);
+            if filtered_frontmatter.trim() == frontmatter.trim() {
+                return Err(SkillParseError::InvalidYaml(original_error));
+            }
+
+            serde_yaml::from_str(&filtered_frontmatter)
+                .map_err(|_| SkillParseError::InvalidYaml(original_error))
+        }
+    }
+}
+
+fn filter_supported_skill_frontmatter(frontmatter: &str) -> String {
+    let mut filtered_lines = Vec::new();
+    let lines: Vec<&str> = frontmatter.lines().collect();
+    let mut index = 0;
+
+    while index < lines.len() {
+        let line = lines[index];
+        let trimmed = line.trim();
+        let indentation = line.len() - line.trim_start().len();
+
+        if trimmed.is_empty() {
+            filtered_lines.push(line);
+            index += 1;
+            continue;
+        }
+
+        if indentation != 0 {
+            index += 1;
+            continue;
+        }
+
+        let Some((key, value)) = trimmed.split_once(':') else {
+            index += 1;
+            continue;
+        };
+
+        match key.trim() {
+            "name" => {
+                filtered_lines.push(line);
+                index += 1;
+            }
+            "description" => {
+                filtered_lines.push(line);
+                index += 1;
+                if uses_yaml_block_scalar(value) {
+                    while index < lines.len() {
+                        let next_line = lines[index];
+                        let next_trimmed = next_line.trim();
+                        let next_indentation = next_line.len() - next_line.trim_start().len();
+                        if !next_trimmed.is_empty() && next_indentation == 0 {
+                            break;
+                        }
+                        filtered_lines.push(next_line);
+                        index += 1;
+                    }
+                }
+            }
+            "metadata" => {
+                filtered_lines.push(line);
+                index += 1;
+                while index < lines.len() {
+                    let next_line = lines[index];
+                    let next_trimmed = next_line.trim();
+                    let next_indentation = next_line.len() - next_line.trim_start().len();
+                    if !next_trimmed.is_empty() && next_indentation == 0 {
+                        break;
+                    }
+                    if next_trimmed.is_empty() {
+                        filtered_lines.push(next_line);
+                        index += 1;
+                        continue;
+                    }
+                    if next_indentation < 2 {
+                        index += 1;
+                        continue;
+                    }
+
+                    let Some((nested_key, nested_value)) = next_trimmed.split_once(':') else {
+                        index += 1;
+                        continue;
+                    };
+
+                    if nested_key.trim() == "short-description" {
+                        filtered_lines.push(next_line);
+                        index += 1;
+                        if uses_yaml_block_scalar(nested_value) {
+                            while index < lines.len() {
+                                let continuation_line = lines[index];
+                                let continuation_trimmed = continuation_line.trim();
+                                let continuation_indentation =
+                                    continuation_line.len() - continuation_line.trim_start().len();
+                                if !continuation_trimmed.is_empty()
+                                    && continuation_indentation <= next_indentation
+                                {
+                                    break;
+                                }
+                                filtered_lines.push(continuation_line);
+                                index += 1;
+                            }
+                        }
+                        continue;
+                    }
+
+                    index += 1;
+                }
+            }
+            _ => {
+                index += 1;
+            }
+        }
+    }
+
+    filtered_lines.join("\n")
+}
+
+fn uses_yaml_block_scalar(value: &str) -> bool {
+    matches!(value.trim_start().chars().next(), Some('|' | '>'))
 }
 
 fn default_skill_name(path: &AbsolutePathBuf) -> String {
