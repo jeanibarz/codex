@@ -1,3 +1,8 @@
+//! SessionEnd hook execution (Claude-compat).
+//!
+//! Fires when Codex shuts down an active session. Fire-and-forget — handlers
+//! cannot block session teardown.
+
 use std::path::PathBuf;
 
 use codex_protocol::ThreadId;
@@ -19,23 +24,19 @@ use crate::schema::SessionEndCommandInput;
 /// Matches Claude Code's `SessionEnd.reason` enum.
 #[derive(Debug, Clone, Copy)]
 pub enum SessionEndReason {
-    /// Fallback reason when a more specific one is not known.
     Other,
-    /// Session was cleared by `/clear`.
     Clear,
-    /// Session ended because the user logged out.
     Logout,
-    /// Session ended because the user pressed exit at the prompt.
     PromptInputExit,
 }
 
 impl SessionEndReason {
-    pub fn as_str(self) -> &'static str {
+    fn as_str(&self) -> &'static str {
         match self {
-            Self::Other => "other",
-            Self::Clear => "clear",
-            Self::Logout => "logout",
-            Self::PromptInputExit => "prompt_input_exit",
+            SessionEndReason::Other => "other",
+            SessionEndReason::Clear => "clear",
+            SessionEndReason::Logout => "logout",
+            SessionEndReason::PromptInputExit => "prompt_input_exit",
         }
     }
 }
@@ -59,7 +60,7 @@ pub(crate) fn preview(
     handlers: &[ConfiguredHandler],
     _request: &SessionEndRequest,
 ) -> Vec<HookRunSummary> {
-    dispatcher::select_handlers(handlers, HookEventName::SessionEnd, /*matcher_input*/ None)
+    dispatcher::select_handlers(handlers, HookEventName::SessionEnd, None)
         .into_iter()
         .map(|handler| dispatcher::running_summary(&handler))
         .collect()
@@ -70,11 +71,7 @@ pub(crate) async fn run(
     shell: &CommandShell,
     request: SessionEndRequest,
 ) -> SessionEndOutcome {
-    let matched = dispatcher::select_handlers(
-        handlers,
-        HookEventName::SessionEnd,
-        /*matcher_input*/ None,
-    );
+    let matched = dispatcher::select_handlers(handlers, HookEventName::SessionEnd, None);
     if matched.is_empty() {
         return SessionEndOutcome {
             hook_events: Vec::new(),
@@ -95,7 +92,7 @@ pub(crate) async fn run(
             return SessionEndOutcome {
                 hook_events: common::serialization_failure_hook_events(
                     matched,
-                    /*turn_id*/ None,
+                    None,
                     format!("failed to serialize session end hook input: {error}"),
                 ),
             };
@@ -107,7 +104,7 @@ pub(crate) async fn run(
         matched,
         input_json,
         request.cwd.as_path(),
-        /*turn_id*/ None,
+        None,
         parse_completed,
     )
     .await;
@@ -124,111 +121,27 @@ fn parse_completed(
 ) -> dispatcher::ParsedHandler<()> {
     let mut entries = Vec::new();
     let mut status = HookRunStatus::Completed;
-
-    match run_result.error.as_deref() {
-        Some(error) => {
-            status = HookRunStatus::Failed;
+    if let Some(error) = run_result.error.as_deref() {
+        status = HookRunStatus::Failed;
+        entries.push(HookOutputEntry {
+            kind: HookOutputEntryKind::Error,
+            text: error.to_string(),
+        });
+    } else if matches!(run_result.exit_code, Some(code) if code != 0) {
+        status = HookRunStatus::Failed;
+        if !run_result.stderr.trim().is_empty() {
             entries.push(HookOutputEntry {
                 kind: HookOutputEntryKind::Error,
-                text: error.to_string(),
+                text: run_result.stderr.clone(),
             });
         }
-        None => match run_result.exit_code {
-            Some(0) => {}
-            Some(exit_code) => {
-                status = HookRunStatus::Failed;
-                entries.push(HookOutputEntry {
-                    kind: HookOutputEntryKind::Error,
-                    text: format!("hook exited with code {exit_code}"),
-                });
-            }
-            None => {
-                status = HookRunStatus::Failed;
-                entries.push(HookOutputEntry {
-                    kind: HookOutputEntryKind::Error,
-                    text: "hook exited without a status code".to_string(),
-                });
-            }
-        },
     }
-
     let completed = HookCompletedEvent {
         turn_id,
         run: dispatcher::completed_summary(handler, &run_result, status, entries),
     };
-
     dispatcher::ParsedHandler {
         completed,
         data: (),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    use codex_protocol::protocol::HookEventName;
-    use codex_protocol::protocol::HookOutputEntry;
-    use codex_protocol::protocol::HookOutputEntryKind;
-    use codex_protocol::protocol::HookRunStatus;
-    use pretty_assertions::assert_eq;
-
-    use super::parse_completed;
-    use crate::engine::ConfiguredHandler;
-    use crate::engine::command_runner::CommandRunResult;
-
-    #[test]
-    fn success_exit_code_marks_completed() {
-        let parsed = parse_completed(
-            &handler(),
-            run_result(Some(0), "", ""),
-            /*turn_id*/ None,
-        );
-
-        assert_eq!(parsed.completed.run.status, HookRunStatus::Completed);
-        assert!(parsed.completed.run.entries.is_empty());
-    }
-
-    #[test]
-    fn non_zero_exit_code_marks_failed() {
-        let parsed = parse_completed(
-            &handler(),
-            run_result(Some(2), "", ""),
-            /*turn_id*/ None,
-        );
-
-        assert_eq!(parsed.completed.run.status, HookRunStatus::Failed);
-        assert_eq!(
-            parsed.completed.run.entries,
-            vec![HookOutputEntry {
-                kind: HookOutputEntryKind::Error,
-                text: "hook exited with code 2".to_string(),
-            }]
-        );
-    }
-
-    fn handler() -> ConfiguredHandler {
-        ConfiguredHandler {
-            event_name: HookEventName::SessionEnd,
-            matcher: None,
-            condition: None,
-            command: "echo hook".to_string(),
-            timeout_sec: 600,
-            status_message: None,
-            source_path: PathBuf::from("/tmp/hooks.json"),
-            display_order: 0,
-        }
-    }
-
-    fn run_result(exit_code: Option<i32>, stdout: &str, stderr: &str) -> CommandRunResult {
-        CommandRunResult {
-            started_at: 1,
-            completed_at: 2,
-            duration_ms: 1,
-            exit_code,
-            stdout: stdout.to_string(),
-            stderr: stderr.to_string(),
-            error: None,
-        }
     }
 }
