@@ -15,6 +15,21 @@ use std::path::Path;
 use std::path::PathBuf;
 use toml::Value as TomlValue;
 
+const GPT_5_4_MODEL: &str = "gpt-5.4";
+const GPT_5_4_MINI_MODEL: &str = "gpt-5.4-mini";
+
+#[derive(Debug, Default, Deserialize)]
+struct ClaudeAgentFrontmatter {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default, rename = "nickname-candidates", alias = "nickname_candidates")]
+    nickname_candidates: Option<Vec<String>>,
+}
+
 pub(crate) async fn load_agent_roles(
     fs: &dyn ExecutorFileSystem,
     cfg: &ConfigToml,
@@ -92,6 +107,33 @@ pub(crate) async fn load_agent_roles(
                     continue;
                 }
                 layer_roles.insert(role_name, role);
+            }
+
+            // Claude compatibility: also discover agent roles from `.claude/agents/` at the
+            // layer's parent directory. For the User layer this is `$HOME/.claude/agents`;
+            // for the Project layer it is `<repo-root>/.claude/agents`.
+            if let Some(claude_agents_dir) = config_folder
+                .as_path()
+                .parent()
+                .and_then(|parent| {
+                    AbsolutePathBuf::from_absolute_path(parent.join(".claude").join("agents")).ok()
+                })
+            {
+                for (role_name, role) in discover_agent_roles_in_dir(
+                    fs,
+                    &claude_agents_dir,
+                    &declared_role_files,
+                    startup_warnings,
+                )
+                .await?
+                {
+                    if layer_roles.contains_key(&role_name) {
+                        // Codex-native agent roles take precedence; skip a duplicate from
+                        // `.claude/agents/` rather than warning.
+                        continue;
+                    }
+                    layer_roles.insert(role_name, role);
+                }
             }
         }
 
@@ -233,6 +275,19 @@ pub(crate) struct ResolvedAgentRoleFile {
 }
 
 pub(crate) fn parse_agent_role_file_contents(
+    contents: &str,
+    role_file_label: &Path,
+    config_base_dir: &Path,
+    role_name_hint: Option<&str>,
+) -> std::io::Result<ResolvedAgentRoleFile> {
+    if looks_like_claude_agent_markdown(contents) {
+        return parse_claude_agent_role_file_contents(contents, role_file_label, role_name_hint);
+    }
+
+    parse_toml_agent_role_file_contents(contents, role_file_label, config_base_dir, role_name_hint)
+}
+
+fn parse_toml_agent_role_file_contents(
     contents: &str,
     role_file_label: &Path,
     config_base_dir: &Path,
@@ -547,4 +602,140 @@ async fn collect_agent_role_files(
 
     files.sort();
     Ok(files)
+}
+
+fn parse_claude_agent_role_file_contents(
+    contents: &str,
+    role_file_label: &Path,
+    role_name_hint: Option<&str>,
+) -> std::io::Result<ResolvedAgentRoleFile> {
+    let (frontmatter, body) = extract_claude_agent_frontmatter(contents, role_file_label)?;
+    let parsed: ClaudeAgentFrontmatter = serde_yaml::from_str(&frontmatter).map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "failed to parse Claude agent frontmatter at {}: {err}",
+                role_file_label.display()
+            ),
+        )
+    })?;
+    let description = normalize_agent_role_description(
+        &format!("agent role file {}.description", role_file_label.display()),
+        parsed.description.as_deref(),
+    )?;
+
+    let developer_instructions = body.trim();
+    validate_agent_role_file_developer_instructions(
+        role_file_label,
+        Some(developer_instructions),
+        true,
+    )?;
+
+    let role_name = parsed
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name: &&str| !name.is_empty())
+        .map(|name: &str| name.to_owned())
+        .or_else(|| role_name_hint.map(|name: &str| name.to_owned()))
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "agent role file at {} must define a non-empty `name`",
+                    role_file_label.display()
+                ),
+            )
+        })?;
+
+    let nickname_candidates = normalize_agent_role_nickname_candidates(
+        &format!(
+            "agent role file {}.nickname_candidates",
+            role_file_label.display()
+        ),
+        parsed.nickname_candidates.as_deref(),
+    )?;
+
+    let mut config = toml::map::Map::new();
+    config.insert(
+        "developer_instructions".to_string(),
+        TomlValue::String(developer_instructions.to_string()),
+    );
+    if let Some(model) = parsed
+        .model
+        .as_deref()
+        .map(normalize_claude_agent_model_name)
+        .filter(|model: &String| !model.is_empty())
+    {
+        config.insert("model".to_string(), TomlValue::String(model));
+    }
+
+    Ok(ResolvedAgentRoleFile {
+        role_name,
+        description,
+        nickname_candidates,
+        config: TomlValue::Table(config),
+    })
+}
+
+fn looks_like_claude_agent_markdown(contents: &str) -> bool {
+    contents
+        .lines()
+        .next()
+        .is_some_and(|line| line.trim() == "---")
+}
+
+fn extract_claude_agent_frontmatter(
+    contents: &str,
+    role_file_label: &Path,
+) -> std::io::Result<(String, String)> {
+    let mut lines = contents.split_inclusive('\n');
+    let Some(first_line) = lines.next() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "Claude agent file at {} is missing YAML frontmatter",
+                role_file_label.display()
+            ),
+        ));
+    };
+    if first_line.trim() != "---" {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "Claude agent file at {} is missing YAML frontmatter",
+                role_file_label.display()
+            ),
+        ));
+    }
+
+    let mut frontmatter = String::new();
+    let mut consumed = first_line.len();
+    for chunk in lines {
+        consumed += chunk.len();
+        if chunk.trim() == "---" {
+            return Ok((frontmatter, contents[consumed..].to_string()));
+        }
+        frontmatter.push_str(chunk);
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!(
+            "Claude agent file at {} is missing closing YAML frontmatter delimiter",
+            role_file_label.display()
+        ),
+    ))
+}
+
+fn normalize_claude_agent_model_name(model: &str) -> String {
+    let trimmed = model.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.contains("haiku") {
+        GPT_5_4_MINI_MODEL.to_string()
+    } else if lower.contains("sonnet") || lower.contains("opus") {
+        GPT_5_4_MODEL.to_string()
+    } else {
+        trimmed.to_string()
+    }
 }

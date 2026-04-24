@@ -1516,9 +1516,13 @@ pub enum HookEventName {
     PreToolUse,
     PermissionRequest,
     PostToolUse,
+    PostToolUseFailure,
+    Notification,
     SessionStart,
+    SessionEnd,
     UserPromptSubmit,
     Stop,
+    StopFailure,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]

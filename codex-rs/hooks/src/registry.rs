@@ -178,6 +178,34 @@ impl Hooks {
     pub async fn run_stop(&self, request: StopRequest) -> StopOutcome {
         self.engine.run_stop(request).await
     }
+
+    pub async fn run_stop_failure(
+        &self,
+        request: crate::events::stop_failure::StopFailureRequest,
+    ) -> crate::events::stop_failure::StopFailureOutcome {
+        self.engine.run_stop_failure(request).await
+    }
+
+    pub async fn run_session_end(
+        &self,
+        request: crate::events::session_end::SessionEndRequest,
+    ) -> crate::events::session_end::SessionEndOutcome {
+        self.engine.run_session_end(request).await
+    }
+
+    pub async fn run_notification(
+        &self,
+        request: crate::events::notification::NotificationRequest,
+    ) -> crate::events::notification::NotificationOutcome {
+        self.engine.run_notification(request).await
+    }
+
+    pub async fn run_post_tool_use_failure(
+        &self,
+        request: crate::events::post_tool_use_failure::PostToolUseFailureRequest,
+    ) -> crate::events::post_tool_use_failure::PostToolUseFailureOutcome {
+        self.engine.run_post_tool_use_failure(request).await
+    }
 }
 
 pub fn list_hooks(config: HooksConfig) -> HookListOutcome {

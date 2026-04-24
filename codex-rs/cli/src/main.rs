@@ -1468,6 +1468,9 @@ fn prepend_config_flags(
     subcommand_config_overrides
         .raw_overrides
         .splice(0..0, cli_config_overrides.raw_overrides);
+    if subcommand_config_overrides.settings_file.is_none() {
+        subcommand_config_overrides.settings_file = cli_config_overrides.settings_file;
+    }
 }
 
 fn reject_remote_mode_for_subcommand(
@@ -1672,6 +1675,9 @@ fn merge_interactive_cli_flags(interactive: &mut TuiCli, subcommand_cli: TuiCli)
         .config_overrides
         .raw_overrides
         .extend(config_overrides.raw_overrides);
+    if interactive.config_overrides.settings_file.is_none() {
+        interactive.config_overrides.settings_file = config_overrides.settings_file;
+    }
 }
 
 fn print_completion(cmd: CompletionCommand) {
