@@ -711,8 +711,12 @@ pub async fn run_main(
     // When using `--oss`, let the bootstrapper pick the model (defaulting to
     // gpt-oss:20b) and ensure it is present locally. Also, force the built‑in
     let raw_overrides = cli.config_overrides.raw_overrides.clone();
+    let settings_file = cli.config_overrides.settings_file.clone();
     // `oss` model provider.
-    let overrides_cli = codex_utils_cli::CliConfigOverrides { raw_overrides };
+    let overrides_cli = codex_utils_cli::CliConfigOverrides {
+        raw_overrides,
+        settings_file,
+    };
     let cli_kv_overrides = match overrides_cli.parse_overrides() {
         // Parse `-c` overrides from the CLI.
         Ok(v) => v,
