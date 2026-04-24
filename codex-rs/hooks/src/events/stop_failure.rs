@@ -38,7 +38,6 @@ pub struct StopFailureOutcome {
     pub hook_events: Vec<HookCompletedEvent>,
 }
 
-#[allow(dead_code)]
 pub(crate) fn preview(
     handlers: &[ConfiguredHandler],
     _request: &StopFailureRequest,
