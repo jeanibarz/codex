@@ -117,6 +117,7 @@ impl ClaudeHooksEngine {
         plugin_hook_sources: Vec<PluginHookSource>,
         plugin_hook_load_warnings: Vec<String>,
         shell: CommandShell,
+        settings_file: Option<&std::path::Path>,
     ) -> Self {
         if !enabled {
             return Self {
@@ -128,12 +129,15 @@ impl ClaudeHooksEngine {
         }
 
         let _ = schema_loader::generated_hook_schemas();
-        let discovered = discovery::discover_handlers(
+        let mut discovered = discovery::discover_handlers(
             config_layer_stack,
             plugin_hook_sources,
             plugin_hook_load_warnings,
             bypass_hook_trust,
         );
+        if let Some(settings_path) = settings_file {
+            discovery::append_settings_file_handlers(&mut discovered, settings_path);
+        }
         Self {
             handlers: discovered.handlers,
             warnings: discovered.warnings,

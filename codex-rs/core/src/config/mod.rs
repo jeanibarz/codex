@@ -830,6 +830,10 @@ pub struct Config {
 
     /// OTEL configuration (exporter type, endpoint, headers, etc.).
     pub otel: codex_config::types::OtelConfig,
+
+    /// Path to a JSON settings file containing additional hook definitions.
+    /// Used by external supervisors (e.g. Looper) to inject per-session hooks.
+    pub settings_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1887,6 +1891,11 @@ pub struct ConfigOverrides {
     pub bypass_hook_trust: Option<bool>,
     /// Additional directories that should be treated as writable roots for this session.
     pub additional_writable_roots: Vec<PathBuf>,
+
+    /// Path to a JSON settings file containing additional hook definitions.
+    /// Merged additively with config.toml hooks. Used by external supervisors
+    /// (e.g. Looper) to inject per-session hooks.
+    pub settings_file: Option<PathBuf>,
 }
 
 /// Resolves the OSS provider from CLI override, profile config, or global config.
@@ -2200,6 +2209,7 @@ impl Config {
             ephemeral,
             bypass_hook_trust,
             additional_writable_roots,
+            settings_file,
         } = overrides;
         let bypass_hook_trust = bypass_hook_trust.unwrap_or_default();
 
@@ -3289,6 +3299,7 @@ impl Config {
                 .map(|t| t.keymap.clone())
                 .unwrap_or_default(),
             otel,
+            settings_file,
         };
         Ok(config)
         })
