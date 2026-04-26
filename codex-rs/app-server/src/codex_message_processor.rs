@@ -2523,6 +2523,7 @@ impl CodexMessageProcessor {
             developer_instructions,
             personality,
         );
+        self.apply_process_thread_config_overrides(&mut typesafe_overrides);
         typesafe_overrides.ephemeral = ephemeral;
         let listener_task_context = ListenerTaskContext {
             thread_manager: Arc::clone(&self.thread_manager),
@@ -2959,6 +2960,12 @@ impl CodexMessageProcessor {
             developer_instructions,
             personality,
             ..Default::default()
+        }
+    }
+
+    fn apply_process_thread_config_overrides(&self, overrides: &mut ConfigOverrides) {
+        if overrides.settings_file.is_none() {
+            overrides.settings_file = self.config.settings_file.clone();
         }
     }
 
@@ -4580,6 +4587,7 @@ impl CodexMessageProcessor {
             &mut typesafe_overrides,
         )
         .await;
+        self.apply_process_thread_config_overrides(&mut typesafe_overrides);
 
         // Derive a Config using the same logic as new conversation, honoring overrides if provided.
         let config = match self
