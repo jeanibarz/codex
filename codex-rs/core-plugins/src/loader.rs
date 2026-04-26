@@ -3,6 +3,7 @@ use crate::manifest::PluginManifestHooks;
 use crate::manifest::PluginManifestPaths;
 use crate::manifest::load_plugin_manifest;
 use crate::marketplace::MarketplacePluginSource;
+use crate::marketplace::find_marketplace_manifest_path;
 use crate::marketplace::list_marketplaces;
 use crate::marketplace::load_marketplace;
 use crate::remote::RemoteInstalledPlugin;
@@ -192,12 +193,9 @@ pub fn refresh_curated_plugin_cache(
 ) -> Result<bool, String> {
     let cache_plugin_version = curated_plugin_cache_version(plugin_version);
     let store = PluginStore::try_new(codex_home.to_path_buf()).map_err(|err| err.to_string())?;
-    let curated_marketplace_path = AbsolutePathBuf::try_from(
-        codex_home
-            .join(".tmp/plugins")
-            .join(".agents/plugins/marketplace.json"),
-    )
-    .map_err(|_| "local curated marketplace is not available".to_string())?;
+    let curated_repo_root = codex_home.join(".tmp/plugins");
+    let curated_marketplace_path = find_marketplace_manifest_path(&curated_repo_root)
+        .ok_or_else(|| "local curated marketplace is not available".to_string())?;
     let curated_marketplace = load_marketplace(&curated_marketplace_path)
         .map_err(|err| format!("failed to load curated marketplace for cache refresh: {err}"))?;
 
