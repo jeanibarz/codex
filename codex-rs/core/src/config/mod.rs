@@ -169,6 +169,7 @@ impl Default for GhostSnapshotConfig {
 /// files are *silently truncated* to this size so we do not take up too much of
 /// the context window.
 pub(crate) const AGENTS_MD_MAX_BYTES: usize = DEFAULT_PROJECT_DOC_MAX_BYTES; // 32 KiB
+pub(crate) const DEFAULT_PROJECT_DOC_FALLBACK_FILENAMES: &[&str] = &["CLAUDE.md"];
 pub(crate) const DEFAULT_AGENT_MAX_THREADS: Option<usize> = Some(6);
 pub(crate) const DEFAULT_MULTI_AGENT_V2_MAX_CONCURRENT_THREADS_PER_SESSION: usize = 4;
 pub(crate) const DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS: i64 = 10_000;
@@ -2954,7 +2955,12 @@ impl Config {
             project_doc_max_bytes: cfg.project_doc_max_bytes.unwrap_or(AGENTS_MD_MAX_BYTES),
             project_doc_fallback_filenames: cfg
                 .project_doc_fallback_filenames
-                .unwrap_or_default()
+                .unwrap_or_else(|| {
+                    DEFAULT_PROJECT_DOC_FALLBACK_FILENAMES
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect()
+                })
                 .into_iter()
                 .filter_map(|name| {
                     let trimmed = name.trim();
