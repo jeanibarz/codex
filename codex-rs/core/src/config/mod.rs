@@ -127,6 +127,7 @@ pub use codex_git_utils::GhostSnapshotConfig;
 /// files are *silently truncated* to this size so we do not take up too much of
 /// the context window.
 pub(crate) const AGENTS_MD_MAX_BYTES: usize = 32 * 1024; // 32 KiB
+pub(crate) const DEFAULT_PROJECT_DOC_FALLBACK_FILENAMES: &[&str] = &["CLAUDE.md"];
 pub(crate) const DEFAULT_AGENT_MAX_THREADS: Option<usize> = Some(6);
 pub(crate) const DEFAULT_AGENT_MAX_DEPTH: i32 = 1;
 pub(crate) const DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS: Option<u64> = None;
@@ -2372,7 +2373,12 @@ impl Config {
             project_doc_max_bytes: cfg.project_doc_max_bytes.unwrap_or(AGENTS_MD_MAX_BYTES),
             project_doc_fallback_filenames: cfg
                 .project_doc_fallback_filenames
-                .unwrap_or_default()
+                .unwrap_or_else(|| {
+                    DEFAULT_PROJECT_DOC_FALLBACK_FILENAMES
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect()
+                })
                 .into_iter()
                 .filter_map(|name| {
                     let trimmed = name.trim();
