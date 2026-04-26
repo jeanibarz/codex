@@ -2,6 +2,7 @@ use crate::OPENAI_CURATED_MARKETPLACE_NAME;
 use crate::manifest::PluginManifestPaths;
 use crate::manifest::load_plugin_manifest;
 use crate::marketplace::MarketplacePluginSource;
+use crate::marketplace::find_marketplace_manifest_path;
 use crate::marketplace::list_marketplaces;
 use crate::marketplace::load_marketplace;
 use crate::store::PluginStore;
@@ -147,12 +148,9 @@ pub fn refresh_curated_plugin_cache(
 ) -> Result<bool, String> {
     let cache_plugin_version = curated_plugin_cache_version(plugin_version);
     let store = PluginStore::try_new(codex_home.to_path_buf()).map_err(|err| err.to_string())?;
-    let curated_marketplace_path = AbsolutePathBuf::try_from(
-        codex_home
-            .join(".tmp/plugins")
-            .join(".agents/plugins/marketplace.json"),
-    )
-    .map_err(|_| "local curated marketplace is not available".to_string())?;
+    let curated_repo_root = codex_home.join(".tmp/plugins");
+    let curated_marketplace_path = find_marketplace_manifest_path(&curated_repo_root)
+        .ok_or_else(|| "local curated marketplace is not available".to_string())?;
     let curated_marketplace = load_marketplace(&curated_marketplace_path)
         .map_err(|err| format!("failed to load curated marketplace for cache refresh: {err}"))?;
 
@@ -1109,6 +1107,51 @@ mod tests {
             "export-backup"
         );
         assert_eq!(curated_plugin_cache_version("0123456"), "0123456");
+    }
+
+    #[test]
+    fn refresh_curated_plugin_cache_loads_claude_layout_marketplace() {
+        let codex_home = tempfile::tempdir().expect("create codex home");
+        let curated_root = codex_home.path().join(".tmp/plugins");
+        let plugin_root = curated_root.join("plugins/sample");
+        fs::create_dir_all(curated_root.join(".claude/plugins"))
+            .expect("create marketplace dir");
+        fs::create_dir_all(plugin_root.join(".codex-plugin")).expect("create plugin manifest dir");
+        fs::write(
+            curated_root.join(".claude/plugins/marketplace.json"),
+            r#"{
+  "name": "openai-curated",
+  "plugins": [
+    {
+      "name": "sample",
+      "source": {
+        "source": "local",
+        "path": "./plugins/sample"
+      }
+    }
+  ]
+}"#,
+        )
+        .expect("write marketplace");
+        fs::write(
+            plugin_root.join(".codex-plugin/plugin.json"),
+            r#"{"name":"sample","version":"0.1.0"}"#,
+        )
+        .expect("write plugin manifest");
+        let plugin_id =
+            PluginId::new("sample".to_string(), OPENAI_CURATED_MARKETPLACE_NAME.to_string())
+                .expect("valid plugin id");
+
+        let refreshed =
+            refresh_curated_plugin_cache(codex_home.path(), "2026-04-26", &[plugin_id.clone()])
+                .expect("refresh curated plugin cache");
+
+        assert!(refreshed);
+        let store = PluginStore::try_new(codex_home.path().to_path_buf()).expect("plugin store");
+        let active_root = store
+            .active_plugin_root(&plugin_id)
+            .expect("active plugin root");
+        assert!(active_root.join(".codex-plugin/plugin.json").is_file());
     }
 
     #[test]

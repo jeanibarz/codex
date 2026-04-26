@@ -15,6 +15,8 @@ use zip::ZipArchive;
 
 use codex_login::default_client::build_reqwest_client;
 
+use crate::marketplace::find_marketplace_manifest_path;
+
 const GITHUB_API_BASE_URL: &str = "https://api.github.com";
 const GITHUB_API_ACCEPT_HEADER: &str = "application/vnd.github+json";
 const GITHUB_API_VERSION_HEADER: &str = "2022-11-28";
@@ -222,9 +224,7 @@ fn sync_openai_plugins_repo_via_backup_archive(
 }
 
 pub fn has_local_curated_plugins_snapshot(codex_home: &Path) -> bool {
-    curated_plugins_repo_path(codex_home)
-        .join(".agents/plugins/marketplace.json")
-        .is_file()
+    find_marketplace_manifest_path(curated_plugins_repo_path(codex_home).as_path()).is_some()
         && codex_home.join(CURATED_PLUGINS_SHA_FILE).is_file()
 }
 
@@ -369,12 +369,12 @@ fn emit_curated_plugins_startup_sync_counter(
 }
 
 fn ensure_marketplace_manifest_exists(repo_path: &Path) -> Result<(), String> {
-    if repo_path.join(".agents/plugins/marketplace.json").is_file() {
+    if find_marketplace_manifest_path(repo_path).is_some() {
         return Ok(());
     }
     Err(format!(
-        "curated plugins archive missing marketplace manifest at {}",
-        repo_path.join(".agents/plugins/marketplace.json").display()
+        "curated plugins archive missing supported marketplace manifest under {}",
+        repo_path.display()
     ))
 }
 
