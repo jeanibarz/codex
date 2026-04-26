@@ -96,6 +96,52 @@ fn curated_plugin_cache_version_preserves_non_git_sha_versions() {
     assert_eq!(curated_plugin_cache_version("0123456"), "0123456");
 }
 
+#[test]
+fn refresh_curated_plugin_cache_loads_claude_layout_marketplace() {
+    let codex_home = tempfile::tempdir().expect("create codex home");
+    let curated_root = codex_home.path().join(".tmp/plugins");
+    let plugin_root = curated_root.join("plugins/sample");
+    fs::create_dir_all(curated_root.join(".claude/plugins")).expect("create marketplace dir");
+    fs::create_dir_all(plugin_root.join(".codex-plugin")).expect("create plugin manifest dir");
+    fs::write(
+        curated_root.join(".claude/plugins/marketplace.json"),
+        r#"{
+  "name": "openai-curated",
+  "plugins": [
+    {
+      "name": "sample",
+      "source": {
+        "source": "local",
+        "path": "./plugins/sample"
+      }
+    }
+  ]
+}"#,
+    )
+    .expect("write marketplace");
+    fs::write(
+        plugin_root.join(".codex-plugin/plugin.json"),
+        r#"{"name":"sample","version":"0.1.0"}"#,
+    )
+    .expect("write plugin manifest");
+    let plugin_id = PluginId::new(
+        "sample".to_string(),
+        OPENAI_CURATED_MARKETPLACE_NAME.to_string(),
+    )
+    .expect("valid plugin id");
+
+    let refreshed =
+        refresh_curated_plugin_cache(codex_home.path(), "2026-04-26", &[plugin_id.clone()])
+            .expect("refresh curated plugin cache");
+
+    assert!(refreshed);
+    let store = PluginStore::try_new(codex_home.path().to_path_buf()).expect("plugin store");
+    let active_root = store
+        .active_plugin_root(&plugin_id)
+        .expect("active plugin root");
+    assert!(active_root.join(".codex-plugin/plugin.json").is_file());
+}
+
 fn plugin_id() -> PluginId {
     PluginId::parse("demo-plugin@test-marketplace").expect("plugin id")
 }
