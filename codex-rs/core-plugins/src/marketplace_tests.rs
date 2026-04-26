@@ -6,9 +6,17 @@ use tempfile::tempdir;
 
 const ALTERNATE_MARKETPLACE_RELATIVE_PATH: &str = ".claude-plugin/marketplace.json";
 const ALTERNATE_PLUGIN_MANIFEST_RELATIVE_PATH: &str = ".claude-plugin/plugin.json";
+const CLAUDE_MARKETPLACE_RELATIVE_PATH: &str = ".claude/plugins/marketplace.json";
 
 fn write_alternate_marketplace(repo_root: &Path, contents: &str) -> AbsolutePathBuf {
     let marketplace_path = repo_root.join(ALTERNATE_MARKETPLACE_RELATIVE_PATH);
+    fs::create_dir_all(marketplace_path.parent().unwrap()).unwrap();
+    fs::write(&marketplace_path, contents).unwrap();
+    AbsolutePathBuf::try_from(marketplace_path).unwrap()
+}
+
+fn write_claude_marketplace(repo_root: &Path, contents: &str) -> AbsolutePathBuf {
+    let marketplace_path = repo_root.join(CLAUDE_MARKETPLACE_RELATIVE_PATH);
     fs::create_dir_all(marketplace_path.parent().unwrap()).unwrap();
     fs::write(&marketplace_path, contents).unwrap();
     AbsolutePathBuf::try_from(marketplace_path).unwrap()
@@ -502,6 +510,18 @@ fn list_marketplaces_prefers_first_supported_manifest_layout() {
   ]
 }"#,
     );
+    let claude_marketplace_path = write_claude_marketplace(
+        &repo_root,
+        r#"{
+  "name": "claude-marketplace",
+  "plugins": [
+    {
+      "name": "claude-plugin",
+      "source": "./plugins/claude-plugin"
+    }
+  ]
+}"#,
+    );
 
     let marketplaces = list_marketplaces_with_home(
         &[AbsolutePathBuf::try_from(repo_root.clone()).unwrap()],
@@ -511,11 +531,8 @@ fn list_marketplaces_prefers_first_supported_manifest_layout() {
     .marketplaces;
 
     assert_eq!(marketplaces.len(), 1);
-    assert_eq!(marketplaces[0].name, "agents-marketplace");
-    assert_eq!(
-        marketplaces[0].path,
-        AbsolutePathBuf::try_from(repo_root.join(".agents/plugins/marketplace.json")).unwrap()
-    );
+    assert_eq!(marketplaces[0].name, "claude-marketplace");
+    assert_eq!(marketplaces[0].path, claude_marketplace_path);
 }
 
 #[test]
