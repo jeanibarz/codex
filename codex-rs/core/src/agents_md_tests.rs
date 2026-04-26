@@ -360,6 +360,63 @@ async fn uses_configured_fallback_when_agents_missing() {
     assert_eq!(res, "example instructions");
 }
 
+/// CLAUDE.md is used by default when AGENTS.md is absent.
+#[tokio::test]
+async fn uses_claude_md_fallback_by_default_when_agents_missing() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::write(
+        tmp.path().join("CLAUDE.md"),
+        "This is the CLAUDE.md test instruction.",
+    )
+    .unwrap();
+
+    let cfg = make_config(&tmp, /*limit*/ 4096, /*instructions*/ None).await;
+
+    let res = get_user_instructions(&cfg)
+        .await
+        .expect("CLAUDE.md fallback doc expected");
+
+    assert_eq!(res, "This is the CLAUDE.md test instruction.");
+}
+
+/// AGENTS.md remains preferred over the default CLAUDE.md fallback.
+#[tokio::test]
+async fn agents_md_preferred_over_default_claude_md_fallback() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::write(tmp.path().join("AGENTS.md"), "primary").unwrap();
+    fs::write(tmp.path().join("CLAUDE.md"), "secondary").unwrap();
+
+    let cfg = make_config(&tmp, /*limit*/ 4096, /*instructions*/ None).await;
+
+    let res = get_user_instructions(&cfg)
+        .await
+        .expect("AGENTS.md should win");
+
+    assert_eq!(res, "primary");
+}
+
+/// Explicit fallback config replaces the default CLAUDE.md fallback list.
+#[tokio::test]
+async fn configured_fallbacks_replace_default_claude_md_fallback() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::write(tmp.path().join("CLAUDE.md"), "claude instructions").unwrap();
+    fs::write(tmp.path().join("WORKFLOW.md"), "workflow instructions").unwrap();
+
+    let cfg = make_config_with_fallback(
+        &tmp,
+        /*limit*/ 4096,
+        /*instructions*/ None,
+        &["WORKFLOW.md"],
+    )
+    .await;
+
+    let res = get_user_instructions(&cfg)
+        .await
+        .expect("configured fallback doc expected");
+
+    assert_eq!(res, "workflow instructions");
+}
+
 /// AGENTS.md remains preferred when both AGENTS.md and fallbacks are present.
 #[tokio::test]
 async fn agents_md_preferred_over_fallbacks() {
