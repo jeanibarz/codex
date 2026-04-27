@@ -1,3 +1,4 @@
+pub mod claude;
 pub mod installed_marketplaces;
 pub mod loader;
 pub mod manifest;

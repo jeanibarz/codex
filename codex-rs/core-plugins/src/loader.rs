@@ -1,21 +1,22 @@
-use crate::OPENAI_CURATED_MARKETPLACE_NAME;
-use crate::manifest::PluginManifestPaths;
+use crate::claude::enabled_claude_plugin_roots;
 use crate::manifest::load_plugin_manifest;
-use crate::marketplace::MarketplacePluginSource;
+use crate::manifest::PluginManifestPaths;
 use crate::marketplace::find_marketplace_manifest_path;
 use crate::marketplace::list_marketplaces;
 use crate::marketplace::load_marketplace;
+use crate::marketplace::MarketplacePluginSource;
 use crate::store::PluginStore;
 use crate::store::plugin_version_for_source;
-use codex_config::ConfigLayerStack;
+use crate::OPENAI_CURATED_MARKETPLACE_NAME;
 use codex_config::types::McpServerConfig;
 use codex_config::types::PluginConfig;
-use codex_core_skills::SkillMetadata;
-use codex_core_skills::config_rules::SkillConfigRules;
+use codex_config::ConfigLayerStack;
 use codex_core_skills::config_rules::resolve_disabled_skill_paths;
 use codex_core_skills::config_rules::skill_config_rules_from_stack;
-use codex_core_skills::loader::SkillRoot;
+use codex_core_skills::config_rules::SkillConfigRules;
 use codex_core_skills::loader::load_skills_from_roots;
+use codex_core_skills::loader::SkillRoot;
+use codex_core_skills::SkillMetadata;
 use codex_exec_server::LOCAL_FS;
 use codex_plugin::AppConnectorId;
 use codex_plugin::LoadedPlugin;
@@ -34,6 +35,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -111,6 +113,10 @@ pub async fn load_plugins_from_layer_stack(
         .into_iter()
         .collect();
     configured_plugins.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+    let configured_plugin_keys = configured_plugins
+        .iter()
+        .map(|(configured_name, _)| configured_name.clone())
+        .collect::<HashSet<_>>();
 
     let mut plugins = Vec::with_capacity(configured_plugins.len());
     let mut seen_mcp_server_names = HashMap::<String, String>::new();
@@ -123,22 +129,54 @@ pub async fn load_plugins_from_layer_stack(
             &skill_config_rules,
         )
         .await;
-        for name in loaded_plugin.mcp_servers.keys() {
-            if let Some(previous_plugin) =
-                seen_mcp_server_names.insert(name.clone(), configured_name.clone())
-            {
-                warn!(
-                    plugin = configured_name,
-                    previous_plugin,
-                    server = name,
-                    "skipping duplicate plugin MCP server name"
-                );
-            }
+        record_mcp_server_names(&loaded_plugin, &mut seen_mcp_server_names);
+        plugins.push(loaded_plugin);
+    }
+
+    let home_dir = claude_plugins_home_dir(config_layer_stack);
+    for claude_plugin in enabled_claude_plugin_roots(home_dir.as_deref()) {
+        let config_name = claude_plugin.plugin_id.as_key();
+        if configured_plugin_keys.contains(&config_name) {
+            continue;
         }
+        let loaded_plugin = load_plugin_from_root(
+            config_name,
+            claude_plugin.source_path,
+            /*enabled*/ true,
+            restriction_product,
+            &skill_config_rules,
+        )
+        .await;
+        record_mcp_server_names(&loaded_plugin, &mut seen_mcp_server_names);
         plugins.push(loaded_plugin);
     }
 
     PluginLoadOutcome::from_plugins(plugins)
+}
+
+fn claude_plugins_home_dir(config_layer_stack: &ConfigLayerStack) -> Option<PathBuf> {
+    config_layer_stack
+        .get_user_layer()
+        .and_then(|layer| layer.config_folder())
+        .and_then(|config_folder| config_folder.as_path().parent().map(Path::to_path_buf))
+}
+
+fn record_mcp_server_names(
+    loaded_plugin: &LoadedPlugin<McpServerConfig>,
+    seen_mcp_server_names: &mut HashMap<String, String>,
+) {
+    for name in loaded_plugin.mcp_servers.keys() {
+        if let Some(previous_plugin) =
+            seen_mcp_server_names.insert(name.clone(), loaded_plugin.config_name.clone())
+        {
+            warn!(
+                plugin = loaded_plugin.config_name,
+                previous_plugin,
+                server = name,
+                "skipping duplicate plugin MCP server name"
+            );
+        }
+    }
 }
 
 pub fn refresh_curated_plugin_cache(
@@ -464,19 +502,7 @@ async fn load_plugin(
             Ok(plugin_id) => store.plugin_base_root(plugin_id),
             Err(_) => store.root().clone(),
         });
-    let mut loaded_plugin = LoadedPlugin {
-        config_name,
-        manifest_name: None,
-        manifest_description: None,
-        root,
-        enabled: plugin.enabled,
-        skill_roots: Vec::new(),
-        disabled_skill_paths: HashSet::new(),
-        has_enabled_skills: false,
-        mcp_servers: HashMap::new(),
-        apps: Vec::new(),
-        error: None,
-    };
+    let mut loaded_plugin = unloaded_plugin(config_name.clone(), root, plugin.enabled);
 
     if !plugin.enabled {
         return loaded_plugin;
@@ -495,6 +521,29 @@ async fn load_plugin(
             return loaded_plugin;
         }
     };
+
+    load_plugin_from_root(
+        config_name,
+        plugin_root,
+        plugin.enabled,
+        restriction_product,
+        skill_config_rules,
+    )
+    .await
+}
+
+async fn load_plugin_from_root(
+    config_name: String,
+    plugin_root: AbsolutePathBuf,
+    enabled: bool,
+    restriction_product: Option<Product>,
+    skill_config_rules: &SkillConfigRules,
+) -> LoadedPlugin<McpServerConfig> {
+    let mut loaded_plugin = unloaded_plugin(config_name, plugin_root.clone(), enabled);
+
+    if !enabled {
+        return loaded_plugin;
+    }
 
     if !plugin_root.as_path().is_dir() {
         loaded_plugin.error = Some("path does not exist or is not a directory".to_string());
@@ -544,6 +593,26 @@ async fn load_plugin(
     loaded_plugin.mcp_servers = mcp_servers;
     loaded_plugin.apps = load_plugin_apps(plugin_root.as_path()).await;
     loaded_plugin
+}
+
+fn unloaded_plugin(
+    config_name: String,
+    root: AbsolutePathBuf,
+    enabled: bool,
+) -> LoadedPlugin<McpServerConfig> {
+    LoadedPlugin {
+        config_name,
+        manifest_name: None,
+        manifest_description: None,
+        root,
+        enabled,
+        skill_roots: Vec::new(),
+        disabled_skill_paths: HashSet::new(),
+        has_enabled_skills: false,
+        mcp_servers: HashMap::new(),
+        apps: Vec::new(),
+        error: None,
+    }
 }
 
 #[derive(Debug, Clone)]
