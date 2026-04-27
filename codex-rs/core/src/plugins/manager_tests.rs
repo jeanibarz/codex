@@ -245,6 +245,93 @@ async fn load_plugins_loads_default_skills_and_mcp_servers() {
 }
 
 #[tokio::test]
+async fn load_plugins_includes_claude_enabled_plugin_skills() {
+    let home = TempDir::new().unwrap();
+    let codex_home = home.path().join(".codex");
+    let plugin_root = home
+        .path()
+        .join(".claude/plugins/marketplaces/looper/plugin");
+    let skill_path = plugin_root.join("skills/typescript-type-safety/SKILL.md");
+
+    write_file(
+        &codex_home.join(CONFIG_TOML_FILE),
+        r#"
+[features]
+plugins = true
+
+[skills.bundled]
+enabled = false
+"#,
+    );
+    write_file(
+        &home.path().join(".claude/settings.json"),
+        r#"{
+  "enabledPlugins": {
+    "looper-toolkit@looper": true
+  }
+}"#,
+    );
+    write_file(
+        &home
+            .path()
+            .join(".claude/plugins/marketplaces/looper/.claude-plugin/marketplace.json"),
+        r#"{
+  "name": "looper",
+  "plugins": [
+    {
+      "name": "looper-toolkit",
+      "source": "./plugin"
+    }
+  ]
+}"#,
+    );
+    write_file(
+        &plugin_root.join(".claude-plugin/plugin.json"),
+        r#"{
+  "name": "looper-toolkit",
+  "description": "Looper Toolkit"
+}"#,
+    );
+    write_file(
+        &skill_path,
+        "---\nname: typescript-type-safety\ndescription: TypeScript type safety patterns\n---\n",
+    );
+
+    let config = load_config(&codex_home, home.path()).await;
+    let plugins_manager = PluginsManager::new(codex_home.clone());
+    let plugin_outcome = plugins_manager.plugins_for_config(&config).await;
+
+    assert_eq!(
+        plugin_outcome.effective_skill_roots(),
+        vec![plugin_root.join("skills").abs()]
+    );
+    assert_eq!(
+        plugin_outcome.capability_summaries(),
+        &[PluginCapabilitySummary {
+            config_name: "looper-toolkit@looper".to_string(),
+            display_name: "looper-toolkit".to_string(),
+            description: Some("Looper Toolkit".to_string()),
+            has_skills: true,
+            mcp_server_names: Vec::new(),
+            app_connector_ids: Vec::new(),
+        }]
+    );
+
+    let skills_input =
+        crate::skills_load_input_from_config(&config, plugin_outcome.effective_skill_roots());
+    let skills_manager =
+        crate::skills::SkillsManager::new(codex_home.abs(), /*bundled_skills_enabled*/ false);
+    let skills = skills_manager
+        .skills_for_config(&skills_input, /*fs*/ None)
+        .await;
+
+    assert!(skills
+        .skills
+        .iter()
+        .any(|skill| skill.name == "looper-toolkit:typescript-type-safety"));
+}
+
+#[tokio::test]
 async fn load_plugins_resolves_disabled_skill_names_against_loaded_plugin_skills() {
     let codex_home = TempDir::new().unwrap();
     let plugin_root = codex_home
