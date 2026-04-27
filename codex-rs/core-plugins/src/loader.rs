@@ -1,4 +1,5 @@
 use crate::OPENAI_CURATED_MARKETPLACE_NAME;
+use crate::claude::enabled_claude_plugin_roots;
 use crate::manifest::PluginManifestHooks;
 use crate::manifest::PluginManifestPaths;
 use crate::manifest::load_plugin_manifest;
@@ -40,6 +41,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -120,6 +122,10 @@ pub async fn load_plugins_from_layer_stack(
     configured_plugins.extend(extra_plugins);
     let mut configured_plugins: Vec<_> = configured_plugins.into_iter().collect();
     configured_plugins.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+    let configured_plugin_keys = configured_plugins
+        .iter()
+        .map(|(configured_name, _)| configured_name.clone())
+        .collect::<HashSet<_>>();
 
     let mut plugins = Vec::with_capacity(configured_plugins.len());
     let mut seen_mcp_server_names = HashMap::<String, String>::new();
@@ -133,18 +139,31 @@ pub async fn load_plugins_from_layer_stack(
             plugin_hooks_enabled,
         )
         .await;
-        for name in loaded_plugin.mcp_servers.keys() {
-            if let Some(previous_plugin) =
-                seen_mcp_server_names.insert(name.clone(), configured_name.clone())
-            {
-                warn!(
-                    plugin = configured_name,
-                    previous_plugin,
-                    server = name,
-                    "skipping duplicate plugin MCP server name"
-                );
-            }
+        record_mcp_server_names(&loaded_plugin, &mut seen_mcp_server_names);
+        plugins.push(loaded_plugin);
+    }
+
+    let home_dir = claude_plugins_home_dir(config_layer_stack);
+    let claude_mcp_server_policies: HashMap<String, PluginMcpServerConfig> = HashMap::new();
+    for claude_plugin in enabled_claude_plugin_roots(home_dir.as_deref()) {
+        let config_name = claude_plugin.plugin_id.as_key();
+        if configured_plugin_keys.contains(&config_name) {
+            continue;
         }
+        let plugin_data_root = store.plugin_data_root(&claude_plugin.plugin_id);
+        let loaded_plugin = load_plugin_from_root(
+            config_name,
+            claude_plugin.source_path,
+            /*enabled*/ true,
+            &claude_plugin.plugin_id,
+            plugin_data_root,
+            restriction_product,
+            &skill_config_rules,
+            &claude_mcp_server_policies,
+            plugin_hooks_enabled,
+        )
+        .await;
+        record_mcp_server_names(&loaded_plugin, &mut seen_mcp_server_names);
         plugins.push(loaded_plugin);
     }
 
@@ -184,6 +203,31 @@ pub fn remote_installed_plugins_to_config(
             ))
         })
         .collect()
+}
+
+fn claude_plugins_home_dir(config_layer_stack: &ConfigLayerStack) -> Option<PathBuf> {
+    config_layer_stack
+        .get_user_layer()
+        .and_then(|layer| layer.config_folder())
+        .and_then(|config_folder| config_folder.as_path().parent().map(Path::to_path_buf))
+}
+
+fn record_mcp_server_names(
+    loaded_plugin: &LoadedPlugin<McpServerConfig>,
+    seen_mcp_server_names: &mut HashMap<String, String>,
+) {
+    for name in loaded_plugin.mcp_servers.keys() {
+        if let Some(previous_plugin) =
+            seen_mcp_server_names.insert(name.clone(), loaded_plugin.config_name.clone())
+        {
+            warn!(
+                plugin = loaded_plugin.config_name,
+                previous_plugin,
+                server = name,
+                "skipping duplicate plugin MCP server name"
+            );
+        }
+    }
 }
 
 pub fn refresh_curated_plugin_cache(
@@ -510,21 +554,7 @@ async fn load_plugin(
             Ok(plugin_id) => store.plugin_base_root(plugin_id),
             Err(_) => store.root().clone(),
         });
-    let mut loaded_plugin = LoadedPlugin {
-        config_name,
-        manifest_name: None,
-        manifest_description: None,
-        root,
-        enabled: plugin.enabled,
-        skill_roots: Vec::new(),
-        disabled_skill_paths: HashSet::new(),
-        has_enabled_skills: false,
-        mcp_servers: HashMap::new(),
-        apps: Vec::new(),
-        hook_sources: Vec::new(),
-        hook_load_warnings: Vec::new(),
-        error: None,
-    };
+    let mut loaded_plugin = unloaded_plugin(config_name.clone(), root, plugin.enabled);
 
     if !plugin.enabled {
         return loaded_plugin;
@@ -543,6 +573,39 @@ async fn load_plugin(
             return loaded_plugin;
         }
     };
+
+    let plugin_data_root = store.plugin_data_root(&loaded_plugin_id);
+    load_plugin_from_root(
+        config_name,
+        plugin_root,
+        plugin.enabled,
+        &loaded_plugin_id,
+        plugin_data_root,
+        restriction_product,
+        skill_config_rules,
+        &plugin.mcp_servers,
+        plugin_hooks_enabled,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn load_plugin_from_root(
+    config_name: String,
+    plugin_root: AbsolutePathBuf,
+    enabled: bool,
+    plugin_id: &PluginId,
+    plugin_data_root: AbsolutePathBuf,
+    restriction_product: Option<Product>,
+    skill_config_rules: &SkillConfigRules,
+    mcp_server_policies: &HashMap<String, PluginMcpServerConfig>,
+    plugin_hooks_enabled: bool,
+) -> LoadedPlugin<McpServerConfig> {
+    let mut loaded_plugin = unloaded_plugin(config_name, plugin_root.clone(), enabled);
+
+    if !enabled {
+        return loaded_plugin;
+    }
 
     if !plugin_root.as_path().is_dir() {
         loaded_plugin.error = Some("path does not exist or is not a directory".to_string());
@@ -579,7 +642,7 @@ async fn load_plugin(
     for mcp_config_path in plugin_mcp_config_paths(plugin_root.as_path(), manifest_paths) {
         let plugin_mcp = load_mcp_servers_from_file(plugin_root.as_path(), &mcp_config_path).await;
         for (name, mut config) in plugin_mcp.mcp_servers {
-            if let Some(policy) = plugin.mcp_servers.get(&name) {
+            if let Some(policy) = mcp_server_policies.get(&name) {
                 apply_plugin_mcp_server_policy(&mut config, policy);
             }
             if mcp_servers.insert(name.clone(), config).is_some() {
@@ -597,14 +660,36 @@ async fn load_plugin(
     if plugin_hooks_enabled {
         let (hook_sources, hook_load_warnings) = load_plugin_hooks(
             &plugin_root,
-            &loaded_plugin_id,
-            &store.plugin_data_root(&loaded_plugin_id),
+            plugin_id,
+            &plugin_data_root,
             manifest_paths,
         );
         loaded_plugin.hook_sources = hook_sources;
         loaded_plugin.hook_load_warnings = hook_load_warnings;
     }
     loaded_plugin
+}
+
+fn unloaded_plugin(
+    config_name: String,
+    root: AbsolutePathBuf,
+    enabled: bool,
+) -> LoadedPlugin<McpServerConfig> {
+    LoadedPlugin {
+        config_name,
+        manifest_name: None,
+        manifest_description: None,
+        root,
+        enabled,
+        skill_roots: Vec::new(),
+        disabled_skill_paths: HashSet::new(),
+        has_enabled_skills: false,
+        mcp_servers: HashMap::new(),
+        apps: Vec::new(),
+        hook_sources: Vec::new(),
+        hook_load_warnings: Vec::new(),
+        error: None,
+    }
 }
 
 fn apply_plugin_mcp_server_policy(config: &mut McpServerConfig, policy: &PluginMcpServerConfig) {
