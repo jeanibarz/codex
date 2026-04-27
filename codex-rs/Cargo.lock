@@ -2843,7 +2843,7 @@ dependencies = [
 
 [[package]]
 name = "codex-external-agent-sessions"
-version = "0.0.0"
+version = "0.125.0-alpha.3"
 dependencies = [
  "chrono",
  "codex-app-server-protocol",
@@ -2899,7 +2899,7 @@ dependencies = [
 
 [[package]]
 name = "codex-file-system"
-version = "0.0.0"
+version = "0.125.0-alpha.3"
 dependencies = [
  "async-trait",
  "codex-protocol",
@@ -3174,7 +3174,7 @@ dependencies = [
 
 [[package]]
 name = "codex-memories-read"
-version = "0.0.0"
+version = "0.125.0-alpha.3"
 dependencies = [
  "codex-protocol",
  "codex-shell-command",
@@ -3188,7 +3188,7 @@ dependencies = [
 
 [[package]]
 name = "codex-memories-write"
-version = "0.0.0"
+version = "0.125.0-alpha.3"
 dependencies = [
  "anyhow",
  "chrono",
