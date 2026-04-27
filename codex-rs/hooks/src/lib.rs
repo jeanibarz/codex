@@ -51,6 +51,8 @@ pub use events::compact::PostCompactRequest;
 pub use events::compact::PreCompactOutcome;
 pub use events::compact::PreCompactRequest;
 pub use events::compact::StatelessHookOutcome;
+pub use events::file_changed::FileChangedOutcome;
+pub use events::file_changed::FileChangedRequest;
 pub use events::notification::NotificationOutcome;
 pub use events::notification::NotificationRequest;
 pub use events::permission_request::PermissionRequestDecision;
