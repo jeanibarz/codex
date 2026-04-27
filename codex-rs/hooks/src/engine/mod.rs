@@ -9,6 +9,8 @@ use codex_protocol::protocol::HookRunSummary;
 use codex_protocol::protocol::HookSource;
 use codex_utils_absolute_path::AbsolutePathBuf;
 
+use crate::events::file_changed::FileChangedOutcome;
+use crate::events::file_changed::FileChangedRequest;
 use crate::events::permission_request::PermissionRequestOutcome;
 use crate::events::permission_request::PermissionRequestRequest;
 use crate::events::post_tool_use::PostToolUseOutcome;
@@ -65,6 +67,7 @@ impl ConfiguredHandler {
             codex_protocol::protocol::HookEventName::UserPromptSubmit => "user-prompt-submit",
             codex_protocol::protocol::HookEventName::Stop => "stop",
             codex_protocol::protocol::HookEventName::StopFailure => "stop-failure",
+            codex_protocol::protocol::HookEventName::FileChanged => "file-changed",
         }
     }
 }
@@ -234,6 +237,20 @@ impl ClaudeHooksEngine {
         request: crate::events::post_tool_use_failure::PostToolUseFailureRequest,
     ) -> crate::events::post_tool_use_failure::PostToolUseFailureOutcome {
         crate::events::post_tool_use_failure::run(&self.handlers, &self.shell, request).await
+    }
+
+    pub(crate) fn preview_file_changed(
+        &self,
+        request: &FileChangedRequest,
+    ) -> Vec<HookRunSummary> {
+        crate::events::file_changed::preview(&self.handlers, request)
+    }
+
+    pub(crate) async fn run_file_changed(
+        &self,
+        request: FileChangedRequest,
+    ) -> FileChangedOutcome {
+        crate::events::file_changed::run(&self.handlers, &self.shell, request).await
     }
 }
 

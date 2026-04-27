@@ -34,6 +34,8 @@ pub struct HookEventsToml {
     pub stop: Vec<MatcherGroup>,
     #[serde(rename = "StopFailure", default)]
     pub stop_failure: Vec<MatcherGroup>,
+    #[serde(rename = "FileChanged", default)]
+    pub file_changed: Vec<MatcherGroup>,
 }
 
 impl HookEventsToml {
@@ -49,6 +51,7 @@ impl HookEventsToml {
             user_prompt_submit,
             stop,
             stop_failure,
+            file_changed,
         } = self;
         pre_tool_use.is_empty()
             && permission_request.is_empty()
@@ -60,6 +63,7 @@ impl HookEventsToml {
             && user_prompt_submit.is_empty()
             && stop.is_empty()
             && stop_failure.is_empty()
+            && file_changed.is_empty()
     }
 
     pub fn handler_count(&self) -> usize {
@@ -74,6 +78,7 @@ impl HookEventsToml {
             user_prompt_submit,
             stop,
             stop_failure,
+            file_changed,
         } = self;
         [
             pre_tool_use,
@@ -86,6 +91,7 @@ impl HookEventsToml {
             user_prompt_submit,
             stop,
             stop_failure,
+            file_changed,
         ]
         .into_iter()
         .flatten()
@@ -93,7 +99,7 @@ impl HookEventsToml {
         .sum()
     }
 
-    pub fn into_matcher_groups(self) -> [(HookEventName, Vec<MatcherGroup>); 10] {
+    pub fn into_matcher_groups(self) -> [(HookEventName, Vec<MatcherGroup>); 11] {
         [
             (HookEventName::PreToolUse, self.pre_tool_use),
             (HookEventName::PermissionRequest, self.permission_request),
@@ -108,6 +114,7 @@ impl HookEventsToml {
             (HookEventName::UserPromptSubmit, self.user_prompt_submit),
             (HookEventName::Stop, self.stop),
             (HookEventName::StopFailure, self.stop_failure),
+            (HookEventName::FileChanged, self.file_changed),
         ]
     }
 }

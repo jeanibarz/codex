@@ -3,6 +3,8 @@ use tokio::process::Command;
 
 use crate::engine::ClaudeHooksEngine;
 use crate::engine::CommandShell;
+use crate::events::file_changed::FileChangedOutcome;
+use crate::events::file_changed::FileChangedRequest;
 use crate::events::permission_request::PermissionRequestOutcome;
 use crate::events::permission_request::PermissionRequestRequest;
 use crate::events::post_tool_use::PostToolUseOutcome;
@@ -226,6 +228,17 @@ impl Hooks {
         request: crate::events::post_tool_use_failure::PostToolUseFailureRequest,
     ) -> crate::events::post_tool_use_failure::PostToolUseFailureOutcome {
         self.engine.run_post_tool_use_failure(request).await
+    }
+
+    pub fn preview_file_changed(
+        &self,
+        request: &FileChangedRequest,
+    ) -> Vec<codex_protocol::protocol::HookRunSummary> {
+        self.engine.preview_file_changed(request)
+    }
+
+    pub async fn run_file_changed(&self, request: FileChangedRequest) -> FileChangedOutcome {
+        self.engine.run_file_changed(request).await
     }
 }
 

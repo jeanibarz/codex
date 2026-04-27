@@ -5,6 +5,8 @@ mod registry;
 mod schema;
 mod types;
 
+pub use events::file_changed::FileChangedOutcome;
+pub use events::file_changed::FileChangedRequest;
 pub use events::notification::NotificationOutcome;
 pub use events::notification::NotificationRequest;
 pub use events::permission_request::PermissionRequestDecision;
