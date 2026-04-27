@@ -12,9 +12,14 @@
         "postToolUse",
         "preCompact",
         "postCompact",
+        "postToolUseFailure",
+        "notification",
         "sessionStart",
+        "sessionEnd",
         "userPromptSubmit",
-        "stop"
+        "stop",
+        "stopFailure",
+        "fileChanged"
       ],
       "type": "string"
     },
