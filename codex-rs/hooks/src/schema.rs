@@ -1,3 +1,8 @@
+use std::collections::HashMap;
+use std::path::Path;
+use std::path::PathBuf;
+
+use codex_protocol::protocol::FileChange;
 use schemars::JsonSchema;
 use schemars::r#gen::SchemaGenerator;
 use schemars::r#gen::SchemaSettings;
@@ -9,8 +14,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Map;
 use serde_json::Value;
-use std::path::Path;
-use std::path::PathBuf;
 
 const GENERATED_DIR: &str = "generated";
 const POST_TOOL_USE_INPUT_FIXTURE: &str = "post-tool-use.command.input.schema.json";
@@ -30,6 +33,7 @@ const SESSION_END_INPUT_FIXTURE: &str = "session-end.command.input.schema.json";
 const POST_TOOL_USE_FAILURE_INPUT_FIXTURE: &str =
     "post-tool-use-failure.command.input.schema.json";
 const NOTIFICATION_INPUT_FIXTURE: &str = "notification.command.input.schema.json";
+const FILE_CHANGED_INPUT_FIXTURE: &str = "file-changed.command.input.schema.json";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(transparent)]
@@ -480,6 +484,26 @@ pub(crate) struct NotificationCommandInput {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "file-changed.command.input")]
+pub(crate) struct FileChangedCommandInput {
+    pub session_id: String,
+    /// Codex extension: expose the active turn id to internal turn-scoped hooks.
+    pub turn_id: String,
+    pub transcript_path: NullableString,
+    pub cwd: String,
+    #[schemars(schema_with = "file_changed_hook_event_name_schema")]
+    pub hook_event_name: String,
+    pub model: String,
+    #[schemars(schema_with = "permission_mode_schema")]
+    pub permission_mode: String,
+    pub tool_name: String,
+    pub tool_use_id: String,
+    pub file_paths: Vec<String>,
+    pub changes: HashMap<PathBuf, FileChange>,
+}
+
 pub fn write_schema_fixtures(schema_root: &Path) -> anyhow::Result<()> {
     let generated_dir = schema_root.join(GENERATED_DIR);
     ensure_empty_dir(&generated_dir)?;
@@ -547,6 +571,10 @@ pub fn write_schema_fixtures(schema_root: &Path) -> anyhow::Result<()> {
     write_schema(
         &generated_dir.join(NOTIFICATION_INPUT_FIXTURE),
         schema_json::<NotificationCommandInput>()?,
+    )?;
+    write_schema(
+        &generated_dir.join(FILE_CHANGED_INPUT_FIXTURE),
+        schema_json::<FileChangedCommandInput>()?,
     )?;
 
     Ok(())
@@ -647,6 +675,10 @@ fn notification_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
     string_const_schema("Notification")
 }
 
+fn file_changed_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
+    string_const_schema("FileChanged")
+}
+
 fn permission_mode_schema(_gen: &mut SchemaGenerator) -> Schema {
     string_enum_schema(&[
         "default",
@@ -696,6 +728,8 @@ mod tests {
     use super::POST_TOOL_USE_OUTPUT_FIXTURE;
     use super::PRE_TOOL_USE_INPUT_FIXTURE;
     use super::PRE_TOOL_USE_OUTPUT_FIXTURE;
+    use super::FILE_CHANGED_INPUT_FIXTURE;
+    use super::FileChangedCommandInput;
     use super::PermissionRequestCommandInput;
     use super::PostToolUseCommandInput;
     use super::PreToolUseCommandInput;
@@ -751,6 +785,9 @@ mod tests {
             STOP_OUTPUT_FIXTURE => {
                 include_str!("../schema/generated/stop.command.output.schema.json")
             }
+            FILE_CHANGED_INPUT_FIXTURE => {
+                include_str!("../schema/generated/file-changed.command.input.schema.json")
+            }
             _ => panic!("unexpected fixture name: {name}"),
         }
     }
@@ -778,6 +815,7 @@ mod tests {
             USER_PROMPT_SUBMIT_OUTPUT_FIXTURE,
             STOP_INPUT_FIXTURE,
             STOP_OUTPUT_FIXTURE,
+            FILE_CHANGED_INPUT_FIXTURE,
         ] {
             let expected = normalize_newlines(expected_fixture(fixture));
             let actual = std::fs::read_to_string(schema_root.join("generated").join(fixture))
@@ -814,6 +852,11 @@ mod tests {
             &schema_json::<StopCommandInput>().expect("serialize stop input schema"),
         )
         .expect("parse stop input schema");
+        let file_changed: Value = serde_json::from_slice(
+            &schema_json::<FileChangedCommandInput>()
+                .expect("serialize file changed input schema"),
+        )
+        .expect("parse file changed input schema");
 
         for schema in [
             &pre_tool_use,
@@ -821,6 +864,7 @@ mod tests {
             &post_tool_use,
             &user_prompt_submit,
             &stop,
+            &file_changed,
         ] {
             assert_eq!(schema["properties"]["turn_id"]["type"], "string");
             assert!(

@@ -5031,6 +5031,7 @@ impl CodexMessageProcessor {
                 developer_instructions,
                 /*personality*/ None,
             );
+            self.apply_process_thread_config_overrides(&mut typesafe_overrides);
             typesafe_overrides.ephemeral = ephemeral.then_some(true);
             // Derive a Config using the same logic as new conversation, honoring overrides if provided.
             let config = self

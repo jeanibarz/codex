@@ -10,6 +10,7 @@ use crate::apply_patch;
 use crate::apply_patch::InternalApplyPatchInvocation;
 use crate::apply_patch::convert_apply_patch_to_protocol;
 use crate::function_tool::FunctionCallError;
+use crate::hook_runtime::run_file_changed_hooks;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::tools::context::ApplyPatchToolOutput;
@@ -393,6 +394,7 @@ impl ToolHandler for ApplyPatchHandler {
                     }
                     InternalApplyPatchInvocation::DelegateToRuntime(apply) => {
                         let changes = convert_apply_patch_to_protocol(&apply.action);
+                        let hook_changes = changes.clone();
                         let emitter =
                             ToolEmitter::apply_patch(changes.clone(), apply.auto_approved);
                         let event_ctx = ToolEventCtx::new(
@@ -439,6 +441,14 @@ impl ToolHandler for ApplyPatchHandler {
                             Some(&tracker),
                         );
                         let content = emitter.finish(event_ctx, out).await?;
+                        run_file_changed_hooks(
+                            &session,
+                            &turn,
+                            call_id.clone(),
+                            "apply_patch".to_string(),
+                            hook_changes,
+                        )
+                        .await;
                         Ok(ApplyPatchToolOutput::from_text(content))
                     }
                 }
@@ -501,6 +511,7 @@ pub(crate) async fn intercept_apply_patch(
                 }
                 InternalApplyPatchInvocation::DelegateToRuntime(apply) => {
                     let changes = convert_apply_patch_to_protocol(&apply.action);
+                    let hook_changes = changes.clone();
                     let emitter = ToolEmitter::apply_patch(changes.clone(), apply.auto_approved);
                     let event_ctx = ToolEventCtx::new(
                         session.as_ref(),
@@ -546,6 +557,14 @@ pub(crate) async fn intercept_apply_patch(
                         tracker.as_ref().copied(),
                     );
                     let content = emitter.finish(event_ctx, out).await?;
+                    run_file_changed_hooks(
+                        &session,
+                        &turn,
+                        call_id.to_string(),
+                        "apply_patch".to_string(),
+                        hook_changes,
+                    )
+                    .await;
                     Ok(Some(FunctionToolOutput::from_text(content, Some(true))))
                 }
             }

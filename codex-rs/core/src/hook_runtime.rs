@@ -1,9 +1,12 @@
+use std::collections::HashMap;
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use codex_analytics::HookRunFact;
 use codex_analytics::build_track_events_context;
+use codex_hooks::FileChangedRequest;
 use codex_hooks::NotificationRequest;
 use codex_hooks::PermissionRequestDecision;
 use codex_hooks::PermissionRequestOutcome;
@@ -25,6 +28,7 @@ use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::FileChange;
 use codex_protocol::protocol::HookCompletedEvent;
 use codex_protocol::protocol::HookEventName;
 use codex_protocol::protocol::HookRunStatus;
@@ -257,6 +261,31 @@ pub(crate) async fn run_post_tool_use_hooks(
     outcome
 }
 
+pub(crate) async fn run_file_changed_hooks(
+    sess: &Arc<Session>,
+    turn_context: &Arc<TurnContext>,
+    tool_use_id: String,
+    tool_name: String,
+    changes: HashMap<PathBuf, FileChange>,
+) {
+    let request = FileChangedRequest {
+        session_id: sess.conversation_id,
+        turn_id: turn_context.sub_id.clone(),
+        cwd: turn_context.cwd.clone(),
+        transcript_path: sess.hook_transcript_path().await,
+        model: turn_context.model_info.slug.clone(),
+        permission_mode: hook_permission_mode(turn_context),
+        tool_name,
+        tool_use_id,
+        changes,
+    };
+    let preview_runs = sess.hooks().preview_file_changed(&request);
+    emit_hook_started_events(sess, turn_context, preview_runs).await;
+
+    let outcome = sess.hooks().run_file_changed(request).await;
+    emit_hook_completed_events(sess, turn_context, outcome.hook_events).await;
+}
+
 pub(crate) async fn run_user_prompt_submit_hooks(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
@@ -478,6 +507,7 @@ fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str); 
         HookEventName::UserPromptSubmit => "UserPromptSubmit",
         HookEventName::Stop => "Stop",
         HookEventName::StopFailure => "StopFailure",
+        HookEventName::FileChanged => "FileChanged",
     };
     let hook_source = match run.source {
         HookSource::System => "system",

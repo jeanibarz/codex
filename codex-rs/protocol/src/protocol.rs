@@ -1523,6 +1523,7 @@ pub enum HookEventName {
     UserPromptSubmit,
     Stop,
     StopFailure,
+    FileChanged,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]

@@ -1,4 +1,5 @@
 pub(crate) mod common;
+pub mod file_changed;
 pub mod notification;
 pub mod permission_request;
 pub mod post_tool_use;

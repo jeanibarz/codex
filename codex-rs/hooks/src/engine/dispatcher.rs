@@ -47,7 +47,8 @@ pub(crate) fn select_handlers_for_matcher_inputs(
             | HookEventName::PermissionRequest
             | HookEventName::PostToolUse
             | HookEventName::PostToolUseFailure
-            | HookEventName::SessionStart => {
+            | HookEventName::SessionStart
+            | HookEventName::FileChanged => {
                 if matcher_inputs.is_empty() {
                     matches_matcher(handler.matcher.as_deref(), /*input*/ None)
                 } else {
@@ -142,7 +143,8 @@ fn scope_for_event(event_name: HookEventName) -> HookScope {
         | HookEventName::PostToolUseFailure
         | HookEventName::UserPromptSubmit
         | HookEventName::Stop
-        | HookEventName::StopFailure => HookScope::Turn,
+        | HookEventName::StopFailure
+        | HookEventName::FileChanged => HookScope::Turn,
     }
 }
 

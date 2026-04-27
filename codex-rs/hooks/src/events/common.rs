@@ -104,7 +104,8 @@ pub(crate) fn matcher_pattern_for_event(
         | HookEventName::PermissionRequest
         | HookEventName::PostToolUse
         | HookEventName::PostToolUseFailure
-        | HookEventName::SessionStart => matcher,
+        | HookEventName::SessionStart
+        | HookEventName::FileChanged => matcher,
         HookEventName::Notification
         | HookEventName::SessionEnd
         | HookEventName::UserPromptSubmit

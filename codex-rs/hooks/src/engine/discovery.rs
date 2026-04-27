@@ -338,6 +338,7 @@ pub(crate) fn append_settings_file_handlers(result: &mut DiscoveryResult, settin
         path: &source_path,
         is_managed: false,
         source: HookSource::SessionFlags,
+        env: HashMap::new(),
     };
     let mut display_order = result
         .handlers

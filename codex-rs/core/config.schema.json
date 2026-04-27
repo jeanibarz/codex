@@ -930,6 +930,13 @@
     },
     "HookEventsToml": {
       "properties": {
+        "FileChanged": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/MatcherGroup"
+          },
+          "type": "array"
+        },
         "Notification": {
           "default": [],
           "items": {
