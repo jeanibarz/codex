@@ -3071,6 +3071,7 @@ impl ThreadRequestProcessor {
         );
         self.apply_process_thread_config_overrides(&mut typesafe_overrides);
         typesafe_overrides.ephemeral = ephemeral.then_some(true);
+        self.apply_process_thread_config_overrides(&mut typesafe_overrides);
         // Derive a Config using the same logic as new conversation, honoring overrides if provided.
         let config = self
             .config_manager
