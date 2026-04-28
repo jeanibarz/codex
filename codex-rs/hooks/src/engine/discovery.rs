@@ -344,11 +344,14 @@ pub(crate) fn append_settings_file_handlers(result: &mut DiscoveryResult, settin
         }
     };
 
+    let disabled_hook_keys: HashSet<String> = HashSet::new();
     let source = HookHandlerSource {
         path: &source_path,
-        is_managed: false,
+        key_source: source_path.display().to_string(),
         source: HookSource::SessionFlags,
+        disabled_hook_keys: &disabled_hook_keys,
         env: HashMap::new(),
+        plugin_id: None,
     };
     let mut display_order = result
         .handlers
@@ -360,6 +363,7 @@ pub(crate) fn append_settings_file_handlers(result: &mut DiscoveryResult, settin
 
     append_hook_events(
         &mut result.handlers,
+        &mut result.hook_entries,
         &mut result.warnings,
         &mut display_order,
         source,
