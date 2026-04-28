@@ -33,6 +33,7 @@ pub(crate) struct ConfigManager {
     cloud_requirements: Arc<RwLock<CloudRequirementsLoader>>,
     arg0_paths: Arg0DispatchPaths,
     thread_config_loader: Arc<RwLock<Arc<dyn ThreadConfigLoader>>>,
+    process_settings_file: Option<PathBuf>,
 }
 
 impl ConfigManager {
@@ -52,7 +53,13 @@ impl ConfigManager {
             cloud_requirements: Arc::new(RwLock::new(cloud_requirements)),
             arg0_paths,
             thread_config_loader: Arc::new(RwLock::new(thread_config_loader)),
+            process_settings_file: None,
         }
+    }
+
+    pub(crate) fn with_process_settings_file(mut self, settings_file: Option<PathBuf>) -> Self {
+        self.process_settings_file = settings_file;
+        self
     }
 
     pub(crate) fn codex_home(&self) -> &Path {
@@ -197,6 +204,10 @@ impl ConfigManager {
                     .map(|(key, value)| (key, json_to_toml(value))),
             )
             .collect::<Vec<_>>();
+        let mut typesafe_overrides = typesafe_overrides;
+        if typesafe_overrides.settings_file.is_none() {
+            typesafe_overrides.settings_file = self.process_settings_file.clone();
+        }
 
         let mut config = codex_core::config::ConfigBuilder::default()
             .codex_home(self.codex_home.clone())

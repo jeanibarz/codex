@@ -1750,7 +1750,7 @@ dependencies = [
 
 [[package]]
 name = "codex-agent-graph-store"
-version = "0.0.0"
+version = "0.125.0-alpha.3"
 dependencies = [
  "async-trait",
  "codex-protocol",
@@ -2001,7 +2001,7 @@ dependencies = [
 
 [[package]]
 name = "codex-app-server-transport"
-version = "0.0.0"
+version = "0.125.0-alpha.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -2519,7 +2519,7 @@ dependencies = [
 
 [[package]]
 name = "codex-core-api"
-version = "0.0.0"
+version = "0.125.0-alpha.3"
 dependencies = [
  "codex-analytics",
  "codex-app-server-protocol",
@@ -2758,7 +2758,7 @@ dependencies = [
 
 [[package]]
 name = "codex-external-agent-migration"
-version = "0.0.0"
+version = "0.125.0-alpha.3"
 dependencies = [
  "codex-hooks",
  "pretty_assertions",
@@ -3549,7 +3549,7 @@ dependencies = [
 
 [[package]]
 name = "codex-thread-manager-sample"
-version = "0.0.0"
+version = "0.125.0-alpha.3"
 dependencies = [
  "anyhow",
  "clap",

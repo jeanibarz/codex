@@ -5,7 +5,14 @@ use app_test_support::PathBufExt;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::to_response;
 use app_test_support::write_chatgpt_auth;
+use codex_app_server::in_process;
+use codex_app_server::in_process::InProcessServerEvent;
+use codex_app_server::in_process::InProcessStartArgs;
 use codex_app_server_protocol::AskForApproval;
+use codex_app_server_protocol::ClientInfo;
+use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::InitializeCapabilities;
+use codex_app_server_protocol::InitializeParams;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::JSONRPCResponse;
@@ -20,21 +27,36 @@ use codex_app_server_protocol::ThreadStartedNotification;
 use codex_app_server_protocol::ThreadStatus;
 use codex_app_server_protocol::ThreadStatusChangedNotification;
 use codex_app_server_protocol::TurnEnvironmentParams;
+use codex_app_server_protocol::TurnStartParams;
+use codex_app_server_protocol::UserInput as V2UserInput;
+use codex_arg0::Arg0DispatchPaths;
+use codex_config::CloudRequirementsLoader;
+use codex_config::LoaderOverrides;
+use codex_config::NoopThreadConfigLoader;
 use codex_config::loader::project_trust_key;
 use codex_config::types::AuthCredentialsStoreMode;
+use codex_core::config::ConfigBuilder;
+use codex_core::config::ConfigOverrides;
 use codex_core::config::set_project_trust_level;
+use codex_exec_server::EnvironmentManager;
 use codex_exec_server::LOCAL_FS;
+use codex_feedback::CodexFeedback;
 use codex_git_utils::resolve_root_git_project_for_trust;
 use codex_login::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::TrustLevel;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::protocol::SessionSource;
+use core_test_support::responses;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 use tempfile::TempDir;
+use tokio::time::sleep;
 use tokio::time::timeout;
 use wiremock::Mock;
 use wiremock::MockServer;
@@ -163,6 +185,157 @@ async fn thread_start_creates_thread_and_emits_started() -> Result<()> {
     let started: ThreadStartedNotification =
         serde_json::from_value(notif.params.expect("params must be present"))?;
     assert_eq!(started.thread, thread);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_start_inherits_settings_file_hooks_from_embedded_process() -> Result<()> {
+    let server = responses::start_mock_server().await;
+    let codex_home = TempDir::new()?;
+    create_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
+
+    let hook_log = codex_home.path().join("hook-fired.jsonl");
+    let settings_path = codex_home.path().join("settings.json");
+    let hook_log_display = hook_log.display();
+    let hook_command = format!("payload=$(cat); printf '%s\\n' \"$payload\" >> {hook_log_display}");
+    let settings = json!({
+        "hooks": {
+            "PreToolUse": [{
+                "matcher": "*",
+                "hooks": [{ "type": "command", "command": hook_command }]
+            }]
+        }
+    });
+    std::fs::write(&settings_path, serde_json::to_vec_pretty(&settings)?)?;
+    responses::mount_sse_sequence(
+        &server,
+        vec![
+            responses::sse(vec![
+                responses::ev_response_created("resp-1"),
+                responses::ev_shell_command_call("call-1", "echo hello"),
+                responses::ev_completed("resp-1"),
+            ]),
+            responses::sse(vec![
+                responses::ev_response_created("resp-2"),
+                responses::ev_assistant_message("msg-1", "done"),
+                responses::ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    let loader_overrides = LoaderOverrides::without_managed_config_for_tests();
+    let config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .harness_overrides(ConfigOverrides {
+            settings_file: Some(settings_path),
+            ..Default::default()
+        })
+        .loader_overrides(loader_overrides.clone())
+        .build()
+        .await?;
+    let client = in_process::start(InProcessStartArgs {
+        arg0_paths: Arg0DispatchPaths::default(),
+        config: Arc::new(config),
+        cli_overrides: Vec::new(),
+        loader_overrides,
+        cloud_requirements: CloudRequirementsLoader::default(),
+        thread_config_loader: Arc::new(NoopThreadConfigLoader),
+        feedback: CodexFeedback::new(),
+        log_db: None,
+        environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
+        config_warnings: Vec::new(),
+        session_source: SessionSource::Cli,
+        enable_codex_api_key_env: false,
+        initialize: InitializeParams {
+            client_info: ClientInfo {
+                name: "codex-tui".to_string(),
+                title: None,
+                version: "0.1.0".to_string(),
+            },
+            capabilities: Some(InitializeCapabilities {
+                experimental_api: true,
+                ..Default::default()
+            }),
+        },
+        channel_capacity: in_process::DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
+    })
+    .await?;
+
+    let thread_response = match client
+        .request(ClientRequest::ThreadStart {
+            request_id: RequestId::Integer(1),
+            params: ThreadStartParams {
+                model: Some("gpt-5.2".to_string()),
+                ..Default::default()
+            },
+        })
+        .await?
+    {
+        Ok(response) => response,
+        Err(error) => anyhow::bail!("thread/start failed: {}", error.message),
+    };
+    let ThreadStartResponse { thread, .. } = serde_json::from_value(thread_response)?;
+
+    let mut client = client;
+    if let Err(error) = client
+        .request(ClientRequest::TurnStart {
+            request_id: RequestId::Integer(2),
+            params: TurnStartParams {
+                thread_id: thread.id.clone(),
+                input: vec![V2UserInput::Text {
+                    text: "run a shell command".to_string(),
+                    text_elements: Vec::new(),
+                }],
+                ..Default::default()
+            },
+        })
+        .await?
+    {
+        anyhow::bail!("turn/start failed: {}", error.message);
+    }
+
+    timeout(DEFAULT_READ_TIMEOUT, async {
+        loop {
+            let Some(event) = client.next_event().await else {
+                anyhow::bail!("in-process app-server stopped before turn/completed");
+            };
+            if let InProcessServerEvent::ServerNotification(ServerNotification::TurnCompleted(
+                completed,
+            )) = event
+                && completed.thread_id == thread.id
+            {
+                return Ok::<(), anyhow::Error>(());
+            }
+        }
+    })
+    .await??;
+    client.shutdown().await?;
+
+    for _ in 0..20 {
+        if hook_log.exists() {
+            break;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+    let hook_log_contents = std::fs::read_to_string(&hook_log)?;
+    let hook_events = hook_log_contents
+        .lines()
+        .map(serde_json::from_str::<Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    assert_eq!(
+        hook_events
+            .iter()
+            .map(|event| event["hook_event_name"].as_str().expect("hook event name"))
+            .collect::<Vec<_>>(),
+        vec!["PreToolUse"]
+    );
+    assert_eq!(hook_events[0]["tool_name"], "Bash");
+    assert_eq!(hook_events[0]["tool_use_id"], "call-1");
+    assert_eq!(hook_events[0]["tool_input"]["command"], "echo hello");
 
     Ok(())
 }

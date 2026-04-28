@@ -536,9 +536,14 @@ fn event_label(event_name: HookEventName) -> &'static str {
         HookEventName::PreToolUse => "PreToolUse",
         HookEventName::PermissionRequest => "PermissionRequest",
         HookEventName::PostToolUse => "PostToolUse",
+        HookEventName::PostToolUseFailure => "PostToolUseFailure",
+        HookEventName::Notification => "Notification",
         HookEventName::SessionStart => "SessionStart",
+        HookEventName::SessionEnd => "SessionEnd",
         HookEventName::UserPromptSubmit => "UserPromptSubmit",
         HookEventName::Stop => "Stop",
+        HookEventName::StopFailure => "StopFailure",
+        HookEventName::FileChanged => "FileChanged",
     }
 }
 
@@ -547,9 +552,14 @@ fn event_description(event_name: HookEventName) -> &'static str {
         HookEventName::PreToolUse => "Before a tool executes",
         HookEventName::PermissionRequest => "When permission is requested",
         HookEventName::PostToolUse => "After a tool executes",
+        HookEventName::PostToolUseFailure => "After a tool execution fails",
+        HookEventName::Notification => "When Codex sends a notification",
         HookEventName::SessionStart => "When a new session starts",
+        HookEventName::SessionEnd => "When a session ends",
         HookEventName::UserPromptSubmit => "When the user submits a prompt",
         HookEventName::Stop => "Right before Codex ends its turn",
+        HookEventName::StopFailure => "When Codex's turn ends with a failure",
+        HookEventName::FileChanged => "After a file is changed",
     }
 }
 

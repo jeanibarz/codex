@@ -334,11 +334,14 @@ pub(crate) fn append_settings_file_handlers(result: &mut DiscoveryResult, settin
         }
     };
 
+    let disabled_hook_keys: HashSet<String> = HashSet::new();
     let source = HookHandlerSource {
         path: &source_path,
-        is_managed: false,
+        key_source: source_path.display().to_string(),
         source: HookSource::SessionFlags,
+        disabled_hook_keys: &disabled_hook_keys,
         env: HashMap::new(),
+        plugin_id: None,
     };
     let mut display_order = result
         .handlers
@@ -350,6 +353,7 @@ pub(crate) fn append_settings_file_handlers(result: &mut DiscoveryResult, settin
 
     append_hook_events(
         &mut result.handlers,
+        &mut result.hook_entries,
         &mut result.warnings,
         &mut display_order,
         source,
@@ -530,9 +534,14 @@ fn hook_event_key_label(event_name: codex_protocol::protocol::HookEventName) -> 
         codex_protocol::protocol::HookEventName::PreToolUse => "pre_tool_use",
         codex_protocol::protocol::HookEventName::PermissionRequest => "permission_request",
         codex_protocol::protocol::HookEventName::PostToolUse => "post_tool_use",
+        codex_protocol::protocol::HookEventName::PostToolUseFailure => "post_tool_use_failure",
+        codex_protocol::protocol::HookEventName::Notification => "notification",
         codex_protocol::protocol::HookEventName::SessionStart => "session_start",
+        codex_protocol::protocol::HookEventName::SessionEnd => "session_end",
         codex_protocol::protocol::HookEventName::UserPromptSubmit => "user_prompt_submit",
         codex_protocol::protocol::HookEventName::Stop => "stop",
+        codex_protocol::protocol::HookEventName::StopFailure => "stop_failure",
+        codex_protocol::protocol::HookEventName::FileChanged => "file_changed",
     }
 }
 

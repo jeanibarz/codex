@@ -420,6 +420,7 @@ pub async fn run_main_with_transport_options(
     auth: AppServerWebsocketAuthSettings,
     runtime_options: AppServerRuntimeOptions,
 ) -> IoResult<()> {
+    let settings_file = cli_config_overrides.settings_file.clone();
     let environment_manager = Arc::new(
         EnvironmentManager::new(EnvironmentManagerArgs::new(
             ExecServerRuntimePaths::from_optional_paths(
@@ -451,7 +452,8 @@ pub async fn run_main_with_transport_options(
         Default::default(),
         arg0_paths.clone(),
         Arc::new(NoopThreadConfigLoader),
-    );
+    )
+    .with_process_settings_file(settings_file);
     match config_manager
         .load_latest_config(/*fallback_cwd*/ None)
         .await
