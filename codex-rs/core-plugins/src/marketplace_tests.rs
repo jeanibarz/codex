@@ -526,7 +526,7 @@ fn list_marketplaces_prefers_first_supported_manifest_layout() {
     );
 
     let marketplaces = list_marketplaces_with_home(
-        &[AbsolutePathBuf::try_from(repo_root.clone()).unwrap()],
+        &[AbsolutePathBuf::try_from(repo_root).unwrap()],
         /*home_dir*/ None,
     )
     .unwrap()
