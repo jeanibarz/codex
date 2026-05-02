@@ -4842,7 +4842,10 @@ impl ChatWidget {
                 has_input_focus: true,
                 enhanced_keys_supported,
                 placeholder_text: placeholder.clone(),
-                disable_paste_burst: config.disable_paste_burst,
+                disable_paste_burst: effective_disable_paste_burst(
+                    config.disable_paste_burst,
+                    looper_task_id_env().as_deref(),
+                ),
                 animations_enabled: config.animations,
                 skills: None,
             }),
@@ -11004,6 +11007,39 @@ fn extract_first_bold(s: &str) -> Option<String> {
         i += 1;
     }
     None
+}
+
+fn looper_task_id_env() -> Option<std::ffi::OsString> {
+    #[cfg(test)]
+    {
+        None
+    }
+    #[cfg(not(test))]
+    {
+        std::env::var_os("LOOPER_TASK_ID")
+    }
+}
+
+fn effective_disable_paste_burst(
+    configured: bool,
+    looper_task_id: Option<&std::ffi::OsStr>,
+) -> bool {
+    configured || looper_task_id.is_some()
+}
+
+#[cfg(test)]
+mod looper_compat_tests {
+    use super::*;
+
+    #[test]
+    fn looper_managed_sessions_disable_paste_burst() {
+        assert!(effective_disable_paste_burst(
+            /*configured*/ false,
+            Some(std::ffi::OsStr::new("task-1")),
+        ));
+        assert!(effective_disable_paste_burst(/*configured*/ true, None));
+        assert!(!effective_disable_paste_burst(/*configured*/ false, None));
+    }
 }
 
 #[cfg(test)]
