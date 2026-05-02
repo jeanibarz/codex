@@ -7016,6 +7016,43 @@ mod tests {
         assert!(!composer.is_in_paste_burst());
     }
 
+    /// Behavior: Looper submits programmatic input as a rapid text write followed immediately by
+    /// Enter. When paste-burst handling is disabled for that managed session, the Enter submits
+    /// instead of being captured as a pasted newline.
+    #[test]
+    fn disabled_paste_burst_allows_immediate_programmatic_enter_submit() {
+        use crossterm::event::KeyCode;
+        use crossterm::event::KeyEvent;
+        use crossterm::event::KeyModifiers;
+
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            /*has_input_focus*/ true,
+            sender,
+            /*enhanced_keys_supported*/ false,
+            "Ask Codex to do anything".to_string(),
+            /*disable_paste_burst*/ true,
+        );
+
+        let mut now = Instant::now();
+        let step = Duration::from_millis(1);
+        for ch in "yes, continue".chars() {
+            let _ = composer.handle_input_basic_with_time(
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                now,
+            );
+            now += step;
+        }
+
+        let (result, _) = composer.handle_submission_with_time(/*should_queue*/ false, now);
+        match result {
+            InputResult::Submitted { text, .. } => assert_eq!(text, "yes, continue"),
+            _ => panic!("expected Submitted"),
+        }
+        assert!(!composer.is_in_paste_burst());
+    }
+
     /// Behavior: a small explicit paste inserts text directly (no placeholder), and the submitted
     /// text matches what is visible in the textarea.
     #[test]

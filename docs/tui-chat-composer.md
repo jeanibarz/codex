@@ -229,7 +229,11 @@ pastey” (e.g. contains whitespace or is long).
 
 ### Disabling burst detection
 
-`ChatComposer` supports `disable_paste_burst` as an escape hatch.
+`ChatComposer` supports `disable_paste_burst` as an escape hatch. `ChatWidget` also forces that
+escape hatch on for Looper-managed sessions (`LOOPER_TASK_ID` is present), because Looper submits
+programmatic input as rapid text followed immediately by Enter. The TUI cannot observe Looper's
+underlying PTY write boundary after terminal event parsing, so treating that key stream as a
+paste burst would capture the Enter as a pasted newline instead of submitting the message.
 
 When enabled:
 
