@@ -646,7 +646,8 @@ pub(crate) async fn run_turn(
                     }
                 }
 
-                let message = "Invalid image in your last message. Please remove it and try again.".to_string();
+                let message = "Invalid image in your last message. Please remove it and try again."
+                    .to_string();
                 let event = EventMsg::Error(ErrorEvent {
                     message: message.clone(),
                     codex_error_info: Some(CodexErrorInfo::BadRequest),

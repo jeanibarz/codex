@@ -24,6 +24,8 @@ use codex_config::ConfigRequirementsToml;
 use codex_config::McpServerConfig;
 use codex_config::McpServerToolConfig;
 use codex_config::types::McpServerTransportConfig;
+use codex_core_skills::SkillsLoadInput;
+use codex_core_skills::SkillsManager;
 use codex_login::CodexAuth;
 use codex_protocol::protocol::HookEventName;
 use codex_protocol::protocol::Product;
@@ -459,18 +461,24 @@ enabled = false
         }]
     );
 
-    let skills_input =
-        crate::skills_load_input_from_config(&config, plugin_outcome.effective_skill_roots());
+    let skills_input = SkillsLoadInput::new(
+        home.path().to_path_buf().abs(),
+        plugin_outcome.effective_plugin_skill_roots(),
+        config.config_layer_stack.clone(),
+        /*bundled_skills_enabled*/ false,
+    );
     let skills_manager =
-        crate::skills::SkillsManager::new(codex_home.abs(), /*bundled_skills_enabled*/ false);
+        SkillsManager::new(codex_home.abs(), /*bundled_skills_enabled*/ false);
     let skills = skills_manager
         .skills_for_config(&skills_input, /*fs*/ None)
         .await;
 
-    assert!(skills
-        .skills
-        .iter()
-        .any(|skill| skill.name == "looper-toolkit:typescript-type-safety"));
+    assert!(
+        skills
+            .skills
+            .iter()
+            .any(|skill| skill.name == "looper-toolkit:typescript-type-safety")
+    );
 }
 
 #[tokio::test]

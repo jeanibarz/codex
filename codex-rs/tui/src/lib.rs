@@ -2233,7 +2233,10 @@ mod tests {
         let marker = temp_dir.path().join("session_start_marker");
         std::fs::write(
             &hook_script,
-            format!("#!/bin/sh\necho session-start-fired > {}\n", marker.display()),
+            format!(
+                "#!/bin/sh\necho session-start-fired > {}\n",
+                marker.display()
+            ),
         )?;
         let settings_file = temp_dir.path().join("settings.json");
         std::fs::write(
@@ -2256,7 +2259,10 @@ mod tests {
         config.settings_file = Some(settings_file);
         let app_server = start_test_embedded_app_server_with_cli_overrides(
             config,
-            vec![("features.codex_hooks".to_string(), toml::Value::Boolean(true))],
+            vec![(
+                "features.codex_hooks".to_string(),
+                toml::Value::Boolean(true),
+            )],
         )
         .await?;
         let response: ThreadStartResponse = app_server
