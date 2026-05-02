@@ -34,8 +34,7 @@ const STOP_INPUT_FIXTURE: &str = "stop.command.input.schema.json";
 const STOP_OUTPUT_FIXTURE: &str = "stop.command.output.schema.json";
 const STOP_FAILURE_INPUT_FIXTURE: &str = "stop-failure.command.input.schema.json";
 const SESSION_END_INPUT_FIXTURE: &str = "session-end.command.input.schema.json";
-const POST_TOOL_USE_FAILURE_INPUT_FIXTURE: &str =
-    "post-tool-use-failure.command.input.schema.json";
+const POST_TOOL_USE_FAILURE_INPUT_FIXTURE: &str = "post-tool-use-failure.command.input.schema.json";
 const NOTIFICATION_INPUT_FIXTURE: &str = "notification.command.input.schema.json";
 const FILE_CHANGED_INPUT_FIXTURE: &str = "file-changed.command.input.schema.json";
 
@@ -808,6 +807,8 @@ fn default_continue() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::FILE_CHANGED_INPUT_FIXTURE;
+    use super::FileChangedCommandInput;
     use super::PERMISSION_REQUEST_INPUT_FIXTURE;
     use super::PERMISSION_REQUEST_OUTPUT_FIXTURE;
     use super::POST_COMPACT_INPUT_FIXTURE;
@@ -818,8 +819,6 @@ mod tests {
     use super::PRE_COMPACT_OUTPUT_FIXTURE;
     use super::PRE_TOOL_USE_INPUT_FIXTURE;
     use super::PRE_TOOL_USE_OUTPUT_FIXTURE;
-    use super::FILE_CHANGED_INPUT_FIXTURE;
-    use super::FileChangedCommandInput;
     use super::PermissionRequestCommandInput;
     use super::PostCompactCommandInput;
     use super::PostToolUseCommandInput;
@@ -969,8 +968,7 @@ mod tests {
         )
         .expect("parse stop input schema");
         let file_changed: Value = serde_json::from_slice(
-            &schema_json::<FileChangedCommandInput>()
-                .expect("serialize file changed input schema"),
+            &schema_json::<FileChangedCommandInput>().expect("serialize file changed input schema"),
         )
         .expect("parse file changed input schema");
 

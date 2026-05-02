@@ -12,9 +12,7 @@ async fn exec_settings_file_hooks_fire_for_shell_command() -> anyhow::Result<()>
     let hook_log = test.cwd_path().join("hook-fired.jsonl");
     let settings_path = test.cwd_path().join("settings.json");
     let hook_log_display = hook_log.display();
-    let hook_command = format!(
-        "payload=$(cat); printf '%s\\n' \"$payload\" >> {hook_log_display}"
-    );
+    let hook_command = format!("payload=$(cat); printf '%s\\n' \"$payload\" >> {hook_log_display}");
     let settings = serde_json::json!({
         "hooks": {
             "PreToolUse": [{

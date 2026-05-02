@@ -217,6 +217,7 @@ fn unknown_requirement_source_hooks_stay_managed() {
             program: String::new(),
             args: Vec::new(),
         },
+        /*settings_file*/ None,
     );
 
     assert_eq!(engine.handlers.len(), 1);

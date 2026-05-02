@@ -212,8 +212,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::Result;
     use crate::marketplace::find_marketplace_manifest_path;
+    use anyhow::Result;
     use pretty_assertions::assert_eq;
     use tempfile::TempDir;
 

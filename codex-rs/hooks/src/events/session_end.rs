@@ -31,7 +31,7 @@ pub enum SessionEndReason {
 }
 
 impl SessionEndReason {
-    fn as_str(&self) -> &'static str {
+    fn as_str(self) -> &'static str {
         match self {
             SessionEndReason::Other => "other",
             SessionEndReason::Clear => "clear",
