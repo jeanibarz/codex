@@ -2180,8 +2180,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-builtin-mcps"
+version = "0.125.0-alpha.3"
+dependencies = [
+ "anyhow",
+ "codex-memories-mcp",
+ "codex-utils-absolute-path",
+ "pretty_assertions",
+ "tokio",
+]
+
+[[package]]
 name = "codex-bwrap"
-version = "0.0.0"
+version = "0.125.0-alpha.3"
 dependencies = [
  "cc",
  "libc",
@@ -3157,7 +3168,7 @@ dependencies = [
 
 [[package]]
 name = "codex-memories-mcp"
-version = "0.0.0"
+version = "0.125.0-alpha.3"
 dependencies = [
  "anyhow",
  "codex-utils-absolute-path",
@@ -3223,7 +3234,7 @@ dependencies = [
 
 [[package]]
 name = "codex-message-history"
-version = "0.0.0"
+version = "0.125.0-alpha.3"
 dependencies = [
  "codex-config",
  "pretty_assertions",

@@ -70,9 +70,7 @@ impl ConfiguredHandler {
             codex_protocol::protocol::HookEventName::PostToolUse => "post-tool-use",
             codex_protocol::protocol::HookEventName::PreCompact => "pre-compact",
             codex_protocol::protocol::HookEventName::PostCompact => "post-compact",
-            codex_protocol::protocol::HookEventName::PostToolUseFailure => {
-                "post-tool-use-failure"
-            }
+            codex_protocol::protocol::HookEventName::PostToolUseFailure => "post-tool-use-failure",
             codex_protocol::protocol::HookEventName::Notification => "notification",
             codex_protocol::protocol::HookEventName::SessionStart => "session-start",
             codex_protocol::protocol::HookEventName::SessionEnd => "session-end",
@@ -355,17 +353,11 @@ impl ClaudeHooksEngine {
         crate::events::post_tool_use_failure::run(&self.handlers, &self.shell, request).await
     }
 
-    pub(crate) fn preview_file_changed(
-        &self,
-        request: &FileChangedRequest,
-    ) -> Vec<HookRunSummary> {
+    pub(crate) fn preview_file_changed(&self, request: &FileChangedRequest) -> Vec<HookRunSummary> {
         crate::events::file_changed::preview(&self.handlers, request)
     }
 
-    pub(crate) async fn run_file_changed(
-        &self,
-        request: FileChangedRequest,
-    ) -> FileChangedOutcome {
+    pub(crate) async fn run_file_changed(&self, request: FileChangedRequest) -> FileChangedOutcome {
         crate::events::file_changed::run(&self.handlers, &self.shell, request).await
     }
 }

@@ -106,11 +106,7 @@ impl ClaudePermissionRules {
         &self.warnings
     }
 
-    pub(crate) fn evaluate(
-        &self,
-        tool_name: &str,
-        command: &str,
-    ) -> Option<ClaudePermissionMatch> {
+    pub(crate) fn evaluate(&self, tool_name: &str, command: &str) -> Option<ClaudePermissionMatch> {
         let mut selected: Option<&ClaudePermissionRule> = None;
 
         for rule in &self.rules {
@@ -266,7 +262,10 @@ fn parse_permission_rule(
 }
 
 fn claude_settings_fallback_paths(config_folder: &Path) -> Vec<PathBuf> {
-    let root = if config_folder.file_name().is_some_and(|name| name == ".codex") {
+    let root = if config_folder
+        .file_name()
+        .is_some_and(|name| name == ".codex")
+    {
         config_folder.parent().unwrap_or(config_folder)
     } else {
         config_folder
@@ -308,9 +307,7 @@ fn wildcard_pattern_matches(pattern: &str, value: &str) -> bool {
         }
     }
 
-    if anchored_end
-        && let Some(last_non_empty) = parts.iter().rev().find(|part| !part.is_empty())
-    {
+    if anchored_end && let Some(last_non_empty) = parts.iter().rev().find(|part| !part.is_empty()) {
         return value.ends_with(last_non_empty);
     }
 
@@ -368,7 +365,10 @@ mod tests {
             ClaudePermissionDecision::Forbidden
         );
         assert_eq!(
-            rules.evaluate("Bash", "ls -la").expect("allow match").decision,
+            rules
+                .evaluate("Bash", "ls -la")
+                .expect("allow match")
+                .decision,
             ClaudePermissionDecision::Allow
         );
     }

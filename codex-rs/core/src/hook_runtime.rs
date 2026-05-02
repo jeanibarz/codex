@@ -665,10 +665,7 @@ pub(crate) async fn run_session_bootstrap_notification_hooks(
     for run in sess.hooks().preview_notification(&request) {
         let event = codex_protocol::protocol::Event {
             id: sub_id.clone(),
-            msg: EventMsg::HookStarted(HookStartedEvent {
-                turn_id: None,
-                run,
-            }),
+            msg: EventMsg::HookStarted(HookStartedEvent { turn_id: None, run }),
         };
         sess.send_event_raw(event).await;
     }
@@ -731,10 +728,7 @@ pub(crate) async fn run_session_end_hooks(
     for run in sess.hooks().preview_session_end(&request) {
         let event = codex_protocol::protocol::Event {
             id: sub_id.clone(),
-            msg: EventMsg::HookStarted(HookStartedEvent {
-                turn_id: None,
-                run,
-            }),
+            msg: EventMsg::HookStarted(HookStartedEvent { turn_id: None, run }),
         };
         sess.send_event_raw(event).await;
     }

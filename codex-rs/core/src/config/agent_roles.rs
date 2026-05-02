@@ -112,13 +112,9 @@ pub(crate) async fn load_agent_roles(
             // Claude compatibility: also discover agent roles from `.claude/agents/` at the
             // layer's parent directory. For the User layer this is `$HOME/.claude/agents`;
             // for the Project layer it is `<repo-root>/.claude/agents`.
-            if let Some(claude_agents_dir) = config_folder
-                .as_path()
-                .parent()
-                .and_then(|parent| {
-                    AbsolutePathBuf::from_absolute_path(parent.join(".claude").join("agents")).ok()
-                })
-            {
+            if let Some(claude_agents_dir) = config_folder.as_path().parent().and_then(|parent| {
+                AbsolutePathBuf::from_absolute_path(parent.join(".claude").join("agents")).ok()
+            }) {
                 for (role_name, role) in discover_agent_roles_in_dir(
                     fs,
                     &claude_agents_dir,
