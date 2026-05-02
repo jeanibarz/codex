@@ -1,6 +1,6 @@
+use crate::marketplace::MarketplacePluginSource;
 use crate::marketplace::find_marketplace_manifest_path;
 use crate::marketplace::find_marketplace_plugin;
-use crate::marketplace::MarketplacePluginSource;
 use codex_plugin::PluginId;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use serde::Deserialize;

@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use codex_protocol::ThreadId;
 use codex_protocol::protocol::FileChange;
 use codex_protocol::protocol::HookCompletedEvent;
 use codex_protocol::protocol::HookEventName;
@@ -12,14 +13,13 @@ use codex_protocol::protocol::HookOutputEntry;
 use codex_protocol::protocol::HookOutputEntryKind;
 use codex_protocol::protocol::HookRunStatus;
 use codex_protocol::protocol::HookRunSummary;
-use codex_protocol::ThreadId;
 use codex_utils_absolute_path::AbsolutePathBuf;
 
 use super::common;
-use crate::engine::command_runner::CommandRunResult;
-use crate::engine::dispatcher;
 use crate::engine::CommandShell;
 use crate::engine::ConfiguredHandler;
+use crate::engine::command_runner::CommandRunResult;
+use crate::engine::dispatcher;
 use crate::schema::FileChangedCommandInput;
 use crate::schema::NullableString;
 

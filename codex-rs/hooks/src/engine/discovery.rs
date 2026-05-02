@@ -344,12 +344,13 @@ pub(crate) fn append_settings_file_handlers(result: &mut DiscoveryResult, settin
         }
     };
 
-    let disabled_hook_keys: HashSet<String> = HashSet::new();
+    let hook_states = HashMap::new();
     let source = HookHandlerSource {
         path: &source_path,
         key_source: source_path.display().to_string(),
         source: HookSource::SessionFlags,
-        disabled_hook_keys: &disabled_hook_keys,
+        is_managed: false,
+        hook_states: &hook_states,
         env: HashMap::new(),
         plugin_id: None,
     };

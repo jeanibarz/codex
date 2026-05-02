@@ -33,7 +33,7 @@ fn emit_codex_build_version() {
         .unwrap_or(false);
 
     let dirty_suffix = if is_dirty { ".dirty" } else { "" };
-    let build_version = format!("{base_version}+looper.{git_sha}{dirty_suffix}");
+    let build_version = format!("{base_version}+kookr.{git_sha}{dirty_suffix}");
     println!("cargo:rustc-env=CODEX_BUILD_VERSION={build_version}");
 }
 
@@ -42,13 +42,13 @@ fn register_rerun_inputs(repo_root: &Path) {
     println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
     println!("cargo:rerun-if-changed={}", git_dir.join("index").display());
 
-    if let Ok(head_ref) = std::fs::read_to_string(git_dir.join("HEAD")) {
-        if let Some(ref_path) = head_ref.strip_prefix("ref: ") {
-            println!(
-                "cargo:rerun-if-changed={}",
-                git_dir.join(ref_path.trim()).display()
-            );
-        }
+    if let Ok(head_ref) = std::fs::read_to_string(git_dir.join("HEAD"))
+        && let Some(ref_path) = head_ref.strip_prefix("ref: ")
+    {
+        println!(
+            "cargo:rerun-if-changed={}",
+            git_dir.join(ref_path.trim()).display()
+        );
     }
 }
 

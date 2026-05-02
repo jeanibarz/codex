@@ -208,7 +208,7 @@ pub fn remote_installed_plugins_to_config(
 fn claude_plugins_home_dir(config_layer_stack: &ConfigLayerStack) -> Option<PathBuf> {
     config_layer_stack
         .get_user_layer()
-        .and_then(|layer| layer.config_folder())
+        .and_then(codex_config::ConfigLayerEntry::config_folder)
         .and_then(|config_folder| config_folder.as_path().parent().map(Path::to_path_buf))
 }
 
@@ -630,7 +630,7 @@ async fn load_plugin_from_root(
     loaded_plugin.skill_roots = plugin_skill_roots(&plugin_root, manifest_paths);
     let resolved_skills = load_plugin_skills(
         &plugin_root,
-        &loaded_plugin_id,
+        plugin_id,
         manifest_paths,
         restriction_product,
         skill_config_rules,
@@ -659,12 +659,8 @@ async fn load_plugin_from_root(
     loaded_plugin.mcp_servers = mcp_servers;
     loaded_plugin.apps = load_plugin_apps(plugin_root.as_path()).await;
     if plugin_hooks_enabled {
-        let (hook_sources, hook_load_warnings) = load_plugin_hooks(
-            &plugin_root,
-            plugin_id,
-            &plugin_data_root,
-            manifest_paths,
-        );
+        let (hook_sources, hook_load_warnings) =
+            load_plugin_hooks(&plugin_root, plugin_id, &plugin_data_root, manifest_paths);
         loaded_plugin.hook_sources = hook_sources;
         loaded_plugin.hook_load_warnings = hook_load_warnings;
     }
