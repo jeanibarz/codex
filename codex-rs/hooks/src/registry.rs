@@ -278,6 +278,20 @@ impl Hooks {
     pub async fn run_file_changed(&self, request: FileChangedRequest) -> FileChangedOutcome {
         self.engine.run_file_changed(request).await
     }
+
+    pub fn preview_instructions_loaded(
+        &self,
+        request: &crate::events::instructions_loaded::InstructionsLoadedRequest,
+    ) -> Vec<codex_protocol::protocol::HookRunSummary> {
+        self.engine.preview_instructions_loaded(request)
+    }
+
+    pub async fn run_instructions_loaded(
+        &self,
+        request: crate::events::instructions_loaded::InstructionsLoadedRequest,
+    ) -> crate::events::instructions_loaded::InstructionsLoadedOutcome {
+        self.engine.run_instructions_loaded(request).await
+    }
 }
 
 pub fn list_hooks(config: HooksConfig) -> HookListOutcome {

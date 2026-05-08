@@ -970,6 +970,7 @@ fn analytics_hook_event_name(event_name: HookEventName) -> &'static str {
         HookEventName::Stop => "Stop",
         HookEventName::StopFailure => "StopFailure",
         HookEventName::FileChanged => "FileChanged",
+        HookEventName::InstructionsLoaded => "InstructionsLoaded",
     }
 }
 

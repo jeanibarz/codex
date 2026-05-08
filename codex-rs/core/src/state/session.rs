@@ -16,6 +16,15 @@ use codex_protocol::protocol::TokenUsageInfo;
 use codex_protocol::protocol::TurnContextItem;
 use codex_utils_output_truncation::TruncationPolicy;
 
+/// Snapshot consumed by the `InstructionsLoaded` hook. Captured once during
+/// session bootstrap so the hook handler can report which AGENTS.md /
+/// CLAUDE.md files reached the model and how big the assembled string was.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingInstructionsLoaded {
+    pub(crate) instruction_paths: Vec<String>,
+    pub(crate) instructions_byte_len: u64,
+}
+
 /// Persistent, session-scoped state previously stored directly on `Session`.
 pub(crate) struct SessionState {
     pub(crate) session_configuration: SessionConfiguration,
@@ -32,6 +41,9 @@ pub(crate) struct SessionState {
     pub(crate) startup_prewarm: Option<SessionStartupPrewarmHandle>,
     pub(crate) active_connector_selection: HashSet<String>,
     pub(crate) pending_session_start_source: Option<codex_hooks::SessionStartSource>,
+    /// One-shot payload for the `InstructionsLoaded` hook, set during session
+    /// bootstrap and consumed alongside the first `SessionStart` dispatch.
+    pub(crate) pending_instructions_loaded: Option<PendingInstructionsLoaded>,
     granted_permissions: Option<AdditionalPermissionProfile>,
     next_turn_is_first: bool,
 }
@@ -51,6 +63,7 @@ impl SessionState {
             startup_prewarm: None,
             active_connector_selection: HashSet::new(),
             pending_session_start_source: None,
+            pending_instructions_loaded: None,
             granted_permissions: None,
             next_turn_is_first: true,
         }
@@ -216,6 +229,19 @@ impl SessionState {
         &mut self,
     ) -> Option<codex_hooks::SessionStartSource> {
         self.pending_session_start_source.take()
+    }
+
+    pub(crate) fn set_pending_instructions_loaded(
+        &mut self,
+        value: Option<PendingInstructionsLoaded>,
+    ) {
+        self.pending_instructions_loaded = value;
+    }
+
+    pub(crate) fn take_pending_instructions_loaded(
+        &mut self,
+    ) -> Option<PendingInstructionsLoaded> {
+        self.pending_instructions_loaded.take()
     }
 
     pub(crate) fn record_granted_permissions(&mut self, permissions: AdditionalPermissionProfile) {

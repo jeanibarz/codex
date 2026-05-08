@@ -501,6 +501,22 @@ impl Codex {
         let user_instructions = AgentsMdManager::new(&config)
             .user_instructions(primary_environment.as_deref())
             .await;
+        let instructions_byte_len = user_instructions
+            .as_deref()
+            .map(|s| s.len() as u64)
+            .unwrap_or(0);
+        let instruction_paths: Vec<String> = match primary_environment.as_deref() {
+            Some(env) => {
+                let fs = env.get_filesystem();
+                AgentsMdManager::new(&config)
+                    .instruction_sources(fs.as_ref())
+                    .await
+                    .into_iter()
+                    .map(|p| p.display().to_string())
+                    .collect()
+            }
+            None => Vec::new(),
+        };
 
         let exec_policy = if crate::guardian::is_guardian_reviewer_source(&session_source) {
             // Guardian review should rely on the built-in shell safety checks,
@@ -662,6 +678,16 @@ impl Codex {
             error!("Failed to create session: {e:#}");
             map_session_init_error(&e, &config.codex_home)
         })?;
+        if !instruction_paths.is_empty() || instructions_byte_len > 0 {
+            session
+                .set_pending_instructions_loaded(Some(
+                    crate::state::PendingInstructionsLoaded {
+                        instruction_paths,
+                        instructions_byte_len,
+                    },
+                ))
+                .await;
+        }
         let thread_id = session.conversation_id;
 
         // This task will run until Op::Shutdown is received.
@@ -3297,6 +3323,21 @@ impl Session {
     ) -> Option<codex_hooks::SessionStartSource> {
         let mut state = self.state.lock().await;
         state.take_pending_session_start_source()
+    }
+
+    pub(crate) async fn set_pending_instructions_loaded(
+        &self,
+        value: Option<crate::state::PendingInstructionsLoaded>,
+    ) {
+        let mut state = self.state.lock().await;
+        state.set_pending_instructions_loaded(value);
+    }
+
+    pub(crate) async fn take_pending_instructions_loaded(
+        &self,
+    ) -> Option<crate::state::PendingInstructionsLoaded> {
+        let mut state = self.state.lock().await;
+        state.take_pending_instructions_loaded()
     }
 
     fn show_raw_agent_reasoning(&self) -> bool {

@@ -672,6 +672,7 @@ fn event_label(event_name: HookEventName) -> &'static str {
         HookEventName::Stop => "Stop",
         HookEventName::StopFailure => "StopFailure",
         HookEventName::FileChanged => "FileChanged",
+        HookEventName::InstructionsLoaded => "InstructionsLoaded",
     }
 }
 
@@ -690,6 +691,7 @@ fn event_description(event_name: HookEventName) -> &'static str {
         HookEventName::Stop => "Right before Codex ends its turn",
         HookEventName::StopFailure => "When Codex's turn ends with a failure",
         HookEventName::FileChanged => "After a file is changed",
+        HookEventName::InstructionsLoaded => "After AGENTS.md / CLAUDE.md instructions load",
     }
 }
 

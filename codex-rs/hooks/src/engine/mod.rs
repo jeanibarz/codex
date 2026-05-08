@@ -79,6 +79,7 @@ impl ConfiguredHandler {
             codex_protocol::protocol::HookEventName::Stop => "stop",
             codex_protocol::protocol::HookEventName::StopFailure => "stop-failure",
             codex_protocol::protocol::HookEventName::FileChanged => "file-changed",
+            codex_protocol::protocol::HookEventName::InstructionsLoaded => "instructions-loaded",
         }
     }
 }
@@ -352,6 +353,20 @@ impl ClaudeHooksEngine {
 
     pub(crate) async fn run_file_changed(&self, request: FileChangedRequest) -> FileChangedOutcome {
         crate::events::file_changed::run(&self.handlers, &self.shell, request).await
+    }
+
+    pub(crate) fn preview_instructions_loaded(
+        &self,
+        request: &crate::events::instructions_loaded::InstructionsLoadedRequest,
+    ) -> Vec<HookRunSummary> {
+        crate::events::instructions_loaded::preview(&self.handlers, request)
+    }
+
+    pub(crate) async fn run_instructions_loaded(
+        &self,
+        request: crate::events::instructions_loaded::InstructionsLoadedRequest,
+    ) -> crate::events::instructions_loaded::InstructionsLoadedOutcome {
+        crate::events::instructions_loaded::run(&self.handlers, &self.shell, request).await
     }
 }
 

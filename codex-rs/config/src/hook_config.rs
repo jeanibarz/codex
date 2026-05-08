@@ -57,6 +57,8 @@ pub struct HookEventsToml {
     pub stop_failure: Vec<MatcherGroup>,
     #[serde(rename = "FileChanged", default)]
     pub file_changed: Vec<MatcherGroup>,
+    #[serde(rename = "InstructionsLoaded", default)]
+    pub instructions_loaded: Vec<MatcherGroup>,
 }
 
 impl HookEventsToml {
@@ -75,6 +77,7 @@ impl HookEventsToml {
             stop,
             stop_failure,
             file_changed,
+            instructions_loaded,
         } = self;
         pre_tool_use.is_empty()
             && permission_request.is_empty()
@@ -89,6 +92,7 @@ impl HookEventsToml {
             && stop.is_empty()
             && stop_failure.is_empty()
             && file_changed.is_empty()
+            && instructions_loaded.is_empty()
     }
 
     pub fn handler_count(&self) -> usize {
@@ -106,6 +110,7 @@ impl HookEventsToml {
             stop,
             stop_failure,
             file_changed,
+            instructions_loaded,
         } = self;
         [
             pre_tool_use,
@@ -121,6 +126,7 @@ impl HookEventsToml {
             stop,
             stop_failure,
             file_changed,
+            instructions_loaded,
         ]
         .into_iter()
         .flatten()
@@ -128,7 +134,7 @@ impl HookEventsToml {
         .sum()
     }
 
-    pub fn into_matcher_groups(self) -> [(HookEventName, Vec<MatcherGroup>); 13] {
+    pub fn into_matcher_groups(self) -> [(HookEventName, Vec<MatcherGroup>); 14] {
         [
             (HookEventName::PreToolUse, self.pre_tool_use),
             (HookEventName::PermissionRequest, self.permission_request),
@@ -146,6 +152,7 @@ impl HookEventsToml {
             (HookEventName::Stop, self.stop),
             (HookEventName::StopFailure, self.stop_failure),
             (HookEventName::FileChanged, self.file_changed),
+            (HookEventName::InstructionsLoaded, self.instructions_loaded),
         ]
     }
 }

@@ -127,7 +127,7 @@ pub(crate) async fn run_pending_session_start_hooks(
     };
     let hooks = sess.hooks();
     let preview_runs = hooks.preview_session_start(&request);
-    run_context_injecting_hook(
+    let should_stop = run_context_injecting_hook(
         sess,
         turn_context,
         preview_runs,
@@ -135,7 +135,39 @@ pub(crate) async fn run_pending_session_start_hooks(
     )
     .await
     .record_additional_contexts(sess, turn_context)
-    .await
+    .await;
+
+    // Dispatch InstructionsLoaded right after SessionStart so observability
+    // tooling sees both lifecycle markers within the same bootstrap window.
+    // Fire-and-forget: handlers cannot block the turn even if SessionStart
+    // already requested a stop.
+    if let Some(snapshot) = sess.take_pending_instructions_loaded().await {
+        run_instructions_loaded_hooks(sess, turn_context, snapshot).await;
+    }
+
+    should_stop
+}
+
+async fn run_instructions_loaded_hooks(
+    sess: &Arc<Session>,
+    turn_context: &Arc<TurnContext>,
+    snapshot: crate::state::PendingInstructionsLoaded,
+) {
+    let request = codex_hooks::InstructionsLoadedRequest {
+        session_id: sess.conversation_id,
+        cwd: turn_context.cwd.to_path_buf(),
+        transcript_path: sess.hook_transcript_path().await,
+        model: turn_context.model_info.slug.clone(),
+        permission_mode: hook_permission_mode(turn_context),
+        instruction_paths: snapshot.instruction_paths,
+        instructions_byte_len: snapshot.instructions_byte_len,
+    };
+
+    let preview_runs = sess.hooks().preview_instructions_loaded(&request);
+    emit_hook_started_events(sess, turn_context, preview_runs).await;
+
+    let outcome = sess.hooks().run_instructions_loaded(request).await;
+    emit_hook_completed_events(sess, turn_context, outcome.hook_events).await;
 }
 
 /// Runs matching `PreToolUse` hooks before a tool executes.
@@ -575,6 +607,7 @@ fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str); 
         HookEventName::Stop => "Stop",
         HookEventName::StopFailure => "StopFailure",
         HookEventName::FileChanged => "FileChanged",
+        HookEventName::InstructionsLoaded => "InstructionsLoaded",
     };
     let hook_source = match run.source {
         HookSource::System => "system",

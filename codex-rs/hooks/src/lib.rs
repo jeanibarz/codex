@@ -15,7 +15,7 @@ pub use declarations::PluginHookDeclaration;
 pub use declarations::plugin_hook_declarations;
 pub use engine::HookListEntry;
 /// Hook event names as they appear in hooks JSON and config files.
-pub const HOOK_EVENT_NAMES: [&str; 13] = [
+pub const HOOK_EVENT_NAMES: [&str; 14] = [
     "PreToolUse",
     "PermissionRequest",
     "PostToolUse",
@@ -29,6 +29,7 @@ pub const HOOK_EVENT_NAMES: [&str; 13] = [
     "StopFailure",
     "Notification",
     "FileChanged",
+    "InstructionsLoaded",
 ];
 
 /// Hook event names whose matcher fields are meaningful during dispatch.
@@ -53,6 +54,8 @@ pub use events::compact::PreCompactRequest;
 pub use events::compact::StatelessHookOutcome;
 pub use events::file_changed::FileChangedOutcome;
 pub use events::file_changed::FileChangedRequest;
+pub use events::instructions_loaded::InstructionsLoadedOutcome;
+pub use events::instructions_loaded::InstructionsLoadedRequest;
 pub use events::notification::NotificationOutcome;
 pub use events::notification::NotificationRequest;
 pub use events::permission_request::PermissionRequestDecision;
@@ -111,6 +114,7 @@ pub fn hook_event_key_label(event_name: HookEventName) -> &'static str {
         HookEventName::StopFailure => "stop_failure",
         HookEventName::Notification => "notification",
         HookEventName::FileChanged => "file_changed",
+        HookEventName::InstructionsLoaded => "instructions_loaded",
     }
 }
 

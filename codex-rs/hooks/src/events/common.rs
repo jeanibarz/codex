@@ -112,7 +112,8 @@ pub(crate) fn matcher_pattern_for_event(
         | HookEventName::SessionEnd
         | HookEventName::UserPromptSubmit
         | HookEventName::Stop
-        | HookEventName::StopFailure => None,
+        | HookEventName::StopFailure
+        | HookEventName::InstructionsLoaded => None,
     }
 }
 

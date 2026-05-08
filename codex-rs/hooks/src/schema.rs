@@ -37,6 +37,7 @@ const SESSION_END_INPUT_FIXTURE: &str = "session-end.command.input.schema.json";
 const POST_TOOL_USE_FAILURE_INPUT_FIXTURE: &str = "post-tool-use-failure.command.input.schema.json";
 const NOTIFICATION_INPUT_FIXTURE: &str = "notification.command.input.schema.json";
 const FILE_CHANGED_INPUT_FIXTURE: &str = "file-changed.command.input.schema.json";
+const INSTRUCTIONS_LOADED_INPUT_FIXTURE: &str = "instructions-loaded.command.input.schema.json";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(transparent)]
@@ -543,6 +544,22 @@ pub(crate) struct NotificationCommandInput {
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(rename = "instructions-loaded.command.input")]
+pub(crate) struct InstructionsLoadedCommandInput {
+    pub session_id: String,
+    pub transcript_path: NullableString,
+    pub cwd: String,
+    #[schemars(schema_with = "instructions_loaded_hook_event_name_schema")]
+    pub hook_event_name: String,
+    pub model: String,
+    #[schemars(schema_with = "permission_mode_schema")]
+    pub permission_mode: String,
+    pub instruction_paths: Vec<String>,
+    pub instructions_byte_len: u64,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[schemars(rename = "file-changed.command.input")]
 pub(crate) struct FileChangedCommandInput {
     pub session_id: String,
@@ -648,6 +665,10 @@ pub fn write_schema_fixtures(schema_root: &Path) -> anyhow::Result<()> {
     write_schema(
         &generated_dir.join(FILE_CHANGED_INPUT_FIXTURE),
         schema_json::<FileChangedCommandInput>()?,
+    )?;
+    write_schema(
+        &generated_dir.join(INSTRUCTIONS_LOADED_INPUT_FIXTURE),
+        schema_json::<InstructionsLoadedCommandInput>()?,
     )?;
 
     Ok(())
@@ -760,6 +781,10 @@ fn file_changed_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
     string_const_schema("FileChanged")
 }
 
+fn instructions_loaded_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
+    string_const_schema("InstructionsLoaded")
+}
+
 fn permission_mode_schema(_gen: &mut SchemaGenerator) -> Schema {
     string_enum_schema(&[
         "default",
@@ -809,6 +834,7 @@ fn default_continue() -> bool {
 mod tests {
     use super::FILE_CHANGED_INPUT_FIXTURE;
     use super::FileChangedCommandInput;
+    use super::INSTRUCTIONS_LOADED_INPUT_FIXTURE;
     use super::PERMISSION_REQUEST_INPUT_FIXTURE;
     use super::PERMISSION_REQUEST_OUTPUT_FIXTURE;
     use super::POST_COMPACT_INPUT_FIXTURE;
@@ -891,6 +917,9 @@ mod tests {
             FILE_CHANGED_INPUT_FIXTURE => {
                 include_str!("../schema/generated/file-changed.command.input.schema.json")
             }
+            INSTRUCTIONS_LOADED_INPUT_FIXTURE => {
+                include_str!("../schema/generated/instructions-loaded.command.input.schema.json")
+            }
             _ => panic!("unexpected fixture name: {name}"),
         }
     }
@@ -923,6 +952,7 @@ mod tests {
             STOP_INPUT_FIXTURE,
             STOP_OUTPUT_FIXTURE,
             FILE_CHANGED_INPUT_FIXTURE,
+            INSTRUCTIONS_LOADED_INPUT_FIXTURE,
         ] {
             let expected = normalize_newlines(expected_fixture(fixture));
             let actual = std::fs::read_to_string(schema_root.join("generated").join(fixture))

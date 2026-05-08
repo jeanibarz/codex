@@ -475,12 +475,14 @@ fn map_hooks_requirements_to_api(hooks: ManagedHooksRequirementsToml) -> Managed
         user_prompt_submit,
         stop,
         // Claude-compat extensions (PostToolUseFailure, Notification, SessionEnd,
-        // StopFailure, FileChanged) are not yet exported through the app-server API.
+        // StopFailure, FileChanged, InstructionsLoaded) are not yet exported
+        // through the app-server API.
         post_tool_use_failure: _,
         notification: _,
         session_end: _,
         stop_failure: _,
         file_changed: _,
+        instructions_loaded: _,
     } = hooks;
 
     ManagedHooksRequirements {

@@ -1467,6 +1467,7 @@ pub enum HookEventName {
     Stop,
     StopFailure,
     FileChanged,
+    InstructionsLoaded,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
