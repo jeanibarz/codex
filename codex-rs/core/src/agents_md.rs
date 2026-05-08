@@ -16,6 +16,8 @@
 //! 3.  We do **not** walk past the project root.
 
 use crate::config::Config;
+use crate::rules::discover_rules;
+use crate::rules::render_rules;
 use codex_app_server_protocol::ConfigLayerSource;
 use codex_config::ConfigLayerStackOrdering;
 use codex_config::default_project_root_markers;
@@ -41,6 +43,9 @@ pub const LOCAL_AGENTS_MD_FILENAME: &str = "AGENTS.override.md";
 /// When both `Config::instructions` and AGENTS.md docs are present, they will
 /// be concatenated with the following separator.
 const AGENTS_MD_SEPARATOR: &str = "\n\n--- project-doc ---\n\n";
+
+/// Separator placed before conditional rules appended to user instructions.
+const CONDITIONAL_RULES_SEPARATOR: &str = "\n\n";
 
 /// Resolves AGENTS.md files into model-visible user instructions and source
 /// paths.
@@ -119,11 +124,40 @@ impl<'a> AgentsMdManager<'a> {
             output.push_str(HIERARCHICAL_AGENTS_MESSAGE);
         }
 
+        match self.read_conditional_rules(fs).await {
+            Ok(Some(rules_block)) => {
+                if !output.is_empty() {
+                    output.push_str(CONDITIONAL_RULES_SEPARATOR);
+                }
+                output.push_str(&rules_block);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                error!("error trying to discover conditional rules: {e:#}");
+            }
+        }
+
         if !output.is_empty() {
             Some(output)
         } else {
             None
         }
+    }
+
+    async fn read_conditional_rules(
+        &self,
+        fs: &dyn ExecutorFileSystem,
+    ) -> io::Result<Option<String>> {
+        let max_bytes = self.config.project_doc_max_bytes;
+        if max_bytes == 0 {
+            return Ok(None);
+        }
+        let mut cwd = self.config.cwd.clone();
+        if let Ok(canon) = normalize_path(&cwd) {
+            cwd = AbsolutePathBuf::try_from(canon)?;
+        }
+        let rules = discover_rules(&cwd, fs, max_bytes).await?;
+        Ok(render_rules(&rules))
     }
 
     /// Returns all instruction source files included in the current config.
