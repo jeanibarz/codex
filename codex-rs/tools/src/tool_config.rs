@@ -123,6 +123,7 @@ pub struct ToolsConfig {
     pub max_concurrent_threads_per_session: Option<usize>,
     pub wait_agent_min_timeout_ms: Option<i64>,
     pub request_user_input_available_modes: Vec<ModeKind>,
+    pub active_collaboration_mode: Option<ModeKind>,
     pub experimental_supported_tools: Vec<String>,
     pub agent_jobs_tools: bool,
     pub agent_jobs_worker_tools: bool,
@@ -261,6 +262,7 @@ impl ToolsConfig {
             max_concurrent_threads_per_session: None,
             wait_agent_min_timeout_ms: None,
             request_user_input_available_modes: request_user_input_available_modes(features),
+            active_collaboration_mode: None,
             experimental_supported_tools: model_info.experimental_supported_tools.clone(),
             agent_jobs_tools: include_agent_jobs,
             agent_jobs_worker_tools,
@@ -330,6 +332,11 @@ impl ToolsConfig {
         wait_agent_min_timeout_ms: Option<i64>,
     ) -> Self {
         self.wait_agent_min_timeout_ms = wait_agent_min_timeout_ms;
+        self
+    }
+
+    pub fn with_active_collaboration_mode(mut self, active_collaboration_mode: ModeKind) -> Self {
+        self.active_collaboration_mode = Some(active_collaboration_mode);
         self
     }
 
