@@ -348,8 +348,8 @@ pub(crate) fn append_settings_file_handlers(result: &mut DiscoveryResult, settin
     let source = HookHandlerSource {
         path: &source_path,
         key_source: source_path.display().to_string(),
-        source: HookSource::SessionFlags,
-        is_managed: false,
+        source: HookSource::SupervisorSettings,
+        is_managed: true,
         hook_states: &hook_states,
         env: HashMap::new(),
         plugin_id: None,

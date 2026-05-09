@@ -48,6 +48,7 @@ v2_enum_from_core!(
         Project,
         Mdm,
         SessionFlags,
+        SupervisorSettings,
         Plugin,
         CloudRequirements,
         LegacyManagedConfigFile,
