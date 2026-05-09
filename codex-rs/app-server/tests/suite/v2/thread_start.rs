@@ -314,6 +314,7 @@ async fn thread_start_inherits_settings_file_hooks_from_embedded_process() -> Re
         thread_config_loader: Arc::new(NoopThreadConfigLoader),
         feedback: CodexFeedback::new(),
         log_db: None,
+        state_db: None,
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
         config_warnings: Vec::new(),
         session_source: SessionSource::Cli,
