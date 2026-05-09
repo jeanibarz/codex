@@ -17,6 +17,7 @@ use codex_tools::ToolSpec;
 
 pub struct RequestUserInputHandler {
     pub available_modes: Vec<ModeKind>,
+    pub active_mode: Option<ModeKind>,
 }
 
 #[async_trait::async_trait]
@@ -28,6 +29,12 @@ impl ToolExecutor<ToolInvocation> for RequestUserInputHandler {
     }
 
     fn spec(&self) -> Option<ToolSpec> {
+        if let Some(active_mode) = self.active_mode
+            && !self.available_modes.contains(&active_mode)
+        {
+            return None;
+        }
+
         Some(create_request_user_input_tool(
             request_user_input_tool_description(&self.available_modes),
         ))
