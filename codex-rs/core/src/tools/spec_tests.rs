@@ -10,6 +10,7 @@ use codex_features::Features;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_models_manager::bundled_models_response;
 use codex_models_manager::model_info::with_config_overrides;
+use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::PermissionProfile;
@@ -362,6 +363,69 @@ async fn assert_model_tools(
         .map(ToolSpec::name)
         .collect::<Vec<_>>();
     assert_eq!(&tool_names, &expected_tools,);
+}
+
+async fn model_visible_tool_names_for_mode(features: &Features, mode: ModeKind) -> Vec<String> {
+    let model_info = model_info_from_models_json("gpt-5.4").await;
+    let available_models = Vec::new();
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features,
+        image_generation_tool_auth_allowed: true,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::Cli,
+        permission_profile: &PermissionProfile::Disabled,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    })
+    .with_active_collaboration_mode(mode);
+    let router = ToolRouter::from_config(
+        &tools_config,
+        ToolRouterParams {
+            mcp_tools: None,
+            deferred_mcp_tools: None,
+            unavailable_called_tools: Vec::new(),
+            parallel_mcp_server_names: std::collections::HashSet::new(),
+            discoverable_tools: None,
+            dynamic_tools: &[],
+        },
+    );
+    router
+        .model_visible_specs()
+        .iter()
+        .map(ToolSpec::name)
+        .map(str::to_string)
+        .collect()
+}
+
+#[tokio::test]
+async fn request_user_input_model_visible_specs_follow_active_mode() {
+    let features = Features::with_defaults();
+
+    let default_tools = model_visible_tool_names_for_mode(&features, ModeKind::Default).await;
+    assert!(
+        !default_tools
+            .iter()
+            .any(|tool| tool == "request_user_input"),
+        "request_user_input should be hidden in Default mode: {default_tools:?}"
+    );
+
+    let plan_tools = model_visible_tool_names_for_mode(&features, ModeKind::Plan).await;
+    assert!(
+        plan_tools.iter().any(|tool| tool == "request_user_input"),
+        "request_user_input should be visible in Plan mode: {plan_tools:?}"
+    );
+
+    let mut default_enabled_features = Features::with_defaults();
+    default_enabled_features.enable(Feature::DefaultModeRequestUserInput);
+    let default_enabled_tools =
+        model_visible_tool_names_for_mode(&default_enabled_features, ModeKind::Default).await;
+    assert!(
+        default_enabled_tools
+            .iter()
+            .any(|tool| tool == "request_user_input"),
+        "request_user_input should be visible in Default mode when enabled: {default_enabled_tools:?}"
+    );
 }
 
 async fn assert_default_model_tools(

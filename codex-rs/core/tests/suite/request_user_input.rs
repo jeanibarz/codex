@@ -69,6 +69,139 @@ fn call_output_content_and_success(
     (content, success)
 }
 
+fn tool_names(req: &ResponsesRequest) -> Vec<String> {
+    req.body_json()
+        .get("tools")
+        .and_then(Value::as_array)
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|tool| {
+                    tool.get("name")
+                        .or_else(|| tool.get("type"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+async fn advertised_tools_for_mode(
+    mode: ModeKind,
+    enable_default_mode_request_user_input: bool,
+) -> anyhow::Result<Vec<String>> {
+    let server = start_mock_server().await;
+    let response = sse(vec![
+        ev_response_created("resp-1"),
+        ev_assistant_message("msg-1", "done"),
+        ev_completed("resp-1"),
+    ]);
+    let mock = responses::mount_sse_once(&server, response).await;
+
+    let mut builder = test_codex().with_config(move |config| {
+        if enable_default_mode_request_user_input {
+            assert!(
+                config
+                    .features
+                    .enable(Feature::DefaultModeRequestUserInput)
+                    .is_ok(),
+                "test config should allow feature update"
+            );
+        }
+    });
+    let TestCodex {
+        codex,
+        cwd,
+        session_configured,
+        ..
+    } = builder.build(&server).await?;
+
+    let session_model = session_configured.model.clone();
+    let (sandbox_policy, permission_profile) =
+        turn_permission_fields(PermissionProfile::Disabled, cwd.path());
+    codex
+        .submit(Op::UserTurn {
+            environments: None,
+            items: vec![UserInput::Text {
+                text: "list tools".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            cwd: cwd.path().to_path_buf(),
+            approval_policy: AskForApproval::Never,
+            approvals_reviewer: None,
+            sandbox_policy,
+            permission_profile,
+            model: session_model.clone(),
+            effort: None,
+            summary: None,
+            service_tier: None,
+            collaboration_mode: Some(CollaborationMode {
+                mode,
+                settings: Settings {
+                    model: session_model,
+                    reasoning_effort: None,
+                    developer_instructions: None,
+                },
+            }),
+            personality: None,
+        })
+        .await?;
+
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    Ok(tool_names(&mock.single_request()))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn request_user_input_not_advertised_in_default_mode_by_default() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let tools = advertised_tools_for_mode(
+        ModeKind::Default,
+        /*enable_default_mode_request_user_input*/ false,
+    )
+    .await?;
+    assert!(
+        !tools.iter().any(|tool| tool == "request_user_input"),
+        "request_user_input should not be advertised in Default mode: {tools:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn request_user_input_advertised_in_plan_mode() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let tools = advertised_tools_for_mode(
+        ModeKind::Plan,
+        /*enable_default_mode_request_user_input*/ false,
+    )
+    .await?;
+    assert!(
+        tools.iter().any(|tool| tool == "request_user_input"),
+        "request_user_input should be advertised in Plan mode: {tools:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn request_user_input_advertised_in_default_mode_with_feature() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let tools = advertised_tools_for_mode(
+        ModeKind::Default,
+        /*enable_default_mode_request_user_input*/ true,
+    )
+    .await?;
+    assert!(
+        tools.iter().any(|tool| tool == "request_user_input"),
+        "request_user_input should be advertised in Default mode when enabled: {tools:?}"
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn request_user_input_round_trip_resolves_pending() -> anyhow::Result<()> {
     request_user_input_round_trip_for_mode(ModeKind::Plan).await
