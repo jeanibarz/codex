@@ -285,11 +285,14 @@ pub fn list_hooks(config: HooksConfig) -> HookListOutcome {
         return HookListOutcome::default();
     }
 
-    let discovered = crate::engine::discovery::discover_handlers(
+    let mut discovered = crate::engine::discovery::discover_handlers(
         config.config_layer_stack.as_ref(),
         config.plugin_hook_sources,
         config.plugin_hook_load_warnings,
     );
+    if let Some(settings_path) = config.settings_file.as_deref() {
+        crate::engine::discovery::append_settings_file_handlers(&mut discovered, settings_path);
+    }
     HookListOutcome {
         hooks: discovered.hook_entries,
         warnings: discovered.warnings,

@@ -1499,6 +1499,7 @@ pub enum HookSource {
     Project,
     Mdm,
     SessionFlags,
+    SupervisorSettings,
     Plugin,
     CloudRequirements,
     LegacyManagedConfigFile,

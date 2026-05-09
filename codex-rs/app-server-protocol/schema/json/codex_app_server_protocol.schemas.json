@@ -9737,6 +9737,7 @@
           "project",
           "mdm",
           "sessionFlags",
+          "supervisorSettings",
           "plugin",
           "cloudRequirements",
           "legacyManagedConfigFile",
