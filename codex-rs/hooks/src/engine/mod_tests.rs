@@ -552,6 +552,88 @@ fn user_disablement_does_not_filter_managed_layer_hooks() {
     );
 }
 
+#[test]
+fn settings_file_hooks_are_managed_and_runnable() {
+    let temp = tempdir().expect("create temp dir");
+    let settings_path =
+        AbsolutePathBuf::try_from(temp.path().join("settings.json")).expect("absolute path");
+    fs::write(
+        settings_path.as_path(),
+        r#"{
+              "hooks": {
+                "PreToolUse": [
+                  {
+                    "matcher": "^Bash$",
+                    "hooks": [
+                      {
+                        "type": "command",
+                        "command": "python3 /tmp/settings-hook.py"
+                      }
+                    ]
+                  }
+                ]
+              }
+            }"#,
+    )
+    .expect("write settings file");
+
+    let engine = ClaudeHooksEngine::new(
+        /*enabled*/ true,
+        /*config_layer_stack*/ None,
+        Vec::new(),
+        Vec::new(),
+        CommandShell {
+            program: String::new(),
+            args: Vec::new(),
+        },
+        Some(settings_path.as_path()),
+    );
+
+    assert_eq!(engine.handlers.len(), 1);
+    assert_eq!(engine.handlers[0].source, HookSource::SupervisorSettings);
+    let listed = crate::list_hooks(crate::HooksConfig {
+        legacy_notify_argv: None,
+        feature_enabled: true,
+        config_layer_stack: None,
+        plugin_hook_sources: Vec::new(),
+        plugin_hook_load_warnings: Vec::new(),
+        shell_program: None,
+        shell_args: Vec::new(),
+        settings_file: Some(settings_path.as_path().to_path_buf()),
+    });
+    assert_eq!(listed.hooks.len(), 1);
+    assert_eq!(listed.hooks[0].source, HookSource::SupervisorSettings);
+    assert!(listed.hooks[0].is_managed);
+    assert!(listed.hooks[0].enabled);
+    assert_eq!(listed.hooks[0].trust_status, HookTrustStatus::Managed);
+}
+
+#[test]
+fn session_flags_hooks_without_trusted_hash_remain_untrusted() {
+    let config_layer_stack = ConfigLayerStack::new(
+        vec![ConfigLayerEntry::new(
+            ConfigLayerSource::SessionFlags,
+            config_with_pre_tool_use_hook("python3 /tmp/session-flag-hook.py"),
+        )],
+        ConfigRequirements::default(),
+        ConfigRequirementsToml::default(),
+    )
+    .expect("config layer stack");
+
+    let discovered =
+        super::discovery::discover_handlers(Some(&config_layer_stack), Vec::new(), Vec::new());
+
+    assert_eq!(discovered.handlers.len(), 0);
+    assert_eq!(discovered.hook_entries.len(), 1);
+    assert_eq!(discovered.hook_entries[0].source, HookSource::SessionFlags);
+    assert!(!discovered.hook_entries[0].is_managed);
+    assert!(discovered.hook_entries[0].enabled);
+    assert_eq!(
+        discovered.hook_entries[0].trust_status,
+        HookTrustStatus::Untrusted
+    );
+}
+
 fn config_with_hook_state(key: &str, enabled: bool) -> TomlValue {
     serde_json::from_value(serde_json::json!({
         "hooks": {
