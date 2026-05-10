@@ -145,9 +145,13 @@ fn append_claude_settings_handlers(
     layers: &[&ConfigLayerEntry],
     hook_states: &HashMap<String, HookStateToml>,
 ) {
+    let codex_home_env = std::env::var_os("CODEX_HOME").map(PathBuf::from);
+    let home_dir = home_dir_from_env();
     for layer in layers {
         let (hook_source, is_managed) = hook_metadata_for_claude_settings_layer_source(&layer.name);
-        for source_path in claude_settings_paths_for_layer(layer) {
+        for source_path in
+            claude_settings_paths_for_layer(layer, codex_home_env.as_deref(), home_dir.as_deref())
+        {
             let Some((source_path, hook_events)) =
                 load_claude_settings_hooks(source_path.as_path(), warnings)
             else {
@@ -191,36 +195,74 @@ fn hook_metadata_for_claude_settings_layer_source(
     }
 }
 
-fn claude_settings_paths_for_layer(layer: &ConfigLayerEntry) -> Vec<PathBuf> {
+fn claude_settings_paths_for_layer(
+    layer: &ConfigLayerEntry,
+    codex_home_env: Option<&Path>,
+    home_dir: Option<&Path>,
+) -> Vec<PathBuf> {
     let Some(config_folder) = layer.config_folder() else {
         return Vec::new();
     };
-    let root = if config_folder
-        .as_path()
-        .file_name()
-        .is_some_and(|name| name == ".codex")
-    {
-        config_folder
-            .as_path()
-            .parent()
-            .unwrap_or(config_folder.as_path())
-    } else {
-        config_folder.as_path()
-    };
-
-    let claude_dir = root.join(".claude");
     match &layer.name {
-        ConfigLayerSource::User { .. } => vec![claude_dir.join("settings.json")],
-        ConfigLayerSource::Project { .. } => vec![
-            claude_dir.join("settings.json"),
-            claude_dir.join("settings.local.json"),
-        ],
+        ConfigLayerSource::User { .. } => {
+            user_claude_settings_root(config_folder.as_path(), codex_home_env, home_dir)
+                .map(|root| vec![root.join(".claude").join("settings.json")])
+                .unwrap_or_default()
+        }
+        ConfigLayerSource::Project { .. } => {
+            let root = project_root_for_config_folder(config_folder.as_path());
+            let claude_dir = root.join(".claude");
+            vec![
+                claude_dir.join("settings.json"),
+                claude_dir.join("settings.local.json"),
+            ]
+        }
         ConfigLayerSource::System { .. }
         | ConfigLayerSource::Mdm { .. }
         | ConfigLayerSource::SessionFlags
         | ConfigLayerSource::LegacyManagedConfigTomlFromFile { .. }
         | ConfigLayerSource::LegacyManagedConfigTomlFromMdm => Vec::new(),
     }
+}
+
+fn user_claude_settings_root(
+    config_folder: &Path,
+    codex_home_env: Option<&Path>,
+    home_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    if config_folder
+        .file_name()
+        .is_some_and(|name| name == ".codex")
+    {
+        return config_folder.parent().map(Path::to_path_buf);
+    }
+    let (Some(codex_home_env), Some(home_dir)) = (codex_home_env, home_dir) else {
+        return None;
+    };
+    paths_match_after_normalize(config_folder, codex_home_env).then(|| home_dir.to_path_buf())
+}
+
+fn project_root_for_config_folder(config_folder: &Path) -> &Path {
+    if config_folder
+        .file_name()
+        .is_some_and(|name| name == ".codex")
+    {
+        config_folder.parent().unwrap_or(config_folder)
+    } else {
+        config_folder
+    }
+}
+
+fn paths_match_after_normalize(left: &Path, right: &Path) -> bool {
+    let left = fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
+    let right = fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
+    left == right
+}
+
+fn home_dir_from_env() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
 }
 
 fn append_managed_requirement_handlers(
@@ -890,6 +932,7 @@ mod tests {
     use codex_config::ConfigLayerEntry;
     use codex_config::ConfigLayerSource;
     use codex_config::HookEventsToml;
+    use codex_config::CONFIG_TOML_FILE;
     use codex_protocol::protocol::HookEventName;
     use codex_protocol::protocol::HookSource;
     use codex_utils_absolute_path::test_support::test_path_buf;
@@ -898,6 +941,7 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::append_matcher_groups;
+    use super::claude_settings_paths_for_layer;
     use super::ConfiguredHandler;
     use codex_config::HookHandlerConfig;
     use codex_config::HookStateToml;
@@ -937,6 +981,43 @@ mod tests {
                 status_message: None,
             }],
         }
+    }
+
+    #[test]
+    fn user_claude_settings_path_uses_home_when_codex_home_is_custom() {
+        let codex_home = test_path_buf("/custom/codex-home");
+        let home = test_path_buf("/home/user");
+        let layer = ConfigLayerEntry::new(
+            ConfigLayerSource::User {
+                file: codex_home.join(CONFIG_TOML_FILE).abs(),
+            },
+            TomlValue::Table(Default::default()),
+        );
+
+        assert_eq!(
+            claude_settings_paths_for_layer(
+                &layer,
+                Some(codex_home.as_path()),
+                Some(home.as_path())
+            ),
+            vec![home.join(".claude").join("settings.json")]
+        );
+    }
+
+    #[test]
+    fn user_claude_settings_path_uses_dot_codex_parent_without_env() {
+        let codex_home = test_path_buf("/home/user/.codex");
+        let layer = ConfigLayerEntry::new(
+            ConfigLayerSource::User {
+                file: codex_home.join(CONFIG_TOML_FILE).abs(),
+            },
+            TomlValue::Table(Default::default()),
+        );
+
+        assert_eq!(
+            claude_settings_paths_for_layer(&layer, None, None),
+            vec![test_path_buf("/home/user/.claude/settings.json")]
+        );
     }
 
     #[test]

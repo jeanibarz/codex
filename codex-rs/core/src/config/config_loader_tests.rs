@@ -1506,6 +1506,60 @@ async fn project_layer_is_added_when_dot_codex_exists_without_config_toml() -> s
 }
 
 #[tokio::test]
+async fn project_layer_is_added_when_claude_settings_exists_without_dot_codex(
+) -> std::io::Result<()> {
+    let tmp = tempdir()?;
+    let project_root = tmp.path().join("project");
+    let nested = project_root.join("child");
+    let project_claude = project_root.join(".claude");
+    tokio::fs::create_dir_all(&nested).await?;
+    tokio::fs::create_dir_all(&project_claude).await?;
+    tokio::fs::write(project_claude.join("settings.json"), "{}").await?;
+    tokio::fs::write(project_root.join(".git"), "gitdir: here").await?;
+
+    let codex_home = tmp.path().join("home");
+    tokio::fs::create_dir_all(&codex_home).await?;
+    make_config_for_test(
+        &codex_home,
+        &project_root,
+        TrustLevel::Trusted,
+        /*project_root_markers*/ None,
+    )
+    .await?;
+    let cwd = AbsolutePathBuf::from_absolute_path(&nested)?;
+    let layers = load_config_layers_state(
+        LOCAL_FS.as_ref(),
+        &codex_home,
+        Some(cwd),
+        &[] as &[(String, TomlValue)],
+        LoaderOverrides::default(),
+        CloudRequirementsLoader::default(),
+        &codex_config::NoopThreadConfigLoader,
+    )
+    .await?;
+
+    let project_layers: Vec<_> = layers
+        .layers_high_to_low()
+        .into_iter()
+        .filter(|layer| matches!(layer.name, ConfigLayerSource::Project { .. }))
+        .collect();
+    assert_eq!(
+        vec![&ConfigLayerEntry {
+            name: ConfigLayerSource::Project {
+                dot_codex_folder: AbsolutePathBuf::from_absolute_path(project_root.join(".codex"))?,
+            },
+            config: TomlValue::Table(toml::map::Map::new()),
+            raw_toml: None,
+            version: version_for_toml(&TomlValue::Table(toml::map::Map::new())),
+            disabled_reason: None,
+        }],
+        project_layers
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn codex_home_is_not_loaded_as_project_layer_from_home_dir() -> std::io::Result<()> {
     let tmp = tempdir()?;
     let home_dir = tmp.path().join("home");

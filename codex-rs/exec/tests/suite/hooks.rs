@@ -100,8 +100,9 @@ supports_websockets = false
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn exec_user_claude_settings_hooks_fire_for_shell_command() -> anyhow::Result<()> {
     let test = test_codex_exec();
+    let real_home = tempfile::tempdir()?;
     let hook_log = test.cwd_path().join("claude-settings-hook-fired.jsonl");
-    let claude_dir = test.home_path().join(".claude");
+    let claude_dir = real_home.path().join(".claude");
     std::fs::create_dir_all(&claude_dir)?;
     let hook_log_display = hook_log.display();
     let hook_command = format!("payload=$(cat); printf '%s\\n' \"$payload\" >> {hook_log_display}");
@@ -152,6 +153,7 @@ supports_websockets = false
     .await;
 
     test.cmd()
+        .env("HOME", real_home.path())
         .arg("-c")
         .arg("features.codex_hooks=true")
         .arg("--skip-git-repo-check")
