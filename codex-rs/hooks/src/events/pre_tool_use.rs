@@ -1,21 +1,21 @@
 use std::path::PathBuf;
 
-use codex_protocol::ThreadId;
 use codex_protocol::protocol::HookCompletedEvent;
 use codex_protocol::protocol::HookEventName;
 use codex_protocol::protocol::HookOutputEntry;
 use codex_protocol::protocol::HookOutputEntryKind;
 use codex_protocol::protocol::HookRunStatus;
 use codex_protocol::protocol::HookRunSummary;
+use codex_protocol::ThreadId;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use serde_json::Value;
 
 use super::common;
-use crate::engine::CommandShell;
-use crate::engine::ConfiguredHandler;
 use crate::engine::command_runner::CommandRunResult;
 use crate::engine::dispatcher;
 use crate::engine::output_parser;
+use crate::engine::CommandShell;
+use crate::engine::ConfiguredHandler;
 use crate::schema::PreToolUseCommandInput;
 
 #[derive(Debug, Clone)]
@@ -54,10 +54,11 @@ pub(crate) fn preview(
     request: &PreToolUseRequest,
 ) -> Vec<HookRunSummary> {
     let matcher_inputs = common::matcher_inputs(&request.tool_name, &request.matcher_aliases);
-    dispatcher::select_handlers_for_matcher_inputs(
+    dispatcher::select_handlers_for_tool_use(
         handlers,
         HookEventName::PreToolUse,
         &matcher_inputs,
+        &request.tool_input,
     )
     .into_iter()
     .map(|handler| {
@@ -72,10 +73,11 @@ pub(crate) async fn run(
     request: PreToolUseRequest,
 ) -> PreToolUseOutcome {
     let matcher_inputs = common::matcher_inputs(&request.tool_name, &request.matcher_aliases);
-    let matched = dispatcher::select_handlers_for_matcher_inputs(
+    let matched = dispatcher::select_handlers_for_tool_use(
         handlers,
         HookEventName::PreToolUse,
         &matcher_inputs,
+        &request.tool_input,
     );
     if matched.is_empty() {
         return PreToolUseOutcome {
@@ -309,22 +311,22 @@ fn serialization_failure_outcome(hook_events: Vec<HookCompletedEvent>) -> PreToo
 
 #[cfg(test)]
 mod tests {
-    use codex_protocol::ThreadId;
     use codex_protocol::protocol::HookEventName;
     use codex_protocol::protocol::HookOutputEntry;
     use codex_protocol::protocol::HookOutputEntryKind;
     use codex_protocol::protocol::HookRunStatus;
-    use codex_utils_absolute_path::test_support::PathBufExt;
+    use codex_protocol::ThreadId;
     use codex_utils_absolute_path::test_support::test_path_buf;
+    use codex_utils_absolute_path::test_support::PathBufExt;
     use pretty_assertions::assert_eq;
 
-    use super::PreToolUseHandlerData;
     use super::command_input_json;
     use super::latest_updated_input;
     use super::parse_completed;
     use super::preview;
-    use crate::engine::ConfiguredHandler;
+    use super::PreToolUseHandlerData;
     use crate::engine::command_runner::CommandRunResult;
+    use crate::engine::ConfiguredHandler;
     use crate::events::common;
 
     #[test]
