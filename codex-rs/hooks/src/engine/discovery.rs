@@ -23,11 +23,14 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 
+use super::dispatcher::encode_claude_conditional_matcher;
+use super::dispatcher::ClaudeHookCondition;
 use super::ConfiguredHandler;
 use super::HookListEntry;
 use crate::config_rules::hook_states_from_stack;
 use crate::events::common::matcher_pattern_for_event;
 use crate::events::common::validate_matcher_pattern;
+use codex_protocol::protocol::HookEventName;
 use codex_protocol::protocol::HookHandlerType;
 use codex_protocol::protocol::HookSource;
 use codex_protocol::protocol::HookTrustStatus;
@@ -46,6 +49,15 @@ struct HookHandlerSource<'a> {
     hook_states: &'a HashMap<String, HookStateToml>,
     env: HashMap<String, String>,
     plugin_id: Option<String>,
+    claude_conditions: Vec<ClaudeHookConditionByPosition>,
+}
+
+#[derive(Clone)]
+struct ClaudeHookConditionByPosition {
+    event_name: HookEventName,
+    group_index: usize,
+    handler_index: usize,
+    conditions: Vec<ClaudeHookCondition>,
 }
 
 pub(crate) fn discover_handlers(
@@ -114,6 +126,7 @@ pub(crate) fn discover_handlers(
                         hook_states: &hook_states,
                         env: HashMap::new(),
                         plugin_id: None,
+                        claude_conditions: Vec::new(),
                     },
                     hook_events,
                 );
@@ -152,7 +165,7 @@ fn append_claude_settings_handlers(
         for source_path in
             claude_settings_paths_for_layer(layer, codex_home_env.as_deref(), home_dir.as_deref())
         {
-            let Some((source_path, hook_events)) =
+            let Some((source_path, hook_events, claude_conditions)) =
                 load_claude_settings_hooks(source_path.as_path(), warnings)
             else {
                 continue;
@@ -170,6 +183,7 @@ fn append_claude_settings_handlers(
                     hook_states,
                     env: HashMap::new(),
                     plugin_id: None,
+                    claude_conditions,
                 },
                 hook_events,
             );
@@ -294,6 +308,7 @@ fn append_managed_requirement_handlers(
             hook_states,
             env: HashMap::new(),
             plugin_id: None,
+            claude_conditions: Vec::new(),
         },
         managed_hooks.get().hooks.clone(),
     );
@@ -342,6 +357,7 @@ fn append_plugin_hook_sources(
                 hook_states,
                 env,
                 plugin_id: Some(plugin_id),
+                claude_conditions: Vec::new(),
             },
             hooks,
         );
@@ -439,7 +455,11 @@ fn load_hooks_json(
 fn load_claude_settings_hooks(
     settings_path: &Path,
     warnings: &mut Vec<String>,
-) -> Option<(AbsolutePathBuf, HookEventsToml)> {
+) -> Option<(
+    AbsolutePathBuf,
+    HookEventsToml,
+    Vec<ClaudeHookConditionByPosition>,
+)> {
     if !settings_path.is_file() {
         return None;
     }
@@ -466,7 +486,8 @@ fn load_claude_settings_hooks(
         }
     };
 
-    filter_unsupported_claude_hook_if_expressions(settings_path, &mut value, warnings);
+    let claude_conditions =
+        filter_unsupported_claude_hook_if_expressions(settings_path, &mut value, warnings);
     let parsed = match serde_json::from_value::<HooksFile>(value) {
         Ok(parsed) => parsed,
         Err(err) => {
@@ -498,25 +519,31 @@ fn load_claude_settings_hooks(
         })
         .ok()?;
 
-    (!hooks.is_empty()).then_some((source_path, hooks))
+    (!hooks.is_empty()).then_some((source_path, hooks, claude_conditions))
 }
 
 fn filter_unsupported_claude_hook_if_expressions(
     settings_path: &Path,
     value: &mut serde_json::Value,
     warnings: &mut Vec<String>,
-) {
+) -> Vec<ClaudeHookConditionByPosition> {
     let Some(hooks) = value
         .get_mut("hooks")
         .and_then(serde_json::Value::as_object_mut)
     else {
-        return;
+        return Vec::new();
     };
 
+    let mut conditions_by_position = Vec::new();
     let mut dropped_by_matcher: BTreeMap<String, usize> = BTreeMap::new();
-    for event_name in ["PreToolUse", "PostToolUse", "UserPromptSubmit", "Stop"] {
+    for (event_label, event_name) in [
+        ("PreToolUse", HookEventName::PreToolUse),
+        ("PostToolUse", HookEventName::PostToolUse),
+        ("UserPromptSubmit", HookEventName::UserPromptSubmit),
+        ("Stop", HookEventName::Stop),
+    ] {
         let Some(groups) = hooks
-            .get_mut(event_name)
+            .get_mut(event_label)
             .and_then(serde_json::Value::as_array_mut)
         else {
             continue;
@@ -529,22 +556,25 @@ fn filter_unsupported_claude_hook_if_expressions(
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("*")
                 .to_string();
-            let warning_matcher = format!("{event_name}/{matcher}");
-
-            if let Some(group_object) = group.as_object_mut()
-                && group_object.remove("if").is_some()
-            {
-                let dropped_count = group_object
-                    .get("hooks")
-                    .and_then(serde_json::Value::as_array)
-                    .map_or(1, Vec::len);
-                *dropped_by_matcher.entry(warning_matcher).or_default() += dropped_count;
-                continue;
-            }
+            let warning_matcher = format!("{event_label}/{matcher}");
 
             let Some(group_object) = group.as_object_mut() else {
                 retained_groups.push(group);
                 continue;
+            };
+            let group_conditions = match group_object.remove("if") {
+                Some(value) => match parse_supported_claude_if_expression(event_name, &value) {
+                    Some(condition) => vec![condition],
+                    None => {
+                        let dropped_count = group_object
+                            .get("hooks")
+                            .and_then(serde_json::Value::as_array)
+                            .map_or(1, Vec::len);
+                        *dropped_by_matcher.entry(warning_matcher).or_default() += dropped_count;
+                        continue;
+                    }
+                },
+                None => Vec::new(),
             };
             let Some(hook_values) = group_object
                 .get_mut("hooks")
@@ -554,18 +584,35 @@ fn filter_unsupported_claude_hook_if_expressions(
                 continue;
             };
 
+            let group_index = retained_groups.len();
             let mut retained_hooks = Vec::with_capacity(hook_values.len());
             for hook in std::mem::take(hook_values) {
-                if hook
-                    .as_object()
-                    .is_some_and(|hook_object| hook_object.contains_key("if"))
+                let mut hook_conditions = group_conditions.clone();
+                let mut hook = hook;
+                if let Some(hook_object) = hook.as_object_mut()
+                    && let Some(value) = hook_object.remove("if")
                 {
-                    *dropped_by_matcher
-                        .entry(warning_matcher.clone())
-                        .or_default() += 1;
-                } else {
-                    retained_hooks.push(hook);
+                    match parse_supported_claude_if_expression(event_name, &value) {
+                        Some(condition) => hook_conditions.push(condition),
+                        None => {
+                            *dropped_by_matcher
+                                .entry(warning_matcher.clone())
+                                .or_default() += 1;
+                            continue;
+                        }
+                    }
                 }
+
+                let handler_index = retained_hooks.len();
+                if !hook_conditions.is_empty() {
+                    conditions_by_position.push(ClaudeHookConditionByPosition {
+                        event_name,
+                        group_index,
+                        handler_index,
+                        conditions: hook_conditions,
+                    });
+                }
+                retained_hooks.push(hook);
             }
 
             *hook_values = retained_hooks;
@@ -582,6 +629,39 @@ fn filter_unsupported_claude_hook_if_expressions(
         tracing::warn!(%warning);
         warnings.push(warning);
     }
+    conditions_by_position
+}
+
+fn parse_supported_claude_if_expression(
+    event_name: HookEventName,
+    value: &serde_json::Value,
+) -> Option<ClaudeHookCondition> {
+    match event_name {
+        HookEventName::PreToolUse | HookEventName::PostToolUse => {}
+        HookEventName::PermissionRequest
+        | HookEventName::PreCompact
+        | HookEventName::PostCompact
+        | HookEventName::PostToolUseFailure
+        | HookEventName::Notification
+        | HookEventName::SessionStart
+        | HookEventName::SessionEnd
+        | HookEventName::UserPromptSubmit
+        | HookEventName::Stop
+        | HookEventName::StopFailure
+        | HookEventName::FileChanged => return None,
+    }
+    let expression = value.as_str()?.trim();
+    let (tool_name, rest) = expression.split_once('(')?;
+    let command_glob = rest.strip_suffix(')')?;
+    let tool_name = tool_name.trim();
+    let command_glob = command_glob.trim();
+    if tool_name.is_empty() || command_glob.is_empty() {
+        return None;
+    }
+    Some(ClaudeHookCondition::ToolCommandGlob {
+        tool_name: tool_name.to_string(),
+        command_glob: command_glob.to_string(),
+    })
 }
 
 /// Claude-compat: merge hook handlers from a JSON settings file (`--settings FILE`)
@@ -607,11 +687,26 @@ pub(crate) fn append_settings_file_handlers(result: &mut DiscoveryResult, settin
         }
     };
 
-    let parsed: HooksFile = match serde_json::from_str(&contents) {
-        Ok(parsed) => parsed,
+    let mut value: serde_json::Value = match serde_json::from_str(&contents) {
+        Ok(value) => value,
         Err(err) => {
             result.warnings.push(format!(
                 "--settings: failed to parse {} as JSON: {err}",
+                settings_path.display()
+            ));
+            return;
+        }
+    };
+    let claude_conditions = filter_unsupported_claude_hook_if_expressions(
+        settings_path,
+        &mut value,
+        &mut result.warnings,
+    );
+    let parsed: HooksFile = match serde_json::from_value(value) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            result.warnings.push(format!(
+                "--settings: failed to parse hooks in {}: {err}",
                 settings_path.display()
             ));
             return;
@@ -642,6 +737,7 @@ pub(crate) fn append_settings_file_handlers(result: &mut DiscoveryResult, settin
         hook_states: &hook_states,
         env: HashMap::new(),
         plugin_id: None,
+        claude_conditions,
     };
     let mut display_order = result
         .handlers
@@ -758,6 +854,16 @@ fn append_matcher_groups(
                     r#async,
                     status_message,
                 } => {
+                    let claude_conditions = source
+                        .claude_conditions
+                        .iter()
+                        .find(|condition| {
+                            condition.event_name == event_name
+                                && condition.group_index == group_index
+                                && condition.handler_index == handler_index
+                        })
+                        .map(|condition| condition.conditions.clone())
+                        .unwrap_or_default();
                     if r#async {
                         warnings.push(format!(
                             "skipping async hook in {}: async hooks are not supported yet",
@@ -779,8 +885,13 @@ fn append_matcher_groups(
                         r#async,
                         status_message: status_message.clone(),
                     };
-                    let current_hash =
-                        command_hook_hash(event_name, matcher, &group, normalized_handler);
+                    let current_hash = command_hook_hash(
+                        event_name,
+                        matcher,
+                        &group,
+                        &claude_conditions,
+                        normalized_handler,
+                    );
                     let command = source.env.iter().fold(command, |command, (key, value)| {
                         command.replace(&format!("${{{key}}}"), value)
                     });
@@ -817,7 +928,7 @@ fn append_matcher_groups(
                     {
                         handlers.push(ConfiguredHandler {
                             event_name,
-                            matcher: matcher.map(ToOwned::to_owned),
+                            matcher: encode_claude_conditional_matcher(matcher, &claude_conditions),
                             command,
                             timeout_sec,
                             status_message,
@@ -845,16 +956,19 @@ fn append_matcher_groups(
 /// Hash a normalized, config-derived identity instead of source text so equivalent
 /// hooks from config TOML and hooks.json converge on the same trust identity.
 #[derive(Serialize)]
-struct NormalizedHookIdentity {
+struct NormalizedHookIdentity<'a> {
     event_name: &'static str,
     #[serde(flatten)]
     group: MatcherGroup,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    claude_conditions: Option<&'a [ClaudeHookCondition]>,
 }
 
 fn command_hook_hash(
     event_name: codex_protocol::protocol::HookEventName,
     matcher: Option<&str>,
     group: &MatcherGroup,
+    claude_conditions: &[ClaudeHookCondition],
     normalized_handler: HookHandlerConfig,
 ) -> String {
     let mut group = group.clone();
@@ -863,6 +977,7 @@ fn command_hook_hash(
     let identity = NormalizedHookIdentity {
         event_name: crate::hook_event_key_label(event_name),
         group,
+        claude_conditions: (!claude_conditions.is_empty()).then_some(claude_conditions),
     };
     let Ok(value) = TomlValue::try_from(identity) else {
         unreachable!("normalized hook identity should serialize to TOML");
@@ -968,6 +1083,7 @@ mod tests {
             hook_states,
             env: std::collections::HashMap::new(),
             plugin_id: None,
+            claude_conditions: Vec::new(),
         }
     }
 

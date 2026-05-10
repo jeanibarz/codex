@@ -10,16 +10,48 @@ use codex_protocol::protocol::HookRunStatus;
 use codex_protocol::protocol::HookRunSummary;
 use codex_protocol::protocol::HookScope;
 
+use super::command_runner::run_command;
+use super::command_runner::CommandRunResult;
 use super::CommandShell;
 use super::ConfiguredHandler;
-use super::command_runner::CommandRunResult;
-use super::command_runner::run_command;
 use crate::events::common::matches_matcher;
+
+const CLAUDE_CONDITIONAL_MATCHER_PREFIX: &str = "__codex_claude_conditional_matcher__:";
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum ClaudeHookCondition {
+    ToolCommandGlob {
+        tool_name: String,
+        command_glob: String,
+    },
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct ClaudeConditionalMatcher {
+    matcher: Option<String>,
+    conditions: Vec<ClaudeHookCondition>,
+}
 
 #[derive(Debug)]
 pub(crate) struct ParsedHandler<T> {
     pub completed: HookCompletedEvent,
     pub data: T,
+}
+
+pub(crate) fn encode_claude_conditional_matcher(
+    matcher: Option<&str>,
+    conditions: &[ClaudeHookCondition],
+) -> Option<String> {
+    if conditions.is_empty() {
+        return matcher.map(ToOwned::to_owned);
+    }
+    let Ok(encoded) = serde_json::to_string(&ClaudeConditionalMatcher {
+        matcher: matcher.map(ToOwned::to_owned),
+        conditions: conditions.to_vec(),
+    }) else {
+        return matcher.map(ToOwned::to_owned);
+    };
+    Some(format!("{CLAUDE_CONDITIONAL_MATCHER_PREFIX}{encoded}"))
 }
 
 pub(crate) fn select_handlers(
@@ -36,37 +68,183 @@ pub(crate) fn select_handlers_for_matcher_inputs(
     event_name: HookEventName,
     matcher_inputs: &[&str],
 ) -> Vec<ConfiguredHandler> {
+    select_handlers_for_matcher_inputs_and_tool_input(
+        handlers,
+        event_name,
+        matcher_inputs,
+        /*tool_input*/ None,
+    )
+}
+
+pub(crate) fn select_handlers_for_tool_use(
+    handlers: &[ConfiguredHandler],
+    event_name: HookEventName,
+    matcher_inputs: &[&str],
+    tool_input: &serde_json::Value,
+) -> Vec<ConfiguredHandler> {
+    select_handlers_for_matcher_inputs_and_tool_input(
+        handlers,
+        event_name,
+        matcher_inputs,
+        Some(tool_input),
+    )
+}
+
+fn select_handlers_for_matcher_inputs_and_tool_input(
+    handlers: &[ConfiguredHandler],
+    event_name: HookEventName,
+    matcher_inputs: &[&str],
+    tool_input: Option<&serde_json::Value>,
+) -> Vec<ConfiguredHandler> {
     // Check each configured handler once, even when several compatibility names
     // match the same regex. A hook like `apply_patch|Write|Edit` should run a
     // single time for one tool call, not once per matching alias.
     handlers
         .iter()
         .filter(|handler| handler.event_name == event_name)
-        .filter(|handler| match event_name {
-            HookEventName::PreToolUse
-            | HookEventName::PermissionRequest
-            | HookEventName::PostToolUse
-            | HookEventName::PreCompact
-            | HookEventName::PostCompact
-            | HookEventName::PostToolUseFailure
-            | HookEventName::SessionStart
-            | HookEventName::FileChanged => {
-                if matcher_inputs.is_empty() {
-                    matches_matcher(handler.matcher.as_deref(), /*input*/ None)
-                } else {
-                    matcher_inputs
-                        .iter()
-                        .any(|input| matches_matcher(handler.matcher.as_deref(), Some(input)))
+        .filter(|handler| {
+            let parsed = parse_claude_conditional_matcher(handler.matcher.as_deref());
+            let matcher = parsed
+                .as_ref()
+                .map_or(handler.matcher.as_deref(), |parsed| {
+                    parsed.matcher.as_deref()
+                });
+            match event_name {
+                HookEventName::PreToolUse
+                | HookEventName::PermissionRequest
+                | HookEventName::PostToolUse
+                | HookEventName::PreCompact
+                | HookEventName::PostCompact
+                | HookEventName::PostToolUseFailure
+                | HookEventName::SessionStart
+                | HookEventName::FileChanged => {
+                    if matcher_inputs.is_empty() {
+                        matches_matcher(matcher, /*input*/ None)
+                    } else {
+                        matcher_inputs
+                            .iter()
+                            .any(|input| matches_matcher(matcher, Some(input)))
+                    }
                 }
+                HookEventName::Notification
+                | HookEventName::SessionEnd
+                | HookEventName::UserPromptSubmit
+                | HookEventName::Stop
+                | HookEventName::StopFailure => true,
             }
-            HookEventName::Notification
-            | HookEventName::SessionEnd
-            | HookEventName::UserPromptSubmit
-            | HookEventName::Stop
-            | HookEventName::StopFailure => true,
+        })
+        .filter(|handler| {
+            let Some(parsed) = parse_claude_conditional_matcher(handler.matcher.as_deref()) else {
+                return true;
+            };
+            tool_input.is_some_and(|tool_input| {
+                parsed.conditions.iter().all(|condition| {
+                    condition_matches_tool_use(condition, matcher_inputs, tool_input)
+                })
+            })
         })
         .cloned()
         .collect()
+}
+
+fn parse_claude_conditional_matcher(matcher: Option<&str>) -> Option<ClaudeConditionalMatcher> {
+    let encoded = matcher?.strip_prefix(CLAUDE_CONDITIONAL_MATCHER_PREFIX)?;
+    serde_json::from_str(encoded).ok()
+}
+
+fn condition_matches_tool_use(
+    condition: &ClaudeHookCondition,
+    matcher_inputs: &[&str],
+    tool_input: &serde_json::Value,
+) -> bool {
+    match condition {
+        ClaudeHookCondition::ToolCommandGlob {
+            tool_name,
+            command_glob,
+        } => {
+            matcher_inputs.iter().any(|input| input == tool_name)
+                && tool_input
+                    .get("command")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|command| command_matches_glob(command_glob, command))
+        }
+    }
+}
+
+fn command_matches_glob(pattern: &str, command: &str) -> bool {
+    if glob_matches(pattern, command) {
+        return true;
+    }
+    let Some(commands) = split_top_level_shell_commands(command) else {
+        return true;
+    };
+    commands
+        .iter()
+        .any(|command| glob_matches(pattern, command.trim()))
+}
+
+fn split_top_level_shell_commands(command: &str) -> Option<Vec<&str>> {
+    let mut commands = Vec::new();
+    let mut start = 0;
+    let mut chars = command.char_indices().peekable();
+    let mut quote = None;
+    let mut escaped = false;
+
+    while let Some((index, ch)) = chars.next() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if let Some(quote_ch) = quote {
+            if ch == quote_ch {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            ';' | '\n' | '&' | '|' => {
+                let next_len = if matches!(ch, '&' | '|')
+                    && chars.peek().is_some_and(|(_, next)| *next == ch)
+                {
+                    chars.next();
+                    ch.len_utf8() * 2
+                } else {
+                    ch.len_utf8()
+                };
+                commands.push(&command[start..index]);
+                start = index + next_len;
+            }
+            '$' if chars.peek().is_some_and(|(_, next)| *next == '(') => return None,
+            '`' | '(' | ')' | '{' | '}' => return None,
+            _ => {}
+        }
+    }
+
+    if escaped || quote.is_some() {
+        return None;
+    }
+    commands.push(&command[start..]);
+    Some(commands)
+}
+
+fn glob_matches(pattern: &str, input: &str) -> bool {
+    let mut regex_pattern = String::from("^");
+    for ch in pattern.chars() {
+        match ch {
+            '*' => regex_pattern.push_str(".*"),
+            '?' => regex_pattern.push('.'),
+            _ => regex_pattern.push_str(&regex::escape(&ch.to_string())),
+        }
+    }
+    regex_pattern.push('$');
+    regex::Regex::new(&regex_pattern)
+        .map(|regex| regex.is_match(input))
+        .unwrap_or(false)
 }
 
 pub(crate) fn running_summary(handler: &ConfiguredHandler) -> HookRunSummary {
@@ -156,12 +334,12 @@ fn scope_for_event(event_name: HookEventName) -> HookScope {
 mod tests {
     use codex_protocol::protocol::HookEventName;
     use codex_protocol::protocol::HookSource;
-    use codex_utils_absolute_path::test_support::PathBufExt;
     use codex_utils_absolute_path::test_support::test_path_buf;
+    use codex_utils_absolute_path::test_support::PathBufExt;
 
-    use super::ConfiguredHandler;
     use super::select_handlers;
     use super::select_handlers_for_matcher_inputs;
+    use super::ConfiguredHandler;
 
     fn make_handler(
         event_name: HookEventName,
