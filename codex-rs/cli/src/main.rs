@@ -1504,6 +1504,7 @@ async fn run_debug_prompt_input_command(
         show_raw_agent_reasoning: shared.oss.then_some(true),
         ephemeral: Some(true),
         additional_writable_roots: shared.add_dir,
+        cli_plugin_dirs: shared.plugin_dirs,
         ..Default::default()
     };
     let config =

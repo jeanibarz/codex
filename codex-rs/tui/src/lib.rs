@@ -886,6 +886,7 @@ pub async fn run_main(
         show_raw_agent_reasoning: cli.oss.then_some(true),
         additional_writable_roots: additional_dirs,
         settings_file: cli.config_overrides.settings_file.clone(),
+        cli_plugin_dirs: cli.plugin_dirs.clone(),
         ..Default::default()
     };
 

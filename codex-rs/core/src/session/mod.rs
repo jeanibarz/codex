@@ -477,7 +477,23 @@ impl Codex {
         let fs = environment_selections.primary_filesystem();
         let plugins_input = config.plugins_config_input();
         let plugin_outcome = plugins_manager.plugins_for_config(&plugins_input).await;
-        let effective_skill_roots = plugin_outcome.effective_plugin_skill_roots();
+        let mut effective_skill_roots = plugin_outcome.effective_plugin_skill_roots();
+        // CLI-supplied plugin dirs (--plugin-dir) act as extra skill roots
+        // alongside marketplace-installed plugins. Used by external
+        // supervisors (Kookr) to inject curated toolkits without modifying
+        // user-scope marketplace state. Invalid dirs are silently skipped
+        // (fail-open, matches Claude Code's --plugin-dir semantics).
+        for cli_plugin_dir in &config.cli_plugin_dirs {
+            if let Some(root) = codex_utils_plugins::plugin_skill_root_from_cli_dir(cli_plugin_dir)
+            {
+                effective_skill_roots.push(root);
+            } else {
+                tracing::warn!(
+                    "--plugin-dir {} skipped: no readable plugin manifest at .codex-plugin/plugin.json or .claude-plugin/plugin.json",
+                    cli_plugin_dir.display()
+                );
+            }
+        }
         let skills_input = skills_load_input_from_config(&config, effective_skill_roots);
         let loaded_skills = skills_manager.skills_for_config(&skills_input, fs).await;
 

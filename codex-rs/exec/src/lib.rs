@@ -266,6 +266,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         dangerously_bypass_approvals_and_sandbox,
         cwd,
         add_dir,
+        plugin_dirs,
     } = shared;
 
     let (_stdout_with_ansi, stderr_with_ansi) = match color {
@@ -424,6 +425,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         ephemeral: ephemeral.then_some(true),
         additional_writable_roots: add_dir,
         settings_file: config_overrides.settings_file.clone(),
+        cli_plugin_dirs: plugin_dirs,
     };
 
     let config = ConfigBuilder::default()
