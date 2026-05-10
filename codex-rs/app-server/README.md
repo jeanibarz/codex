@@ -1560,6 +1560,28 @@ Use `hooks/list` to fetch discovered hooks for one or more `cwds`. Each result i
 
 Hooks are returned even when disabled so clients can render and re-enable them. User-controlled state lives under `hooks.state`. Managed hooks are non-configurable, and user entries for managed hook keys are ignored during loading.
 
+Codex discovers runtime hooks from Codex config layers such as `$CODEX_HOME/hooks.json`, project `.codex/hooks.json`, `[hooks]` entries in `config.toml`, managed requirements, enabled plugin hook sources, and any supervisor JSON passed with `--settings FILE`. It does not read Claude Code's `~/.claude/settings.json` as a runtime hook source.
+
+Clients that rely on Claude Code user-global hooks should either pass that file explicitly with `--settings`, or import/mirror supported hook definitions into `$CODEX_HOME/hooks.json`.
+
+For example, to mirror Claude Code-style global `PreToolUse` Bash gates into Codex's user hook file:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "Bash",
+      "hooks": [
+        { "type": "command", "command": "/home/jean/.claude/hooks/pr-workflow-gate.sh" },
+        { "type": "command", "command": "/home/jean/.claude/hooks/oss-stale-scout-gate.sh" }
+      ]
+    }]
+  }
+}
+```
+
+Claude Code hook-level `if` expressions are not evaluated by the Codex hook runtime. Keep command-specific filtering inside the hook command, as in the example scripts above.
+
 For unmanaged hooks, `currentHash` and `trustStatus` describe whether the current definition is first-seen, approved, or changed since approval. Only trusted unmanaged hooks become runnable. Hook keys combine the source identity with a trailing event/group/handler selector that is currently positional.
 
 ```json
