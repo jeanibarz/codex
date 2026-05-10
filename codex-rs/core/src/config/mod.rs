@@ -821,6 +821,12 @@ pub struct Config {
     /// Path to a JSON settings file containing additional hook definitions.
     /// Used by external supervisors (e.g. Looper) to inject per-session hooks.
     pub settings_file: Option<PathBuf>,
+
+    /// Additional plugin directories supplied via the `--plugin-dir` CLI flag.
+    /// Each directory's `skills/` subdirectory becomes an extra skill root.
+    /// Empty by default. Used by external supervisors (e.g. Kookr) to inject
+    /// curated toolkits without modifying user-scope marketplace state.
+    pub cli_plugin_dirs: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1885,6 +1891,10 @@ pub struct ConfigOverrides {
     /// Merged additively with config.toml hooks. Used by external supervisors
     /// (e.g. Looper) to inject per-session hooks.
     pub settings_file: Option<PathBuf>,
+
+    /// Additional plugin directories from `--plugin-dir`. Each becomes an
+    /// extra skill root via its `skills/` subdirectory.
+    pub cli_plugin_dirs: Vec<PathBuf>,
 }
 
 /// Resolves the OSS provider from CLI override, profile config, or global config.
@@ -2160,6 +2170,7 @@ impl Config {
             ephemeral,
             additional_writable_roots,
             settings_file,
+            cli_plugin_dirs,
         } = overrides;
 
         if sandbox_mode.is_some() && permission_profile.is_some() {
@@ -3214,6 +3225,7 @@ impl Config {
                 .unwrap_or_default(),
             otel,
             settings_file,
+            cli_plugin_dirs,
         };
         Ok(config)
         })

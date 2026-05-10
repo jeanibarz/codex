@@ -56,6 +56,23 @@ pub(crate) fn skills_load_input_from_config(
     )
 }
 
+pub(crate) fn include_cli_plugin_skill_roots(
+    config: &Config,
+    mut effective_skill_roots: Vec<PluginSkillRoot>,
+) -> Vec<PluginSkillRoot> {
+    for cli_plugin_dir in &config.cli_plugin_dirs {
+        if let Some(root) = codex_utils_plugins::plugin_skill_root_from_cli_dir(cli_plugin_dir) {
+            effective_skill_roots.push(root);
+        } else {
+            warn!(
+                "--plugin-dir {} skipped: no readable plugin manifest at .codex-plugin/plugin.json or .claude-plugin/plugin.json",
+                cli_plugin_dir.display()
+            );
+        }
+    }
+    effective_skill_roots
+}
+
 pub(crate) async fn resolve_skill_dependencies_for_turn(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
@@ -231,4 +248,42 @@ pub(crate) async fn maybe_emit_implicit_skill_invocation(
             ),
             vec![invocation],
         );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_utils_absolute_path::AbsolutePathBuf;
+    use pretty_assertions::assert_eq;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn include_cli_plugin_skill_roots_adds_roots_from_config() {
+        let tmp = tempdir().expect("tempdir");
+        let plugin_root = tmp.path().join("plugins/kookr");
+        fs::create_dir_all(plugin_root.join(".codex-plugin")).expect("mkdir manifest");
+        fs::create_dir_all(plugin_root.join("skills")).expect("mkdir skills");
+        fs::write(
+            plugin_root.join(".codex-plugin/plugin.json"),
+            r#"{"name":"kookr-toolkit"}"#,
+        )
+        .expect("write manifest");
+
+        let mut config = crate::config::test_config().await;
+        config.cli_plugin_dirs = vec![plugin_root.clone()];
+        let canonical_plugin_root = fs::canonicalize(plugin_root).expect("canonical plugin root");
+        let expected_skill_root =
+            AbsolutePathBuf::from_absolute_path_checked(canonical_plugin_root)
+                .expect("absolute plugin root")
+                .join("skills");
+
+        assert_eq!(
+            include_cli_plugin_skill_roots(&config, Vec::new()),
+            vec![PluginSkillRoot {
+                path: expected_skill_root,
+                plugin_id: "kookr-toolkit".to_string(),
+            }]
+        );
+    }
 }

@@ -9,6 +9,7 @@ pub mod plugin_namespace;
 
 pub use plugin_namespace::find_plugin_manifest_path;
 pub use plugin_namespace::plugin_namespace_for_skill_path;
+pub use plugin_namespace::plugin_skill_root_from_cli_dir;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PluginSkillRoot {
