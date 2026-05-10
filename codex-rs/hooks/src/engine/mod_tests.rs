@@ -18,11 +18,11 @@ use codex_config::RequirementSource;
 use codex_config::TomlValue;
 use codex_plugin::PluginHookSource;
 use codex_plugin::PluginId;
-use codex_protocol::ThreadId;
 use codex_protocol::protocol::HookOutputEntryKind;
 use codex_protocol::protocol::HookRunStatus;
 use codex_protocol::protocol::HookSource;
 use codex_protocol::protocol::HookTrustStatus;
+use codex_protocol::ThreadId;
 use pretty_assertions::assert_eq;
 use tempfile::tempdir;
 
@@ -451,6 +451,165 @@ fn session_flags_hooks_without_trusted_hash_remain_untrusted() {
     );
 }
 
+#[test]
+fn claude_settings_hooks_are_discovered_before_codex_sources() {
+    let temp = tempdir().expect("create temp dir");
+    let home = temp.path().join("home");
+    let project = temp.path().join("project");
+    let codex_home = home.join(".codex");
+    let user_claude_dir = home.join(".claude");
+    let project_codex_dir = project.join(".codex");
+    let project_claude_dir = project.join(".claude");
+    fs::create_dir_all(&codex_home).expect("create codex home");
+    fs::create_dir_all(&user_claude_dir).expect("create user claude dir");
+    fs::create_dir_all(&project_codex_dir).expect("create project codex dir");
+    fs::create_dir_all(&project_claude_dir).expect("create project claude dir");
+
+    fs::write(
+        user_claude_dir.join("settings.json"),
+        serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "^Bash$",
+                    "hooks": [{ "type": "command", "command": "python3 /tmp/user-claude.py" }]
+                }],
+                "Stop": [{
+                    "hooks": [{
+                        "type": "command",
+                        "command": "python3 /tmp/conditional.py",
+                        "if": "tool_input.command == 'echo no'"
+                    }]
+                }],
+                "SessionStart": [{
+                    "hooks": [{ "type": "command", "command": "python3 /tmp/out-of-scope.py" }]
+                }]
+            }
+        })
+        .to_string(),
+    )
+    .expect("write user claude settings");
+    fs::write(
+        project_claude_dir.join("settings.json"),
+        serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "^Bash$",
+                    "hooks": [{ "type": "command", "command": "python3 /tmp/project-claude.py" }]
+                }]
+            }
+        })
+        .to_string(),
+    )
+    .expect("write project claude settings");
+    fs::write(
+        project_claude_dir.join("settings.local.json"),
+        serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "^Bash$",
+                    "hooks": [{ "type": "command", "command": "python3 /tmp/project-local.py" }]
+                }]
+            }
+        })
+        .to_string(),
+    )
+    .expect("write project local claude settings");
+    fs::write(
+        codex_home.join("hooks.json"),
+        serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "^Bash$",
+                    "hooks": [{ "type": "command", "command": "python3 /tmp/user-codex.py" }]
+                }]
+            }
+        })
+        .to_string(),
+    )
+    .expect("write user codex hooks");
+
+    let config_layer_stack = ConfigLayerStack::new(
+        vec![
+            ConfigLayerEntry::new(
+                ConfigLayerSource::User {
+                    file: AbsolutePathBuf::try_from(codex_home.join("config.toml"))
+                        .expect("absolute user config"),
+                },
+                TomlValue::Table(Default::default()),
+            ),
+            ConfigLayerEntry::new(
+                ConfigLayerSource::Project {
+                    dot_codex_folder: AbsolutePathBuf::try_from(project_codex_dir)
+                        .expect("absolute project config folder"),
+                },
+                TomlValue::Table(Default::default()),
+            ),
+        ],
+        ConfigRequirements::default(),
+        ConfigRequirementsToml::default(),
+    )
+    .expect("config layer stack");
+
+    let discovered =
+        super::discovery::discover_handlers(Some(&config_layer_stack), Vec::new(), Vec::new());
+
+    assert_eq!(
+        discovered
+            .hook_entries
+            .iter()
+            .map(|entry| entry.source_path.display().to_string())
+            .collect::<Vec<_>>(),
+        vec![
+            user_claude_dir.join("settings.json").display().to_string(),
+            project_claude_dir
+                .join("settings.json")
+                .display()
+                .to_string(),
+            project_claude_dir
+                .join("settings.local.json")
+                .display()
+                .to_string(),
+            codex_home.join("hooks.json").display().to_string(),
+        ]
+    );
+    assert_eq!(
+        discovered
+            .hook_entries
+            .iter()
+            .map(|entry| entry.source)
+            .collect::<Vec<_>>(),
+        vec![
+            HookSource::User,
+            HookSource::Project,
+            HookSource::Project,
+            HookSource::User,
+        ]
+    );
+    assert_eq!(
+        discovered
+            .hook_entries
+            .iter()
+            .map(|entry| entry.trust_status)
+            .collect::<Vec<_>>(),
+        vec![
+            HookTrustStatus::Managed,
+            HookTrustStatus::Untrusted,
+            HookTrustStatus::Untrusted,
+            HookTrustStatus::Untrusted,
+        ]
+    );
+    assert_eq!(discovered.handlers.len(), 1);
+    assert_eq!(
+        discovered.handlers[0].source_path.display().to_string(),
+        user_claude_dir.join("settings.json").display().to_string()
+    );
+    assert!(discovered.warnings.iter().any(|warning| {
+        warning.contains("skipping 1 Claude settings hook(s)")
+            && warning.contains("Stop/*")
+            && warning.contains(&user_claude_dir.join("settings.json").display().to_string())
+    }));
+}
+
 fn config_with_hook_state(key: &str, enabled: bool) -> TomlValue {
     serde_json::from_value(serde_json::json!({
         "hooks": {
@@ -592,22 +751,20 @@ fn requirements_managed_hooks_warn_when_managed_dir_is_missing() {
             && warning.contains(&missing_dir.display().to_string())
     }));
     let cwd = cwd();
-    assert!(
-        engine
-            .preview_pre_tool_use(&PreToolUseRequest {
-                session_id: ThreadId::new(),
-                turn_id: "turn-1".to_string(),
-                cwd,
-                transcript_path: None,
-                model: "gpt-test".to_string(),
-                permission_mode: "default".to_string(),
-                tool_name: "Bash".to_string(),
-                matcher_aliases: Vec::new(),
-                tool_use_id: "tool-1".to_string(),
-                tool_input: serde_json::json!({ "command": "echo hello" }),
-            })
-            .is_empty()
-    );
+    assert!(engine
+        .preview_pre_tool_use(&PreToolUseRequest {
+            session_id: ThreadId::new(),
+            turn_id: "turn-1".to_string(),
+            cwd,
+            transcript_path: None,
+            model: "gpt-test".to_string(),
+            permission_mode: "default".to_string(),
+            tool_name: "Bash".to_string(),
+            matcher_aliases: Vec::new(),
+            tool_use_id: "tool-1".to_string(),
+            tool_input: serde_json::json!({ "command": "echo hello" }),
+        })
+        .is_empty());
 }
 
 #[test]

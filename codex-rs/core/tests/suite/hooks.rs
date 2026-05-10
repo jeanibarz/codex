@@ -24,6 +24,7 @@ use core_test_support::hooks::trust_discovered_hooks;
 use core_test_support::hooks::trust_hooks;
 use core_test_support::managed_network_requirements_loader;
 use core_test_support::responses::ev_apply_patch_custom_tool_call;
+use core_test_support::responses::ev_apply_patch_shell_call;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call;
@@ -2660,7 +2661,7 @@ async fn pre_tool_use_blocks_apply_patch_before_execution() -> Result<()> {
         vec![
             sse(vec![
                 ev_response_created("resp-1"),
-                ev_apply_patch_custom_tool_call(call_id, &patch),
+                ev_apply_patch_shell_call(call_id, &patch),
                 ev_completed("resp-1"),
             ]),
             sse(vec![
@@ -2734,7 +2735,7 @@ async fn file_changed_runs_after_successful_apply_patch() -> Result<()> {
         vec![
             sse(vec![
                 ev_response_created("resp-1"),
-                ev_apply_patch_function_call(call_id, &patch),
+                ev_apply_patch_custom_tool_call(call_id, &patch),
                 ev_completed("resp-1"),
             ]),
             sse(vec![
@@ -2758,6 +2759,7 @@ async fn file_changed_runs_after_successful_apply_patch() -> Result<()> {
                 .features
                 .enable(Feature::CodexHooks)
                 .expect("test config should allow feature update");
+            trust_discovered_hooks(config);
         });
     let test = builder.build(&server).await?;
 
