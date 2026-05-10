@@ -1554,6 +1554,20 @@ Hooks are returned even when disabled so clients can render and re-enable them. 
 
 For unmanaged hooks, `currentHash` and `trustStatus` describe whether the current definition is first-seen, approved, or changed since approval. Only trusted unmanaged hooks become runnable. Hook keys combine the source identity with a trailing event/group/handler selector that is currently positional.
 
+When `features.codex_hooks = true`, hook discovery also reads Claude Code settings for the compatible events `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, and `Stop`. Codex discovers `~/.claude/settings.json`, `<cwd>/.claude/settings.json`, and `<cwd>/.claude/settings.local.json` automatically; no manual mirror into `.codex/hooks.json` is required. Claude hook entries that contain an unsupported `if` field are skipped with a startup warning that names the source file, matcher, and dropped count.
+
+Hook sources are loaded from lower to higher precedence in this order:
+
+| Precedence | Source |
+| --- | --- |
+| 1 | `~/.claude/settings.json` |
+| 2 | `<cwd>/.claude/settings.json` |
+| 3 | `<cwd>/.claude/settings.local.json` |
+| 4 | `$CODEX_HOME/hooks.json` |
+| 5 | `<cwd>/.codex/hooks.json` |
+| 6 | `[hooks]` in `config.toml` |
+| 7 | managed hooks, plugin hooks, and explicit `--settings FILE` hooks |
+
 ```json
 {
   "method": "hooks/list",
