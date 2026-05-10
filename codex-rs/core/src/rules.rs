@@ -39,22 +39,14 @@ pub(crate) struct LoadedRule {
     pub(crate) body: String,
 }
 
-/// Discover and read rule files from `<cwd>/.codex/rules/*.md` and
-/// `<cwd>/.claude/rules/*.md`.
-///
-/// `max_bytes` is a global ceiling on the total bytes consumed across all
-/// rule bodies; once the budget is exhausted later rules are dropped. Per-file
-/// parsing errors (malformed frontmatter, non-utf8 content) are logged and
-/// the offending file is skipped.
-pub(crate) async fn discover_rules(
+/// Discover all candidate rule files under `<cwd>/.codex/rules/*.md` and
+/// `<cwd>/.claude/rules/*.md` without reading their contents. Returned paths
+/// are sorted by filename within each directory; the `.codex` directory is
+/// listed before `.claude`.
+pub(crate) async fn discover_rule_paths(
     cwd: &AbsolutePathBuf,
     fs: &dyn ExecutorFileSystem,
-    max_bytes: usize,
-) -> io::Result<Vec<LoadedRule>> {
-    if max_bytes == 0 {
-        return Ok(Vec::new());
-    }
-
+) -> io::Result<Vec<AbsolutePathBuf>> {
     let mut rule_paths: Vec<AbsolutePathBuf> = Vec::new();
     for dirname in [CODEX_RULES_DIRNAME, CLAUDE_RULES_DIRNAME] {
         let dir = cwd.join(dirname);
@@ -82,6 +74,26 @@ pub(crate) async fn discover_rules(
             rule_paths.push(dir.join(&entry.file_name));
         }
     }
+    Ok(rule_paths)
+}
+
+/// Discover and read rule files from `<cwd>/.codex/rules/*.md` and
+/// `<cwd>/.claude/rules/*.md`.
+///
+/// `max_bytes` is a global ceiling on the total bytes consumed across all
+/// rule bodies; once the budget is exhausted later rules are dropped. Per-file
+/// parsing errors (malformed frontmatter, non-utf8 content) are logged and
+/// the offending file is skipped.
+pub(crate) async fn discover_rules(
+    cwd: &AbsolutePathBuf,
+    fs: &dyn ExecutorFileSystem,
+    max_bytes: usize,
+) -> io::Result<Vec<LoadedRule>> {
+    if max_bytes == 0 {
+        return Ok(Vec::new());
+    }
+
+    let rule_paths = discover_rule_paths(cwd, fs).await?;
 
     let mut loaded = Vec::with_capacity(rule_paths.len());
     let mut remaining: u64 = max_bytes as u64;
