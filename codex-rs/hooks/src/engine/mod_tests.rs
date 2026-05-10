@@ -610,6 +610,83 @@ fn claude_settings_hooks_are_discovered_before_codex_sources() {
     }));
 }
 
+#[test]
+fn claude_settings_bash_if_filters_pre_tool_use_hooks_by_command() {
+    let temp = tempdir().expect("create temp dir");
+    let home = temp.path().join("home");
+    let codex_home = home.join(".codex");
+    let user_claude_dir = home.join(".claude");
+    fs::create_dir_all(&codex_home).expect("create codex home");
+    fs::create_dir_all(&user_claude_dir).expect("create user claude dir");
+    fs::write(
+        user_claude_dir.join("settings.json"),
+        serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{
+                    "matcher": "^Bash$",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "python3 /tmp/pr-workflow-gate.py",
+                        "if": "Bash(gh pr create*)"
+                    }]
+                }]
+            }
+        })
+        .to_string(),
+    )
+    .expect("write user claude settings");
+
+    let config_layer_stack = ConfigLayerStack::new(
+        vec![ConfigLayerEntry::new(
+            ConfigLayerSource::User {
+                file: AbsolutePathBuf::try_from(codex_home.join("config.toml"))
+                    .expect("absolute user config"),
+            },
+            TomlValue::Table(Default::default()),
+        )],
+        ConfigRequirements::default(),
+        ConfigRequirementsToml::default(),
+    )
+    .expect("config layer stack");
+    let engine = ClaudeHooksEngine::new(
+        /*enabled*/ true,
+        Some(&config_layer_stack),
+        Vec::new(),
+        Vec::new(),
+        CommandShell {
+            program: String::new(),
+            args: Vec::new(),
+        },
+        /*settings_file*/ None,
+    );
+
+    assert_eq!(engine.warnings(), Vec::<String>::new());
+    assert_eq!(engine.handlers.len(), 1);
+
+    let matching_preview =
+        engine.preview_pre_tool_use(&pre_tool_use_request("tool-1", "gh pr create --title test"));
+    assert_eq!(matching_preview.len(), 1);
+
+    let non_matching_preview =
+        engine.preview_pre_tool_use(&pre_tool_use_request("tool-2", "gh issue list"));
+    assert!(non_matching_preview.is_empty());
+}
+
+fn pre_tool_use_request(tool_use_id: &str, command: &str) -> PreToolUseRequest {
+    PreToolUseRequest {
+        session_id: ThreadId::new(),
+        turn_id: "turn-1".to_string(),
+        cwd: cwd(),
+        transcript_path: None,
+        model: "gpt-test".to_string(),
+        permission_mode: "default".to_string(),
+        tool_name: "Bash".to_string(),
+        matcher_aliases: Vec::new(),
+        tool_use_id: tool_use_id.to_string(),
+        tool_input: serde_json::json!({ "command": command }),
+    }
+}
+
 fn config_with_hook_state(key: &str, enabled: bool) -> TomlValue {
     serde_json::from_value(serde_json::json!({
         "hooks": {
