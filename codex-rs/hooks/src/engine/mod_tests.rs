@@ -667,8 +667,20 @@ fn claude_settings_bash_if_filters_pre_tool_use_hooks_by_command() {
         engine.preview_pre_tool_use(&pre_tool_use_request("tool-1", "gh pr create --title test"));
     assert_eq!(matching_preview.len(), 1);
 
+    let matching_subcommand_preview = engine.preview_pre_tool_use(&pre_tool_use_request(
+        "tool-2",
+        "cd repo && gh pr create --title test",
+    ));
+    assert_eq!(matching_subcommand_preview.len(), 1);
+
+    let conservative_complex_preview = engine.preview_pre_tool_use(&pre_tool_use_request(
+        "tool-3",
+        "cd $(mktemp -d) && gh issue list",
+    ));
+    assert_eq!(conservative_complex_preview.len(), 1);
+
     let non_matching_preview =
-        engine.preview_pre_tool_use(&pre_tool_use_request("tool-2", "gh issue list"));
+        engine.preview_pre_tool_use(&pre_tool_use_request("tool-4", "gh issue list"));
     assert!(non_matching_preview.is_empty());
 }
 

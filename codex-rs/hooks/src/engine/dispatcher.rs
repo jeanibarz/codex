@@ -166,9 +166,70 @@ fn condition_matches_tool_use(
                 && tool_input
                     .get("command")
                     .and_then(serde_json::Value::as_str)
-                    .is_some_and(|command| glob_matches(command_glob, command))
+                    .is_some_and(|command| command_matches_glob(command_glob, command))
         }
     }
+}
+
+fn command_matches_glob(pattern: &str, command: &str) -> bool {
+    if glob_matches(pattern, command) {
+        return true;
+    }
+    let Some(commands) = split_top_level_shell_commands(command) else {
+        return true;
+    };
+    commands
+        .iter()
+        .any(|command| glob_matches(pattern, command.trim()))
+}
+
+fn split_top_level_shell_commands(command: &str) -> Option<Vec<&str>> {
+    let mut commands = Vec::new();
+    let mut start = 0;
+    let mut chars = command.char_indices().peekable();
+    let mut quote = None;
+    let mut escaped = false;
+
+    while let Some((index, ch)) = chars.next() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if let Some(quote_ch) = quote {
+            if ch == quote_ch {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            ';' | '\n' | '&' | '|' => {
+                let next_len = if matches!(ch, '&' | '|')
+                    && chars.peek().is_some_and(|(_, next)| *next == ch)
+                {
+                    chars.next();
+                    ch.len_utf8() * 2
+                } else {
+                    ch.len_utf8()
+                };
+                commands.push(&command[start..index]);
+                start = index + next_len;
+            }
+            '$' if chars.peek().is_some_and(|(_, next)| *next == '(') => return None,
+            '`' | '(' | ')' | '{' | '}' => return None,
+            _ => {}
+        }
+    }
+
+    if escaped || quote.is_some() {
+        return None;
+    }
+    commands.push(&command[start..]);
+    Some(commands)
 }
 
 fn glob_matches(pattern: &str, input: &str) -> bool {
