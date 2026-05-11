@@ -127,7 +127,10 @@ impl<'a> AgentsMdManager<'a> {
             output.push_str(HIERARCHICAL_AGENTS_MESSAGE);
         }
 
-        match self.read_conditional_rules(fs, project_doc_bytes_used).await {
+        match self
+            .read_conditional_rules(fs, project_doc_bytes_used)
+            .await
+        {
             Ok(Some(rules_block)) => {
                 if !output.is_empty() {
                     output.push_str(CONDITIONAL_RULES_SEPARATOR);

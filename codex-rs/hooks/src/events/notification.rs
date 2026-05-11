@@ -126,5 +126,6 @@ fn parse_completed(
     dispatcher::ParsedHandler {
         completed,
         data: (),
+        completion_order: 0,
     }
 }

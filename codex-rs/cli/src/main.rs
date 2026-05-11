@@ -1580,6 +1580,7 @@ async fn run_debug_prompt_input_command(
         ephemeral: Some(true),
         bypass_hook_trust: shared.bypass_hook_trust.then_some(true),
         additional_writable_roots: shared.add_dir,
+        cli_plugin_dirs: shared.plugin_dirs,
         ..Default::default()
     };
     let config = ConfigBuilder::default()

@@ -63,7 +63,10 @@ async fn loads_rule_with_paths_frontmatter() {
     assert_eq!(rules.len(), 1);
     assert_eq!(
         rules[0].paths_globs,
-        vec!["src/server/**/*.ts".to_string(), "src/api/**/*.ts".to_string()]
+        vec![
+            "src/server/**/*.ts".to_string(),
+            "src/api/**/*.ts".to_string()
+        ]
     );
     assert_eq!(
         rules[0].description.as_deref(),
@@ -85,7 +88,11 @@ async fn merges_codex_and_claude_rules() {
     fs::create_dir_all(tmp.path().join(".codex/rules")).unwrap();
     fs::create_dir_all(tmp.path().join(".claude/rules")).unwrap();
     fs::write(tmp.path().join(".codex/rules/codex_only.md"), "codex rule").unwrap();
-    fs::write(tmp.path().join(".claude/rules/claude_only.md"), "claude rule").unwrap();
+    fs::write(
+        tmp.path().join(".claude/rules/claude_only.md"),
+        "claude rule",
+    )
+    .unwrap();
 
     let cwd = cwd_for(&tmp);
     let rules = discover_rules(&cwd, LOCAL_FS.as_ref(), 4096).await.unwrap();

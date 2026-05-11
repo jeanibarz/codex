@@ -1,21 +1,21 @@
 use std::path::PathBuf;
 
+use codex_protocol::ThreadId;
 use codex_protocol::protocol::HookCompletedEvent;
 use codex_protocol::protocol::HookEventName;
 use codex_protocol::protocol::HookOutputEntry;
 use codex_protocol::protocol::HookOutputEntryKind;
 use codex_protocol::protocol::HookRunStatus;
 use codex_protocol::protocol::HookRunSummary;
-use codex_protocol::ThreadId;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use serde_json::Value;
 
 use super::common;
+use crate::engine::CommandShell;
+use crate::engine::ConfiguredHandler;
 use crate::engine::command_runner::CommandRunResult;
 use crate::engine::dispatcher;
 use crate::engine::output_parser;
-use crate::engine::CommandShell;
-use crate::engine::ConfiguredHandler;
 use crate::schema::PostToolUseCommandInput;
 
 #[derive(Debug, Clone)]
@@ -316,22 +316,22 @@ fn serialization_failure_outcome(hook_events: Vec<HookCompletedEvent>) -> PostTo
 
 #[cfg(test)]
 mod tests {
+    use codex_protocol::ThreadId;
     use codex_protocol::protocol::HookEventName;
     use codex_protocol::protocol::HookOutputEntry;
     use codex_protocol::protocol::HookOutputEntryKind;
     use codex_protocol::protocol::HookRunStatus;
-    use codex_protocol::ThreadId;
-    use codex_utils_absolute_path::test_support::test_path_buf;
     use codex_utils_absolute_path::test_support::PathBufExt;
+    use codex_utils_absolute_path::test_support::test_path_buf;
     use pretty_assertions::assert_eq;
     use serde_json::json;
 
+    use super::PostToolUseHandlerData;
     use super::command_input_json;
     use super::parse_completed;
     use super::preview;
-    use super::PostToolUseHandlerData;
-    use crate::engine::command_runner::CommandRunResult;
     use crate::engine::ConfiguredHandler;
+    use crate::engine::command_runner::CommandRunResult;
     use crate::events::common;
 
     #[test]

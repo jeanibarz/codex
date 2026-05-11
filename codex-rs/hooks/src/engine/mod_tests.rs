@@ -19,12 +19,12 @@ use codex_config::Sourced;
 use codex_config::TomlValue;
 use codex_plugin::PluginHookSource;
 use codex_plugin::PluginId;
+use codex_protocol::ThreadId;
 use codex_protocol::protocol::HookOutputEntry;
 use codex_protocol::protocol::HookOutputEntryKind;
 use codex_protocol::protocol::HookRunStatus;
 use codex_protocol::protocol::HookSource;
 use codex_protocol::protocol::HookTrustStatus;
-use codex_protocol::ThreadId;
 use pretty_assertions::assert_eq;
 use tempfile::tempdir;
 
@@ -307,6 +307,7 @@ async fn requirements_managed_hooks_execute_windows_command_override() {
             program: String::new(),
             args: Vec::new(),
         },
+        /*settings_file*/ None,
     );
 
     let outcome = engine
@@ -579,6 +580,7 @@ fn settings_file_hooks_are_managed_and_runnable() {
 
     let engine = ClaudeHooksEngine::new(
         /*enabled*/ true,
+        /*bypass_hook_trust*/ false,
         /*config_layer_stack*/ None,
         Vec::new(),
         Vec::new(),
@@ -599,6 +601,7 @@ fn settings_file_hooks_are_managed_and_runnable() {
         plugin_hook_load_warnings: Vec::new(),
         shell_program: None,
         shell_args: Vec::new(),
+        bypass_hook_trust: false,
         settings_file: Some(settings_path.as_path().to_path_buf()),
     });
     assert_eq!(listed.hooks.len(), 1);
@@ -621,7 +624,12 @@ fn session_flags_hooks_without_trusted_hash_remain_untrusted() {
     .expect("config layer stack");
 
     let discovered =
-        super::discovery::discover_handlers(Some(&config_layer_stack), Vec::new(), Vec::new());
+        super::discovery::discover_handlers(
+            Some(&config_layer_stack),
+            Vec::new(),
+            Vec::new(),
+            /*bypass_hook_trust*/ false,
+        );
 
     assert_eq!(discovered.handlers.len(), 0);
     assert_eq!(discovered.hook_entries.len(), 1);
@@ -734,7 +742,12 @@ fn claude_settings_hooks_are_discovered_before_codex_sources() {
     .expect("config layer stack");
 
     let discovered =
-        super::discovery::discover_handlers(Some(&config_layer_stack), Vec::new(), Vec::new());
+        super::discovery::discover_handlers(
+            Some(&config_layer_stack),
+            Vec::new(),
+            Vec::new(),
+            /*bypass_hook_trust*/ false,
+        );
 
     assert_eq!(
         discovered
@@ -833,6 +846,7 @@ fn claude_settings_bash_if_filters_pre_tool_use_hooks_by_command() {
     .expect("config layer stack");
     let engine = ClaudeHooksEngine::new(
         /*enabled*/ true,
+        /*bypass_hook_trust*/ false,
         Some(&config_layer_stack),
         Vec::new(),
         Vec::new(),
@@ -1026,20 +1040,22 @@ fn requirements_managed_hooks_warn_when_managed_dir_is_missing() {
             && warning.contains(&missing_dir.display().to_string())
     }));
     let cwd = cwd();
-    assert!(engine
-        .preview_pre_tool_use(&PreToolUseRequest {
-            session_id: ThreadId::new(),
-            turn_id: "turn-1".to_string(),
-            cwd,
-            transcript_path: None,
-            model: "gpt-test".to_string(),
-            permission_mode: "default".to_string(),
-            tool_name: "Bash".to_string(),
-            matcher_aliases: Vec::new(),
-            tool_use_id: "tool-1".to_string(),
-            tool_input: serde_json::json!({ "command": "echo hello" }),
-        })
-        .is_empty());
+    assert!(
+        engine
+            .preview_pre_tool_use(&PreToolUseRequest {
+                session_id: ThreadId::new(),
+                turn_id: "turn-1".to_string(),
+                cwd,
+                transcript_path: None,
+                model: "gpt-test".to_string(),
+                permission_mode: "default".to_string(),
+                tool_name: "Bash".to_string(),
+                matcher_aliases: Vec::new(),
+                tool_use_id: "tool-1".to_string(),
+                tool_input: serde_json::json!({ "command": "echo hello" }),
+            })
+            .is_empty()
+    );
 }
 
 #[test]
@@ -1070,6 +1086,7 @@ fn allow_managed_hooks_only_false_keeps_unmanaged_hooks() {
             program: String::new(),
             args: Vec::new(),
         },
+        /*settings_file*/ None,
     );
 
     assert!(engine.warnings().is_empty());
@@ -1121,6 +1138,7 @@ fn allow_managed_hooks_only_in_config_toml_does_not_enable_policy() {
             program: String::new(),
             args: Vec::new(),
         },
+        /*settings_file*/ None,
     );
 
     assert!(engine.warnings().is_empty());
@@ -1188,6 +1206,7 @@ fn allow_managed_hooks_only_skips_unmanaged_json_and_toml_hooks() {
             program: String::new(),
             args: Vec::new(),
         },
+        /*settings_file*/ None,
     );
 
     assert!(engine.handlers.is_empty());
@@ -1227,6 +1246,7 @@ fn allow_managed_hooks_only_skips_unmanaged_plugin_hooks() {
             program: String::new(),
             args: Vec::new(),
         },
+        /*settings_file*/ None,
     );
 
     assert!(engine.handlers.is_empty());
@@ -1299,6 +1319,7 @@ fn allow_managed_hooks_only_keeps_managed_requirement_and_config_layer_hooks() {
             program: String::new(),
             args: Vec::new(),
         },
+        /*settings_file*/ None,
     );
 
     assert!(engine.warnings().is_empty());

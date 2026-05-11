@@ -2020,8 +2020,8 @@ async fn project_layer_is_added_when_dot_codex_exists_without_config_toml() -> s
 }
 
 #[tokio::test]
-async fn project_layer_is_added_when_claude_settings_exists_without_dot_codex(
-) -> std::io::Result<()> {
+async fn project_layer_is_added_when_claude_settings_exists_without_dot_codex()
+-> std::io::Result<()> {
     let tmp = tempdir()?;
     let project_root = tmp.path().join("project");
     let nested = project_root.join("child");
@@ -2057,18 +2057,13 @@ async fn project_layer_is_added_when_claude_settings_exists_without_dot_codex(
         .into_iter()
         .filter(|layer| matches!(layer.name, ConfigLayerSource::Project { .. }))
         .collect();
-    assert_eq!(
-        vec![&ConfigLayerEntry {
-            name: ConfigLayerSource::Project {
-                dot_codex_folder: AbsolutePathBuf::from_absolute_path(project_root.join(".codex"))?,
-            },
-            config: TomlValue::Table(toml::map::Map::new()),
-            raw_toml: None,
-            version: version_for_toml(&TomlValue::Table(toml::map::Map::new())),
-            disabled_reason: None,
-        }],
-        project_layers
+    let expected_project_layer = ConfigLayerEntry::new(
+        ConfigLayerSource::Project {
+            dot_codex_folder: AbsolutePathBuf::from_absolute_path(project_root.join(".codex"))?,
+        },
+        TomlValue::Table(toml::map::Map::new()),
     );
+    assert_eq!(vec![&expected_project_layer], project_layers);
 
     Ok(())
 }

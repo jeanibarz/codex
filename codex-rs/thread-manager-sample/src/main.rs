@@ -239,6 +239,7 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
         history: History::default(),
         ephemeral: true,
         file_opener: UriBasedFileOpener::VsCode,
+        cli_plugin_dirs: Vec::new(),
         codex_self_exe: arg0_paths.codex_self_exe,
         codex_linux_sandbox_exe: arg0_paths.codex_linux_sandbox_exe,
         main_execve_wrapper_exe: arg0_paths.main_execve_wrapper_exe,

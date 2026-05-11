@@ -11,10 +11,10 @@ use codex_protocol::protocol::HookRunStatus;
 use codex_protocol::protocol::HookRunSummary;
 use codex_protocol::protocol::HookScope;
 
-use super::command_runner::run_command;
-use super::command_runner::CommandRunResult;
 use super::CommandShell;
 use super::ConfiguredHandler;
+use super::command_runner::CommandRunResult;
+use super::command_runner::run_command;
 use crate::events::common::matches_matcher;
 
 const CLAUDE_CONDITIONAL_MATCHER_PREFIX: &str = "__codex_claude_conditional_matcher__:";
@@ -343,12 +343,12 @@ fn scope_for_event(event_name: HookEventName) -> HookScope {
 mod tests {
     use codex_protocol::protocol::HookEventName;
     use codex_protocol::protocol::HookSource;
-    use codex_utils_absolute_path::test_support::test_path_buf;
     use codex_utils_absolute_path::test_support::PathBufExt;
+    use codex_utils_absolute_path::test_support::test_path_buf;
 
+    use super::ConfiguredHandler;
     use super::select_handlers;
     use super::select_handlers_for_matcher_inputs;
-    use super::ConfiguredHandler;
 
     fn make_handler(
         event_name: HookEventName,

@@ -296,7 +296,11 @@ mod looper_compat_tests {
             /*configured*/ false,
             Some(std::ffi::OsStr::new("task-1")),
         ));
-        assert!(effective_disable_paste_burst(/*configured*/ true, None));
-        assert!(!effective_disable_paste_burst(/*configured*/ false, None));
+        assert!(effective_disable_paste_burst(
+            /*configured*/ true, None
+        ));
+        assert!(!effective_disable_paste_burst(
+            /*configured*/ false, None
+        ));
     }
 }

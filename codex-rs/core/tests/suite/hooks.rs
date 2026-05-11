@@ -24,7 +24,7 @@ use core_test_support::hooks::trust_discovered_hooks;
 use core_test_support::hooks::trust_hooks;
 use core_test_support::managed_network_requirements_loader;
 use core_test_support::responses::ev_apply_patch_custom_tool_call;
-use core_test_support::responses::ev_apply_patch_shell_call;
+use core_test_support::responses::ev_apply_patch_shell_command_call_via_heredoc;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_custom_tool_call;
@@ -2898,7 +2898,7 @@ async fn pre_tool_use_blocks_apply_patch_before_execution() -> Result<()> {
         vec![
             sse(vec![
                 ev_response_created("resp-1"),
-                ev_apply_patch_shell_call(call_id, &patch),
+                ev_apply_patch_shell_command_call_via_heredoc(call_id, &patch),
                 ev_completed("resp-1"),
             ]),
             sse(vec![

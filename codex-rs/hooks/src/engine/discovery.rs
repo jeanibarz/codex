@@ -4,7 +4,7 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 
-use codex_config::version_for_toml;
+use codex_config::CONFIG_TOML_FILE;
 use codex_config::ConfigLayerEntry;
 use codex_config::ConfigLayerSource;
 use codex_config::ConfigLayerStack;
@@ -17,16 +17,16 @@ use codex_config::ManagedHooksRequirementsToml;
 use codex_config::MatcherGroup;
 use codex_config::RequirementSource;
 use codex_config::TomlValue;
-use codex_config::CONFIG_TOML_FILE;
+use codex_config::version_for_toml;
 use codex_plugin::PluginHookSource;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::dispatcher::encode_claude_conditional_matcher;
-use super::dispatcher::ClaudeHookCondition;
 use super::ConfiguredHandler;
 use super::HookListEntry;
+use super::dispatcher::ClaudeHookCondition;
+use super::dispatcher::encode_claude_conditional_matcher;
 use crate::config_rules::hook_states_from_stack;
 use crate::events::common::matcher_pattern_for_event;
 use crate::events::common::validate_matcher_pattern;
@@ -118,6 +118,7 @@ pub(crate) fn discover_handlers(
             &mut display_order,
             &layers,
             &hook_states,
+            policy,
         );
 
         for layer in &layers {
@@ -132,6 +133,7 @@ pub(crate) fn discover_handlers(
                 hook_states: &hook_states,
                 env: HashMap::new(),
                 plugin_id: None,
+                claude_conditions: Vec::new(),
             };
             if !policy.allows(&policy_source) {
                 continue;
@@ -199,6 +201,7 @@ fn append_claude_settings_handlers(
     display_order: &mut i64,
     layers: &[&ConfigLayerEntry],
     hook_states: &HashMap<String, HookStateToml>,
+    policy: HookDiscoveryPolicy,
 ) {
     let codex_home_env = std::env::var_os("CODEX_HOME").map(PathBuf::from);
     let home_dir = home_dir_from_env();
@@ -222,12 +225,14 @@ fn append_claude_settings_handlers(
                     key_source: source_path.display().to_string(),
                     source: hook_source,
                     is_managed,
+                    bypass_hook_trust: policy.bypass_hook_trust,
                     hook_states,
                     env: HashMap::new(),
                     plugin_id: None,
                     claude_conditions,
                 },
                 hook_events,
+                policy,
             );
         }
     }
@@ -333,6 +338,15 @@ fn append_managed_requirement_handlers(
     let Some(managed_hooks) = config_layer_stack.requirements().managed_hooks.as_ref() else {
         return;
     };
+    if let Some(managed_dir) = managed_hooks.get().managed_dir_for_current_platform()
+        && !managed_dir.is_dir()
+    {
+        warnings.push(format!(
+            "managed hook directory {} does not exist",
+            managed_dir.display()
+        ));
+        return;
+    }
     let source_path = managed_hooks_source_path(managed_hooks.get(), managed_hooks.source.as_ref());
     append_hook_events(
         handlers,
@@ -768,6 +782,7 @@ pub(crate) fn append_settings_file_handlers(result: &mut DiscoveryResult, settin
         key_source: source_path.display().to_string(),
         source: HookSource::SupervisorSettings,
         is_managed: true,
+        bypass_hook_trust: false,
         hook_states: &hook_states,
         env: HashMap::new(),
         plugin_id: None,
@@ -788,6 +803,10 @@ pub(crate) fn append_settings_file_handlers(result: &mut DiscoveryResult, settin
         &mut display_order,
         source,
         parsed.hooks,
+        HookDiscoveryPolicy {
+            allow_managed_hooks_only: false,
+            bypass_hook_trust: false,
+        },
     );
 }
 
@@ -1094,20 +1113,20 @@ fn hook_source_for_requirement_source(source: Option<&RequirementSource>) -> Hoo
 
 #[cfg(test)]
 mod tests {
+    use codex_config::CONFIG_TOML_FILE;
     use codex_config::ConfigLayerEntry;
     use codex_config::ConfigLayerSource;
     use codex_config::HookEventsToml;
-    use codex_config::CONFIG_TOML_FILE;
     use codex_protocol::protocol::HookEventName;
     use codex_protocol::protocol::HookSource;
-    use codex_utils_absolute_path::test_support::test_path_buf;
-    use codex_utils_absolute_path::test_support::PathBufExt;
     use codex_utils_absolute_path::AbsolutePathBuf;
+    use codex_utils_absolute_path::test_support::PathBufExt;
+    use codex_utils_absolute_path::test_support::test_path_buf;
     use pretty_assertions::assert_eq;
 
+    use super::ConfiguredHandler;
     use super::append_matcher_groups;
     use super::claude_settings_paths_for_layer;
-    use super::ConfiguredHandler;
     use codex_config::HookHandlerConfig;
     use codex_config::HookStateToml;
     use codex_config::MatcherGroup;
@@ -1135,6 +1154,7 @@ mod tests {
             hook_states,
             env: std::collections::HashMap::new(),
             plugin_id: None,
+            claude_conditions: Vec::new(),
         }
     }
 

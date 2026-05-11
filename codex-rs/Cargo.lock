@@ -2180,17 +2180,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "codex-builtin-mcps"
-version = "0.125.0-alpha.3"
-dependencies = [
- "anyhow",
- "codex-memories-mcp",
- "codex-utils-absolute-path",
- "pretty_assertions",
- "tokio",
-]
-
-[[package]]
 name = "codex-bwrap"
 version = "0.125.0-alpha.3"
 dependencies = [
@@ -2834,7 +2823,7 @@ dependencies = [
 
 [[package]]
 name = "codex-extension-api"
-version = "0.0.0"
+version = "0.125.0-alpha.3"
 dependencies = [
  "codex-protocol",
  "codex-tools",
@@ -2955,7 +2944,7 @@ dependencies = [
 
 [[package]]
 name = "codex-guardian"
-version = "0.0.0"
+version = "0.125.0-alpha.3"
 dependencies = [
  "codex-core",
  "codex-extension-api",
@@ -3147,7 +3136,7 @@ dependencies = [
 
 [[package]]
 name = "codex-memories-extension"
-version = "0.0.0"
+version = "0.125.0-alpha.3"
 dependencies = [
  "async-trait",
  "codex-core",

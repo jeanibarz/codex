@@ -389,9 +389,8 @@ async fn model_visible_tool_names_for_mode(features: &Features, mode: ModeKind) 
         ToolRouterParams {
             mcp_tools: None,
             deferred_mcp_tools: None,
-            unavailable_called_tools: Vec::new(),
-            parallel_mcp_server_names: std::collections::HashSet::new(),
             discoverable_tools: None,
+            extension_tool_executors: Vec::new(),
             dynamic_tools: &[],
         },
     );

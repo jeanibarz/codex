@@ -59,6 +59,14 @@ pub struct SharedCliOptions {
     /// Additional directories that should be writable alongside the primary workspace.
     #[arg(long = "add-dir", value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
     pub add_dir: Vec<PathBuf>,
+
+    /// Additional plugin directories whose `skills/` subdirectory will be loaded
+    /// as extra skill roots. Each directory must contain a manifest at
+    /// `.claude-plugin/plugin.json` or `.codex-plugin/plugin.json` defining
+    /// the plugin's `name`. May be specified multiple times. Mirrors
+    /// Claude Code's `--plugin-dir` flag for symmetric supervisor injection.
+    #[arg(long = "plugin-dir", value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
+    pub plugin_dirs: Vec<PathBuf>,
 }
 
 impl SharedCliOptions {
@@ -76,6 +84,7 @@ impl SharedCliOptions {
             bypass_hook_trust,
             cwd,
             add_dir,
+            plugin_dirs,
         } = self;
         let Self {
             images: root_images,
@@ -88,6 +97,7 @@ impl SharedCliOptions {
             bypass_hook_trust: root_bypass_hook_trust,
             cwd: root_cwd,
             add_dir: root_add_dir,
+            plugin_dirs: root_plugin_dirs,
         } = root;
 
         if model.is_none() {
@@ -125,6 +135,11 @@ impl SharedCliOptions {
             merged_add_dir.append(add_dir);
             *add_dir = merged_add_dir;
         }
+        if !root_plugin_dirs.is_empty() {
+            let mut merged_plugin_dirs = root_plugin_dirs.clone();
+            merged_plugin_dirs.append(plugin_dirs);
+            *plugin_dirs = merged_plugin_dirs;
+        }
     }
 
     pub fn apply_subcommand_overrides(&mut self, subcommand: Self) {
@@ -141,6 +156,7 @@ impl SharedCliOptions {
             bypass_hook_trust,
             cwd,
             add_dir,
+            plugin_dirs,
         } = subcommand;
 
         if let Some(model) = model {
@@ -171,6 +187,9 @@ impl SharedCliOptions {
         }
         if !add_dir.is_empty() {
             self.add_dir.extend(add_dir);
+        }
+        if !plugin_dirs.is_empty() {
+            self.plugin_dirs.extend(plugin_dirs);
         }
     }
 }

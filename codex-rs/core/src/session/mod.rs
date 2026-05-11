@@ -32,6 +32,7 @@ use crate::context::PersonalitySpecInstructions;
 use crate::default_skill_metadata_budget;
 use crate::environment_selection::ResolvedTurnEnvironments;
 use crate::exec_policy::ExecPolicyManager;
+use crate::include_cli_plugin_skill_roots;
 use crate::parse_turn_item;
 use crate::path_utils::normalize_for_native_workdir;
 use crate::realtime_conversation::RealtimeConversationManager;
@@ -479,7 +480,8 @@ impl Codex {
         let fs = environment_selections.primary_filesystem();
         let plugins_input = config.plugins_config_input();
         let plugin_outcome = plugins_manager.plugins_for_config(&plugins_input).await;
-        let effective_skill_roots = plugin_outcome.effective_plugin_skill_roots();
+        let effective_skill_roots =
+            include_cli_plugin_skill_roots(&config, plugin_outcome.effective_plugin_skill_roots());
         let skills_input = skills_load_input_from_config(&config, effective_skill_roots);
         let loaded_skills = skills_manager.skills_for_config(&skills_input, fs).await;
 
