@@ -9,6 +9,10 @@ use crate::session::turn_context::TurnContext;
 use codex_analytics::InvocationType;
 use codex_analytics::SkillInvocation;
 use codex_analytics::build_track_events_context;
+use codex_core_plugins::loader::load_plugin_hooks;
+use codex_core_plugins::manifest::load_plugin_manifest;
+use codex_plugin::PluginHookSource;
+use codex_plugin::PluginId;
 use codex_protocol::protocol::SkillScope;
 use codex_protocol::request_user_input::RequestUserInputArgs;
 use codex_protocol::request_user_input::RequestUserInputQuestion;
@@ -71,6 +75,69 @@ pub(crate) fn include_cli_plugin_skill_roots(
         }
     }
     effective_skill_roots
+}
+
+/// Extend `effective` with [`PluginHookSource`] entries discovered under each
+/// directory passed via `--plugin-dir`. Mirrors [`include_cli_plugin_skill_roots`]
+/// for the hooks subsystem: PR #57 added the skill-root path; this completes the
+/// parity so CLI-injected plugins can register hooks alongside skills + agents.
+///
+/// Without this, plugins shipped via `--plugin-dir` are silent on `PreToolUse` /
+/// `PostToolUse` etc., even though their `hooks/hooks.json` sidecar exists and
+/// the plugin-hook loader (`load_plugin_hooks`) is implemented for marketplace
+/// plugins.
+pub(crate) fn include_cli_plugin_hook_sources(
+    config: &Config,
+    mut effective: Vec<PluginHookSource>,
+) -> Vec<PluginHookSource> {
+    for cli_plugin_dir in &config.cli_plugin_dirs {
+        let canonical = match std::fs::canonicalize(cli_plugin_dir) {
+            Ok(path) => path,
+            Err(err) => {
+                warn!(
+                    "--plugin-dir {}: cannot canonicalize for hook discovery: {err}",
+                    cli_plugin_dir.display()
+                );
+                continue;
+            }
+        };
+        let abs_root = match AbsolutePathBuf::from_absolute_path_checked(canonical) {
+            Ok(abs) => abs,
+            Err(_) => continue,
+        };
+        let Some(manifest) = load_plugin_manifest(abs_root.as_path()) else {
+            // Already warned by include_cli_plugin_skill_roots for the same dir.
+            continue;
+        };
+        // CLI-injected plugins don't come from a marketplace; synthesize a
+        // marketplace segment ("cli") so the resulting PluginId is well-formed
+        // and self-documenting in telemetry/source paths.
+        let plugin_id = match PluginId::new(manifest.name.clone(), "cli".to_string()) {
+            Ok(id) => id,
+            Err(err) => {
+                warn!(
+                    "--plugin-dir {} skipped for hooks: invalid plugin name {:?}: {err:?}",
+                    cli_plugin_dir.display(),
+                    manifest.name,
+                );
+                continue;
+            }
+        };
+        // CLI-injected plugins do not have a separate data root; reuse the
+        // plugin root itself (marketplace plugins get a per-plugin cache dir,
+        // but CLI-injected ones write to their own tree if needed).
+        let plugin_data_root = abs_root.clone();
+        let (sources, warnings) =
+            load_plugin_hooks(&abs_root, &plugin_id, &plugin_data_root, &manifest.paths);
+        for warning in warnings {
+            warn!(
+                "--plugin-dir {} hook load warning: {warning}",
+                cli_plugin_dir.display()
+            );
+        }
+        effective.extend(sources);
+    }
+    effective
 }
 
 pub(crate) async fn resolve_skill_dependencies_for_turn(
@@ -284,6 +351,66 @@ mod tests {
                 path: expected_skill_root,
                 plugin_id: "kookr-toolkit".to_string(),
             }]
+        );
+    }
+
+    /// Regression test: ensure `include_cli_plugin_hook_sources` registers
+    /// hooks from a plugin loaded via `--plugin-dir`. Without this wiring,
+    /// `plugin/hooks/hooks.json` is silently ignored even though the plugin-
+    /// hook loader (`load_plugin_hooks`) is implemented and `Feature::Plugin
+    /// Hooks` is default-on (see kookr `docs/poc/008-plugin-hook-bypass-
+    /// survival.md` for the empirical motivation).
+    #[tokio::test]
+    async fn include_cli_plugin_hook_sources_registers_hooks_json_from_cli_plugin_dir() {
+        let tmp = tempdir().expect("tempdir");
+        let plugin_root = tmp.path().join("plugins/kookr");
+        fs::create_dir_all(plugin_root.join(".codex-plugin")).expect("mkdir manifest");
+        fs::create_dir_all(plugin_root.join("hooks")).expect("mkdir hooks");
+        fs::write(
+            plugin_root.join(".codex-plugin/plugin.json"),
+            r#"{"name":"kookr-toolkit"}"#,
+        )
+        .expect("write manifest");
+        // Minimal valid hooks.json — one PreToolUse Bash hook.
+        fs::write(
+            plugin_root.join("hooks/hooks.json"),
+            r#"{
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Bash",
+                            "hooks": [
+                                { "type": "command", "command": "/bin/true" }
+                            ]
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .expect("write hooks.json");
+
+        let mut config = crate::config::test_config().await;
+        config.cli_plugin_dirs = vec![plugin_root];
+
+        let sources = include_cli_plugin_hook_sources(&config, Vec::new());
+        assert_eq!(
+            sources.len(),
+            1,
+            "expected exactly one hook source from the cli-injected plugin, got {sources:?}"
+        );
+        let source = &sources[0];
+        assert_eq!(source.plugin_id.plugin_name.as_str(), "kookr-toolkit");
+        assert_eq!(source.plugin_id.marketplace_name.as_str(), "cli");
+        // The hook source must point at the kookr-toolkit plugin's hooks/hooks.json
+        // (the default discovery path), proving the loader was called.
+        assert!(
+            source
+                .source_path
+                .as_path()
+                .to_string_lossy()
+                .ends_with("hooks/hooks.json"),
+            "source_path should point at hooks/hooks.json, got {}",
+            source.source_path.as_path().display()
         );
     }
 }

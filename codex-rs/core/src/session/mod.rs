@@ -3418,10 +3418,15 @@ async fn build_hooks_for_config(
     let (plugin_hook_sources, plugin_hook_load_warnings) = if plugin_hooks_enabled {
         let plugins_input = config.plugins_config_input();
         let plugin_outcome = plugins_manager.plugins_for_config(&plugins_input).await;
-        (
+        // CLI-injected `--plugin-dir` entries are appended to the marketplace
+        // outcome, mirroring how skills/agents already work via
+        // `include_cli_plugin_skill_roots`. Without this, hooks shipped in a
+        // plugin loaded only via `--plugin-dir` are silent.
+        let sources = crate::skills::include_cli_plugin_hook_sources(
+            config,
             plugin_outcome.effective_plugin_hook_sources(),
-            plugin_outcome.effective_plugin_hook_warnings(),
-        )
+        );
+        (sources, plugin_outcome.effective_plugin_hook_warnings())
     } else {
         (Vec::new(), Vec::new())
     };
