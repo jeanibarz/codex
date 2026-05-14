@@ -1228,6 +1228,13 @@ impl Config {
             cfg,
             ConfigOverrides {
                 cwd: Some(self.cwd.to_path_buf()),
+                // Preserve CLI-injected plugin dirs across session-layer rebuilds.
+                // `cli_plugin_dirs` is a runtime-only override (set once from the
+                // `--plugin-dir` CLI flag) that does NOT come from any config TOML
+                // layer, so without this it gets reset to `vec![]` on every
+                // `load_latest_config_for_thread` cycle and plugin-bundled hooks
+                // shipped via `--plugin-dir` go silent.
+                cli_plugin_dirs: self.cli_plugin_dirs.clone(),
                 ..Default::default()
             },
             refreshed_config.codex_home.clone(),
