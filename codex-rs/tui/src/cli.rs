@@ -12,6 +12,18 @@ pub struct Cli {
     #[arg(value_name = "PROMPT", value_hint = clap::ValueHint::Other)]
     pub prompt: Option<String>,
 
+    /// Read the initial user prompt from a file instead of the positional
+    /// PROMPT argument. The path is tiny in argv (no ARG_MAX limit) and is
+    /// read at startup, so an orchestrator launching Codex in a PTY can
+    /// deliver the prompt without a terminal-input race.
+    #[arg(
+        long = "prompt-file",
+        value_name = "PATH",
+        value_hint = clap::ValueHint::FilePath,
+        conflicts_with = "prompt"
+    )]
+    pub prompt_file: Option<std::path::PathBuf>,
+
     /// Error out when config.toml contains fields that are not recognized by this version of Codex.
     #[arg(long = "strict-config", default_value_t = false)]
     pub strict_config: bool,
