@@ -235,9 +235,12 @@ await this.backend.createSession({ id: tmuxName, command: this.agentBin, args, e
 - **Non-UTF-8 content:** `read_to_string` fails ⇒ fatal. kookr prompts are
   UTF-8 task text; a non-UTF-8 prompt file is a kookr bug, and failing fast is
   acceptable (the old lossy `TextDecoder` path silently corrupted instead).
-- **Large file:** `std::fs::read_to_string` is a blocking read on the startup
-  path; for a multi-MB prompt this is tens of milliseconds before TUI init —
-  acceptable. (`tokio::fs` is available if ever measured to matter.)
+- **Large / runaway file:** the file size is checked against a 10 MiB cap
+  (`MAX_PROMPT_FILE_BYTES`) *before* the read, so an accidental log/binary file
+  is rejected with a fatal error rather than read into memory — `--prompt-file`
+  removes the implicit `ARG_MAX` ceiling, so the cap reintroduces a bound. A
+  real multi-MB prompt is well under the cap; the read itself is a blocking few
+  milliseconds on the startup path — acceptable.
 - **`tmuxName` collision (M3):** `tmuxName` is an 8-hex-char UUID slice; the
   prompt file is keyed on it like the settings file, so it inherits the same
   (pre-existing) collision surface — not made materially worse. Lengthening the
