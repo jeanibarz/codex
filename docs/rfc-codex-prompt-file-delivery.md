@@ -1,8 +1,8 @@
 # RFC: Deliver the initial Codex prompt via `--prompt-file`
 
-- **Status:** Draft v2 (revised after parallel critic review)
-- **Affects:** `~/git/codex` (fork, `feat/claude-compat`) + `~/git/kookr` (`src/adapters/codex-cli-adapter.ts`)
-- **Supersedes:** kookr PR #352 (`fix/codex-prompt-race`, currently **open**)
+- **Status:** Draft v3 (revised after parallel critic review + reviewer-specialist round 2)
+- **Affects:** Codex fork `feat/claude-compat` (jeanibarz/codex#59) + `~/git/kookr` `src/adapters/codex-cli-adapter.ts` (kookr-ai/kookr#355)
+- **Supersedes:** kookr PR #352 (`fix/codex-prompt-race`)
 
 ## 1. Summary
 
@@ -10,8 +10,10 @@ Kookr-launched Codex CLI (TUI) sessions intermittently start with **no prompt** 
 the agent sits idle until a human intervenes. The fix: kookr writes the initial
 prompt to a small launch-artifact file (like the existing `--settings` JSON) and
 Codex reads it via a new `--prompt-file <PATH>` flag, which populates the same
-`prompt` field a positional CLI argument would. One unconditional delivery path
-for every prompt size — no size threshold, no branch.
+`prompt` field a positional CLI argument would. No prompt-size threshold: the
+prompt is delivered the same way at 10 bytes or 10 MB. kookr capability-probes
+the flag and falls back to a (race-free) positional-argv prompt for binaries
+that lack it — see §5.2 and §6 row E.
 
 ## 2. Problem & evidence (verified)
 
@@ -155,25 +157,25 @@ one extra line in `merge_interactive_cli_flags`. No change to `App::run`,
 `create_initial_user_message`, submission, or `skip_update_prompt`.
 
 ### 5.2 Kookr: write the prompt as a launch artifact
-`src/adapters/codex-cli-adapter.ts` — treat the prompt exactly like the
-`--settings` JSON: write it next to the settings file, pass its path, drop the
-terminal write.
+`src/adapters/codex-cli-adapter.ts` — treat the prompt like the `--settings`
+JSON: write it next to the settings file, pass its path, drop the terminal
+write. Whether to use `--prompt-file` is **capability-probed** once per adapter
+(same `probeBinaryFlagSupport` mechanism the adapter already uses for
+`--plugin-dir`); a binary that does not advertise the flag falls back to a
+positional argv prompt (see §6 row E — adopted after review round 2).
 
 ```ts
-const settingsPath = `${this.settingsDir}/${tmuxName}.json`;
-const promptPath   = `${this.settingsDir}/${tmuxName}.prompt.txt`;
-if (this.writeFile) {
-  await this.writeFile(settingsPath, JSON.stringify(settings, null, 2));
+const promptFileSupported = await this.probePromptFileSupport();
+const promptPath = `${this.settingsDir}/${tmuxName}.prompt.txt`;
+if (promptFileSupported && this.writeFile) {
   await this.writeFile(promptPath, promptWithCheckpoint);
 }
 
-const args = [
-  '-c', 'features.codex_hooks=true',
-  permissionFlagStr,
-  '--settings', settingsPath,
-  '--prompt-file', promptPath,
-];
+const args = ['-c', 'features.codex_hooks=true', permissionFlagStr,
+              '--settings', settingsPath];
+if (promptFileSupported) args.push('--prompt-file', promptPath);
 // … existing --plugin-dir injection unchanged …
+if (!promptFileSupported) args.push(promptWithCheckpoint); // positional fallback, last
 
 await this.backend.createSession({ id: tmuxName, command: this.agentBin, args, env, cwd, size });
 // deliverInitialPromptToSession() call REMOVED for codex.
@@ -190,7 +192,7 @@ await this.backend.createSession({ id: tmuxName, command: this.agentBin, args, e
 - kookr PR #352 is **closed** in favor of this; its `CODEX_PROMPT_ARGV_THRESHOLD_BYTES`
   constant and boundary tests are never introduced.
 
-### 5.3 Why this is single-path and race-free
+### 5.3 Why this is race-free
 - kookr `await`s the file write **before** `createSession()`, so the file is
   fully written before Codex is spawned. The file lives on the local Linux
   filesystem (`~/.kookr/…`, ext4 — *not* a `/mnt/c` 9p mount), so its page cache
@@ -201,6 +203,11 @@ await this.backend.createSession({ id: tmuxName, command: this.agentBin, args, e
 - The file-sourced prompt populates `cli.prompt` ⇒ identical to a positional
   prompt: no PTY, no composer timing, no paste heuristic, and `skip_update_prompt`
   is set.
+- The `--plugin-dir`-style capability probe means the *intended* config (the
+  kookr-fork) always takes the single `--prompt-file` path; the positional-argv
+  fallback is reached only by binaries lacking the flag, and is itself race-free
+  (argv, not a terminal write) — just bounded by `ARG_MAX`. This is a
+  **capability** branch, not the prompt-*size* branch PR #352 was rejected for.
 
 ## 6. Alternatives considered
 
@@ -210,7 +217,7 @@ await this.backend.createSession({ id: tmuxName, command: this.agentBin, args, e
 | **B. Always deliver via positional argv** (revert PR #337) | Rejected | `E2BIG` is **verified real** (issue #319 — a ~100 KiB+ pasted prompt). Always-argv reintroduces #319. |
 | **C. Fix the TUI to not drop early PTY input** | Rejected | Honestly: correctly buffering raw terminal input across the alt-screen switch, bracketed-paste enable, trust check, and composer construction is timing-dependent and complex, and would still not address `E2BIG`. `--prompt-file` is deterministic and size-independent. Note: this RFC *routes around* the TUI's early-input fragility rather than fixing it; that fragility still affects other terminal-write callers (see §9, and `sendInput` follow-ups). Fixing the TUI input pipeline remains worthwhile as separate hardening — it is just not the right vehicle for reliable *initial-prompt* delivery. |
 | **D. Prompt on stdin** | Rejected | The interactive TUI owns stdin/the PTY for the whole session; there is no separate stdin channel for a one-shot prompt. |
-| **E. Capability-probe `--prompt-file` like `--plugin-dir`** | Rejected | `--plugin-dir` is probed because plugins are *optional* (stock Codex must still run). Prompt delivery is *core*, and the codexcli agent already hard-requires the kookr-fork (`features.codex_hooks`, fork hooks). A probe would add a branch for an unsupported configuration. See §10 for the rollout handling instead. |
+| **E. Capability-probe `--prompt-file` like `--plugin-dir`** | **Adopted** (review round 2) | Initially rejected — "prompt delivery is core, the codexcli agent already requires the fork." A reviewer specialist flagged that unconditional `--prompt-file` hard-fails any binary lacking the flag (stock codex, or a fork built before this change), regressing graceful degradation. The original rejection missed that **positional argv is a clean race-free fallback** (it only fails on >~`ARG_MAX` prompts). So: probe `--prompt-file` once per adapter (existing `probeBinaryFlagSupport` mechanism); supported ⇒ `--prompt-file`; unsupported ⇒ positional argv + one-time warning. Capability branch, not a prompt-size branch. |
 
 ## 7. Edge cases & failure modes (from critic review)
 
@@ -279,19 +286,18 @@ this change minimal.
 
 ## 10. Rollout
 
-1. Land `--prompt-file` in the Codex fork (`feat/claude-compat`).
+1. Land `--prompt-file` in the Codex fork (`feat/claude-compat`) — jeanibarz/codex#59.
 2. `pnpm codex:rebuild` so `KOOKR_CODEX_BIN` advertises the flag.
-3. Land the kookr `codex-cli-adapter.ts` change; close PR #352.
+3. Land the kookr `codex-cli-adapter.ts` change (kookr-ai/kookr#355); close PR #352.
 4. `pnpm prod:update`.
 
-`--prompt-file` is passed unconditionally (§6-E). Between a kookr deploy and the
-Codex rebuild, a stale stock/old binary given `--prompt-file` will clap-error and
-`exit(1)` — every *new* codex launch fails immediately and visibly (already-running
-sessions are unaffected). That is a loud, one-line-to-fix regression, strictly
-better than today's silent intermittent drop; the ordered steps above avoid the
-window entirely. Because the new flag is inert until step 3, steps 1–2 and step 3
-can land in either repo order as long as the rebuilt binary precedes kookr
-passing the flag.
+Because the kookr adapter **capability-probes** `--prompt-file` (§5.2, §6 row E),
+deploy order is **not strict**: a kookr build running against a not-yet-rebuilt
+codex binary detects the missing flag and falls back to a positional-argv prompt
+(race-free, `ARG_MAX`-bounded) with a one-time warning — no hard failure, no
+intermittent drop. Rebuilding the codex binary (steps 1–2) is what unlocks the
+file-artifact path and therefore large-prompt / `E2BIG` coverage; until then the
+fallback keeps normal-size prompts working.
 
 **Upstreaming:** `--prompt-file` is a general, non-kookr-specific feature and a
 good candidate to submit to `openai/codex`. Until then it is fork weight, but a
