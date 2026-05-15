@@ -275,7 +275,10 @@ fn looper_task_id_env() -> Option<std::ffi::OsString> {
     }
     #[cfg(not(test))]
     {
-        std::env::var_os("LOOPER_TASK_ID")
+        // Kookr exports `KOOKR_TASK_ID`; older Looper builds used
+        // `LOOPER_TASK_ID`. Accept either so the paste-burst guard actually
+        // engages for orchestrator-managed sessions.
+        std::env::var_os("KOOKR_TASK_ID").or_else(|| std::env::var_os("LOOPER_TASK_ID"))
     }
 }
 
