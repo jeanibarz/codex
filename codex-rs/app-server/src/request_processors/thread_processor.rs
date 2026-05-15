@@ -1246,6 +1246,12 @@ impl ThreadRequestProcessor {
         if overrides.settings_file.is_none() {
             overrides.settings_file = self.config.settings_file.clone();
         }
+        if overrides.bypass_hook_trust.is_none() {
+            overrides.bypass_hook_trust = Some(self.config.bypass_hook_trust);
+        }
+        if overrides.cli_plugin_dirs.is_empty() {
+            overrides.cli_plugin_dirs = self.config.cli_plugin_dirs.clone();
+        }
     }
 
     fn parse_environment_selections(
