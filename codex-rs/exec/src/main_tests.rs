@@ -41,3 +41,18 @@ fn top_cli_parses_resume_prompt_after_config_flag() {
     );
     assert!(inner.strict_config);
 }
+
+#[test]
+fn top_cli_preserves_exec_plugin_dir() {
+    let cli = TopCli::parse_from(["codex-exec", "--plugin-dir", "/tmp/plugin", "do the work"]);
+    let mut inner = cli.inner;
+    inner
+        .config_overrides
+        .prepend_root_overrides(cli.config_overrides);
+
+    assert_eq!(
+        inner.shared.plugin_dirs,
+        vec![std::path::PathBuf::from("/tmp/plugin")]
+    );
+    assert_eq!(inner.prompt.as_deref(), Some("do the work"));
+}

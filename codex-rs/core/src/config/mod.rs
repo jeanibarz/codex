@@ -178,6 +178,7 @@ impl Default for GhostSnapshotConfig {
 /// files are *silently truncated* to this size so we do not take up too much of
 /// the context window.
 pub(crate) const AGENTS_MD_MAX_BYTES: usize = DEFAULT_PROJECT_DOC_MAX_BYTES; // 32 KiB
+pub(crate) const DEFAULT_PROJECT_DOC_FALLBACK_FILENAMES: &[&str] = &["CLAUDE.md"];
 pub(crate) const DEFAULT_AGENT_MAX_THREADS: Option<usize> = Some(6);
 pub(crate) const DEFAULT_MULTI_AGENT_V2_MAX_CONCURRENT_THREADS_PER_SESSION: usize = 4;
 pub(crate) const DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS: i64 = 10_000;
@@ -941,6 +942,16 @@ pub struct Config {
 
     /// OTEL configuration (exporter type, endpoint, headers, etc.).
     pub otel: codex_config::types::OtelConfig,
+
+    /// Path to a JSON settings file containing additional hook definitions.
+    /// Used by external supervisors (e.g. Looper) to inject per-session hooks.
+    pub settings_file: Option<PathBuf>,
+
+    /// Additional plugin directories supplied via the `--plugin-dir` CLI flag.
+    /// Each directory's `skills/` subdirectory becomes an extra skill root.
+    /// Empty by default. Used by external supervisors (e.g. Kookr) to inject
+    /// curated toolkits without modifying user-scope marketplace state.
+    pub cli_plugin_dirs: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1342,6 +1353,13 @@ impl Config {
             cfg,
             ConfigOverrides {
                 cwd: Some(self.cwd.to_path_buf()),
+                // Preserve CLI-injected plugin dirs across session-layer rebuilds.
+                // `cli_plugin_dirs` is a runtime-only override (set once from the
+                // `--plugin-dir` CLI flag) that does NOT come from any config TOML
+                // layer, so without this it gets reset to `vec![]` on every
+                // `load_latest_config_for_thread` cycle and plugin-bundled hooks
+                // shipped via `--plugin-dir` go silent.
+                cli_plugin_dirs: self.cli_plugin_dirs.clone(),
                 ..Default::default()
             },
             refreshed_config.codex_home.clone(),
@@ -2061,6 +2079,15 @@ pub struct ConfigOverrides {
     /// Explicit runtime workspace roots for this session. When set, this is
     /// the full runtime root list rather than an additive override.
     pub workspace_roots: Option<Vec<PathBuf>>,
+
+    /// Path to a JSON settings file containing additional hook definitions.
+    /// Merged additively with config.toml hooks. Used by external supervisors
+    /// (e.g. Looper) to inject per-session hooks.
+    pub settings_file: Option<PathBuf>,
+
+    /// Additional plugin directories from `--plugin-dir`. Each becomes an
+    /// extra skill root via its `skills/` subdirectory.
+    pub cli_plugin_dirs: Vec<PathBuf>,
 }
 
 fn dedupe_absolute_paths(paths: &mut Vec<AbsolutePathBuf>) {
@@ -2380,6 +2407,8 @@ impl Config {
             bypass_hook_trust,
             additional_writable_roots,
             workspace_roots: workspace_roots_override,
+            settings_file,
+            cli_plugin_dirs,
         } = overrides;
         let bypass_hook_trust = bypass_hook_trust.unwrap_or_default();
 
@@ -3321,7 +3350,12 @@ impl Config {
             project_doc_max_bytes: cfg.project_doc_max_bytes.unwrap_or(AGENTS_MD_MAX_BYTES),
             project_doc_fallback_filenames: cfg
                 .project_doc_fallback_filenames
-                .unwrap_or_default()
+                .unwrap_or_else(|| {
+                    DEFAULT_PROJECT_DOC_FALLBACK_FILENAMES
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect()
+                })
                 .into_iter()
                 .filter_map(|name| {
                     let trimmed = name.trim();
@@ -3500,6 +3534,8 @@ impl Config {
                 .map(|t| t.keymap.clone())
                 .unwrap_or_default(),
             otel,
+            settings_file,
+            cli_plugin_dirs,
         };
         Ok(config)
         })

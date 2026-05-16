@@ -151,6 +151,41 @@ fn spawn_agent_tool_v1_keeps_legacy_fork_context_field() {
 }
 
 #[test]
+fn spawn_agent_tool_v1_description_authorizes_skill_workflow_spawns() {
+    // Kookr (jeanibarz/codex#feat-claude-compat) loosens the v1 spawn_agent
+    // restriction so a loaded skill (e.g. pre-pr-review) can authorize spawning
+    // reviewer-specialist sub-agents even when the user didn't explicitly ask.
+    // Without (b), codex sessions hitting kookr's pre-push gate forge marker
+    // files via shell instead of running the real review. Keep both clauses
+    // present so a future tightening doesn't silently regress.
+    let tool = create_spawn_agent_tool_v1(SpawnAgentToolOptions {
+        available_models: vec![model_preset("visible", /*show_in_picker*/ true)],
+        agent_type_description: "role help".to_string(),
+        hide_agent_type_model_reasoning: false,
+        include_usage_hint: true,
+        usage_hint_text: None,
+        max_concurrent_threads_per_session: None,
+    });
+
+    let ToolSpec::Function(ResponsesApiTool { description, .. }) = tool else {
+        panic!("spawn_agent should be a function tool");
+    };
+
+    assert!(
+        description.contains("(a) the user explicitly asks"),
+        "v1 spawn_agent description must keep clause (a) user-asked authorization: {description}"
+    );
+    assert!(
+        description.contains("(b) a skill or workflow"),
+        "v1 spawn_agent description must include clause (b) skill-workflow authorization: {description}"
+    );
+    assert!(
+        description.contains("pre-PR review skill"),
+        "v1 spawn_agent description must mention the pre-PR review example so the model recognizes the canonical skill-workflow case: {description}"
+    );
+}
+
+#[test]
 fn spawn_agent_tool_hides_service_tier_with_spawn_metadata() {
     let tool = create_spawn_agent_tool_v2(SpawnAgentToolOptions {
         available_models: vec![model_preset("visible", /*show_in_picker*/ true)],
