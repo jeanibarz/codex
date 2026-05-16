@@ -988,9 +988,14 @@ fn analytics_hook_event_name(event_name: HookEventName) -> &'static str {
         HookEventName::PostToolUse => "PostToolUse",
         HookEventName::PreCompact => "PreCompact",
         HookEventName::PostCompact => "PostCompact",
+        HookEventName::PostToolUseFailure => "PostToolUseFailure",
+        HookEventName::Notification => "Notification",
         HookEventName::SessionStart => "SessionStart",
+        HookEventName::SessionEnd => "SessionEnd",
         HookEventName::UserPromptSubmit => "UserPromptSubmit",
         HookEventName::Stop => "Stop",
+        HookEventName::StopFailure => "StopFailure",
+        HookEventName::FileChanged => "FileChanged",
     }
 }
 
@@ -1001,6 +1006,7 @@ fn analytics_hook_source(source: HookSource) -> &'static str {
         HookSource::Project => "project",
         HookSource::Mdm => "mdm",
         HookSource::SessionFlags => "session_flags",
+        HookSource::SupervisorSettings => "supervisor_settings",
         HookSource::Plugin => "plugin",
         HookSource::CloudRequirements => "cloud_requirements",
         HookSource::LegacyManagedConfigFile => "legacy_managed_config_file",

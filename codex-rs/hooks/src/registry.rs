@@ -9,6 +9,8 @@ use crate::events::compact::PostCompactRequest;
 use crate::events::compact::PreCompactOutcome;
 use crate::events::compact::PreCompactRequest;
 use crate::events::compact::StatelessHookOutcome;
+use crate::events::file_changed::FileChangedOutcome;
+use crate::events::file_changed::FileChangedRequest;
 use crate::events::permission_request::PermissionRequestOutcome;
 use crate::events::permission_request::PermissionRequestRequest;
 use crate::events::post_tool_use::PostToolUseOutcome;
@@ -36,6 +38,10 @@ pub struct HooksConfig {
     pub plugin_hook_load_warnings: Vec<String>,
     pub shell_program: Option<String>,
     pub shell_args: Vec<String>,
+    /// Optional path to a JSON settings file (Claude-compat `--settings FILE`).
+    /// Hooks defined here are merged additively with `config.toml` hooks so
+    /// external supervisors can inject per-session handlers.
+    pub settings_file: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -74,6 +80,7 @@ impl Hooks {
                 program: config.shell_program.unwrap_or_default(),
                 args: config.shell_args,
             },
+            config.settings_file.as_deref(),
         );
         Self {
             after_agent,
@@ -203,6 +210,73 @@ impl Hooks {
     pub async fn run_stop(&self, request: StopRequest) -> StopOutcome {
         self.engine.run_stop(request).await
     }
+
+    pub fn preview_stop_failure(
+        &self,
+        request: &crate::events::stop_failure::StopFailureRequest,
+    ) -> Vec<codex_protocol::protocol::HookRunSummary> {
+        self.engine.preview_stop_failure(request)
+    }
+
+    pub async fn run_stop_failure(
+        &self,
+        request: crate::events::stop_failure::StopFailureRequest,
+    ) -> crate::events::stop_failure::StopFailureOutcome {
+        self.engine.run_stop_failure(request).await
+    }
+
+    pub fn preview_session_end(
+        &self,
+        request: &crate::events::session_end::SessionEndRequest,
+    ) -> Vec<codex_protocol::protocol::HookRunSummary> {
+        self.engine.preview_session_end(request)
+    }
+
+    pub async fn run_session_end(
+        &self,
+        request: crate::events::session_end::SessionEndRequest,
+    ) -> crate::events::session_end::SessionEndOutcome {
+        self.engine.run_session_end(request).await
+    }
+
+    pub fn preview_notification(
+        &self,
+        request: &crate::events::notification::NotificationRequest,
+    ) -> Vec<codex_protocol::protocol::HookRunSummary> {
+        self.engine.preview_notification(request)
+    }
+
+    pub async fn run_notification(
+        &self,
+        request: crate::events::notification::NotificationRequest,
+    ) -> crate::events::notification::NotificationOutcome {
+        self.engine.run_notification(request).await
+    }
+
+    pub fn preview_post_tool_use_failure(
+        &self,
+        request: &crate::events::post_tool_use_failure::PostToolUseFailureRequest,
+    ) -> Vec<codex_protocol::protocol::HookRunSummary> {
+        self.engine.preview_post_tool_use_failure(request)
+    }
+
+    pub async fn run_post_tool_use_failure(
+        &self,
+        request: crate::events::post_tool_use_failure::PostToolUseFailureRequest,
+    ) -> crate::events::post_tool_use_failure::PostToolUseFailureOutcome {
+        self.engine.run_post_tool_use_failure(request).await
+    }
+
+    pub fn preview_file_changed(
+        &self,
+        request: &FileChangedRequest,
+    ) -> Vec<codex_protocol::protocol::HookRunSummary> {
+        self.engine.preview_file_changed(request)
+    }
+
+    pub async fn run_file_changed(&self, request: FileChangedRequest) -> FileChangedOutcome {
+        self.engine.run_file_changed(request).await
+    }
 }
 
 pub fn list_hooks(config: HooksConfig) -> HookListOutcome {
@@ -210,12 +284,15 @@ pub fn list_hooks(config: HooksConfig) -> HookListOutcome {
         return HookListOutcome::default();
     }
 
-    let discovered = crate::engine::discovery::discover_handlers(
+    let mut discovered = crate::engine::discovery::discover_handlers(
         config.config_layer_stack.as_ref(),
         config.plugin_hook_sources,
         config.plugin_hook_load_warnings,
         config.bypass_hook_trust,
     );
+    if let Some(settings_path) = config.settings_file.as_deref() {
+        crate::engine::discovery::append_settings_file_handlers(&mut discovered, settings_path);
+    }
     HookListOutcome {
         hooks: discovered.hook_entries,
         warnings: discovered.warnings,

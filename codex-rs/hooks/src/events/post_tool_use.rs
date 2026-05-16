@@ -55,10 +55,11 @@ pub(crate) fn preview(
     request: &PostToolUseRequest,
 ) -> Vec<HookRunSummary> {
     let matcher_inputs = common::matcher_inputs(&request.tool_name, &request.matcher_aliases);
-    dispatcher::select_handlers_for_matcher_inputs(
+    dispatcher::select_handlers_for_tool_use(
         handlers,
         HookEventName::PostToolUse,
         &matcher_inputs,
+        &request.tool_input,
     )
     .into_iter()
     .map(|handler| {
@@ -73,10 +74,11 @@ pub(crate) async fn run(
     request: PostToolUseRequest,
 ) -> PostToolUseOutcome {
     let matcher_inputs = common::matcher_inputs(&request.tool_name, &request.matcher_aliases);
-    let matched = dispatcher::select_handlers_for_matcher_inputs(
+    let matched = dispatcher::select_handlers_for_tool_use(
         handlers,
         HookEventName::PostToolUse,
         &matcher_inputs,
+        &request.tool_input,
     );
     if matched.is_empty() {
         return PostToolUseOutcome {

@@ -247,6 +247,7 @@ impl TurnContext {
                 .enabled(Feature::MultiAgentV2)
                 .then_some(config.multi_agent_v2.default_wait_timeout_ms),
         )
+        .with_active_collaboration_mode(collaboration_mode.mode)
         .with_agent_type_description(crate::agent::role::spawn_tool_spec::build(
             &config.agent_roles,
         ));
@@ -571,6 +572,7 @@ impl Session {
                 .enabled(Feature::MultiAgentV2)
                 .then_some(per_turn_config.multi_agent_v2.default_wait_timeout_ms),
         )
+        .with_active_collaboration_mode(session_configuration.collaboration_mode.mode)
         .with_agent_type_description(crate::agent::role::spawn_tool_spec::build(
             &per_turn_config.agent_roles,
         ));
@@ -779,7 +781,10 @@ impl Session {
             .plugins_manager
             .plugins_for_config(&per_turn_config.plugins_config_input())
             .await;
-        let effective_skill_roots = plugin_outcome.effective_plugin_skill_roots();
+        let effective_skill_roots = include_cli_plugin_skill_roots(
+            &per_turn_config,
+            plugin_outcome.effective_plugin_skill_roots(),
+        );
         let skills_input = skills_load_input_from_config(&per_turn_config, effective_skill_roots);
         let fs = primary_turn_environment
             .map(|turn_environment| turn_environment.environment.get_filesystem());

@@ -8,6 +8,8 @@ use crate::events::compact::PostCompactRequest;
 use crate::events::compact::PreCompactOutcome;
 use crate::events::compact::PreCompactRequest;
 use crate::events::compact::StatelessHookOutcome;
+use crate::events::file_changed::FileChangedOutcome;
+use crate::events::file_changed::FileChangedRequest;
 use crate::events::permission_request::PermissionRequestOutcome;
 use crate::events::permission_request::PermissionRequestRequest;
 use crate::events::post_tool_use::PostToolUseOutcome;
@@ -68,9 +70,14 @@ impl ConfiguredHandler {
             codex_protocol::protocol::HookEventName::PostToolUse => "post-tool-use",
             codex_protocol::protocol::HookEventName::PreCompact => "pre-compact",
             codex_protocol::protocol::HookEventName::PostCompact => "post-compact",
+            codex_protocol::protocol::HookEventName::PostToolUseFailure => "post-tool-use-failure",
+            codex_protocol::protocol::HookEventName::Notification => "notification",
             codex_protocol::protocol::HookEventName::SessionStart => "session-start",
+            codex_protocol::protocol::HookEventName::SessionEnd => "session-end",
             codex_protocol::protocol::HookEventName::UserPromptSubmit => "user-prompt-submit",
             codex_protocol::protocol::HookEventName::Stop => "stop",
+            codex_protocol::protocol::HookEventName::StopFailure => "stop-failure",
+            codex_protocol::protocol::HookEventName::FileChanged => "file-changed",
         }
     }
 }
@@ -110,6 +117,7 @@ impl ClaudeHooksEngine {
         plugin_hook_sources: Vec<PluginHookSource>,
         plugin_hook_load_warnings: Vec<String>,
         shell: CommandShell,
+        settings_file: Option<&std::path::Path>,
     ) -> Self {
         if !enabled {
             return Self {
@@ -121,12 +129,15 @@ impl ClaudeHooksEngine {
         }
 
         let _ = schema_loader::generated_hook_schemas();
-        let discovered = discovery::discover_handlers(
+        let mut discovered = discovery::discover_handlers(
             config_layer_stack,
             plugin_hook_sources,
             plugin_hook_load_warnings,
             bypass_hook_trust,
         );
+        if let Some(settings_path) = settings_file {
+            discovery::append_settings_file_handlers(&mut discovered, settings_path);
+        }
         Self {
             handlers: discovered.handlers,
             warnings: discovered.warnings,
@@ -284,6 +295,70 @@ impl ClaudeHooksEngine {
         self.output_spiller
             .maybe_spill_prompt_fragments(session_id, fragments)
             .await
+    }
+
+    pub(crate) fn preview_stop_failure(
+        &self,
+        request: &crate::events::stop_failure::StopFailureRequest,
+    ) -> Vec<HookRunSummary> {
+        crate::events::stop_failure::preview(&self.handlers, request)
+    }
+
+    pub(crate) async fn run_stop_failure(
+        &self,
+        request: crate::events::stop_failure::StopFailureRequest,
+    ) -> crate::events::stop_failure::StopFailureOutcome {
+        crate::events::stop_failure::run(&self.handlers, &self.shell, request).await
+    }
+
+    pub(crate) fn preview_session_end(
+        &self,
+        request: &crate::events::session_end::SessionEndRequest,
+    ) -> Vec<HookRunSummary> {
+        crate::events::session_end::preview(&self.handlers, request)
+    }
+
+    pub(crate) async fn run_session_end(
+        &self,
+        request: crate::events::session_end::SessionEndRequest,
+    ) -> crate::events::session_end::SessionEndOutcome {
+        crate::events::session_end::run(&self.handlers, &self.shell, request).await
+    }
+
+    pub(crate) fn preview_notification(
+        &self,
+        request: &crate::events::notification::NotificationRequest,
+    ) -> Vec<HookRunSummary> {
+        crate::events::notification::preview(&self.handlers, request)
+    }
+
+    pub(crate) async fn run_notification(
+        &self,
+        request: crate::events::notification::NotificationRequest,
+    ) -> crate::events::notification::NotificationOutcome {
+        crate::events::notification::run(&self.handlers, &self.shell, request).await
+    }
+
+    pub(crate) fn preview_post_tool_use_failure(
+        &self,
+        request: &crate::events::post_tool_use_failure::PostToolUseFailureRequest,
+    ) -> Vec<HookRunSummary> {
+        crate::events::post_tool_use_failure::preview(&self.handlers, request)
+    }
+
+    pub(crate) async fn run_post_tool_use_failure(
+        &self,
+        request: crate::events::post_tool_use_failure::PostToolUseFailureRequest,
+    ) -> crate::events::post_tool_use_failure::PostToolUseFailureOutcome {
+        crate::events::post_tool_use_failure::run(&self.handlers, &self.shell, request).await
+    }
+
+    pub(crate) fn preview_file_changed(&self, request: &FileChangedRequest) -> Vec<HookRunSummary> {
+        crate::events::file_changed::preview(&self.handlers, request)
+    }
+
+    pub(crate) async fn run_file_changed(&self, request: FileChangedRequest) -> FileChangedOutcome {
+        crate::events::file_changed::run(&self.handlers, &self.shell, request).await
     }
 }
 

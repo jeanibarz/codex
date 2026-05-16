@@ -1,3 +1,8 @@
+use std::collections::HashMap;
+use std::path::Path;
+use std::path::PathBuf;
+
+use codex_protocol::protocol::FileChange;
 use schemars::JsonSchema;
 use schemars::r#gen::SchemaGenerator;
 use schemars::r#gen::SchemaSettings;
@@ -9,8 +14,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Map;
 use serde_json::Value;
-use std::path::Path;
-use std::path::PathBuf;
 
 const GENERATED_DIR: &str = "generated";
 const POST_TOOL_USE_INPUT_FIXTURE: &str = "post-tool-use.command.input.schema.json";
@@ -29,6 +32,11 @@ const USER_PROMPT_SUBMIT_INPUT_FIXTURE: &str = "user-prompt-submit.command.input
 const USER_PROMPT_SUBMIT_OUTPUT_FIXTURE: &str = "user-prompt-submit.command.output.schema.json";
 const STOP_INPUT_FIXTURE: &str = "stop.command.input.schema.json";
 const STOP_OUTPUT_FIXTURE: &str = "stop.command.output.schema.json";
+const STOP_FAILURE_INPUT_FIXTURE: &str = "stop-failure.command.input.schema.json";
+const SESSION_END_INPUT_FIXTURE: &str = "session-end.command.input.schema.json";
+const POST_TOOL_USE_FAILURE_INPUT_FIXTURE: &str = "post-tool-use-failure.command.input.schema.json";
+const NOTIFICATION_INPUT_FIXTURE: &str = "notification.command.input.schema.json";
+const FILE_CHANGED_INPUT_FIXTURE: &str = "file-changed.command.input.schema.json";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(transparent)]
@@ -462,6 +470,97 @@ pub(crate) struct StopCommandInput {
     pub last_assistant_message: NullableString,
 }
 
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "stop-failure.command.input")]
+pub(crate) struct StopFailureCommandInput {
+    pub session_id: String,
+    /// Codex extension: expose the active turn id to internal turn-scoped hooks.
+    pub turn_id: String,
+    pub transcript_path: NullableString,
+    pub cwd: String,
+    #[schemars(schema_with = "stop_failure_hook_event_name_schema")]
+    pub hook_event_name: String,
+    pub model: String,
+    #[schemars(schema_with = "permission_mode_schema")]
+    pub permission_mode: String,
+    pub error: String,
+    pub last_assistant_message: NullableString,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "session-end.command.input")]
+pub(crate) struct SessionEndCommandInput {
+    pub session_id: String,
+    pub transcript_path: NullableString,
+    pub cwd: String,
+    #[schemars(schema_with = "session_end_hook_event_name_schema")]
+    pub hook_event_name: String,
+    pub model: String,
+    #[schemars(schema_with = "permission_mode_schema")]
+    pub permission_mode: String,
+    #[schemars(schema_with = "session_end_reason_schema")]
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "post-tool-use-failure.command.input")]
+pub(crate) struct PostToolUseFailureCommandInput {
+    pub session_id: String,
+    /// Codex extension: expose the active turn id to internal turn-scoped hooks.
+    pub turn_id: String,
+    pub transcript_path: NullableString,
+    pub cwd: String,
+    #[schemars(schema_with = "post_tool_use_failure_hook_event_name_schema")]
+    pub hook_event_name: String,
+    pub model: String,
+    #[schemars(schema_with = "permission_mode_schema")]
+    pub permission_mode: String,
+    pub tool_name: String,
+    pub tool_input: Value,
+    pub tool_use_id: String,
+    pub error: String,
+    pub is_interrupt: bool,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "notification.command.input")]
+pub(crate) struct NotificationCommandInput {
+    pub session_id: String,
+    /// Codex extension: expose the active turn id to internal turn-scoped hooks.
+    pub turn_id: String,
+    pub transcript_path: NullableString,
+    pub cwd: String,
+    #[schemars(schema_with = "notification_hook_event_name_schema")]
+    pub hook_event_name: String,
+    pub model: String,
+    pub notification_type: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "file-changed.command.input")]
+pub(crate) struct FileChangedCommandInput {
+    pub session_id: String,
+    /// Codex extension: expose the active turn id to internal turn-scoped hooks.
+    pub turn_id: String,
+    pub transcript_path: NullableString,
+    pub cwd: String,
+    #[schemars(schema_with = "file_changed_hook_event_name_schema")]
+    pub hook_event_name: String,
+    pub model: String,
+    #[schemars(schema_with = "permission_mode_schema")]
+    pub permission_mode: String,
+    pub tool_name: String,
+    pub tool_use_id: String,
+    pub file_paths: Vec<String>,
+    pub changes: HashMap<PathBuf, FileChange>,
+}
+
 pub fn write_schema_fixtures(schema_root: &Path) -> anyhow::Result<()> {
     let generated_dir = schema_root.join(GENERATED_DIR);
     ensure_empty_dir(&generated_dir)?;
@@ -529,6 +628,26 @@ pub fn write_schema_fixtures(schema_root: &Path) -> anyhow::Result<()> {
     write_schema(
         &generated_dir.join(STOP_OUTPUT_FIXTURE),
         schema_json::<StopCommandOutputWire>()?,
+    )?;
+    write_schema(
+        &generated_dir.join(STOP_FAILURE_INPUT_FIXTURE),
+        schema_json::<StopFailureCommandInput>()?,
+    )?;
+    write_schema(
+        &generated_dir.join(SESSION_END_INPUT_FIXTURE),
+        schema_json::<SessionEndCommandInput>()?,
+    )?;
+    write_schema(
+        &generated_dir.join(POST_TOOL_USE_FAILURE_INPUT_FIXTURE),
+        schema_json::<PostToolUseFailureCommandInput>()?,
+    )?;
+    write_schema(
+        &generated_dir.join(NOTIFICATION_INPUT_FIXTURE),
+        schema_json::<NotificationCommandInput>()?,
+    )?;
+    write_schema(
+        &generated_dir.join(FILE_CHANGED_INPUT_FIXTURE),
+        schema_json::<FileChangedCommandInput>()?,
     )?;
 
     Ok(())
@@ -617,6 +736,30 @@ fn stop_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
     string_const_schema("Stop")
 }
 
+fn stop_failure_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
+    string_const_schema("StopFailure")
+}
+
+fn session_end_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
+    string_const_schema("SessionEnd")
+}
+
+fn session_end_reason_schema(_gen: &mut SchemaGenerator) -> Schema {
+    string_enum_schema(&["clear", "logout", "prompt_input_exit", "other"])
+}
+
+fn post_tool_use_failure_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
+    string_const_schema("PostToolUseFailure")
+}
+
+fn notification_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
+    string_const_schema("Notification")
+}
+
+fn file_changed_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
+    string_const_schema("FileChanged")
+}
+
 fn permission_mode_schema(_gen: &mut SchemaGenerator) -> Schema {
     string_enum_schema(&[
         "default",
@@ -664,6 +807,8 @@ fn default_continue() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::FILE_CHANGED_INPUT_FIXTURE;
+    use super::FileChangedCommandInput;
     use super::PERMISSION_REQUEST_INPUT_FIXTURE;
     use super::PERMISSION_REQUEST_OUTPUT_FIXTURE;
     use super::POST_COMPACT_INPUT_FIXTURE;
@@ -743,6 +888,9 @@ mod tests {
             STOP_OUTPUT_FIXTURE => {
                 include_str!("../schema/generated/stop.command.output.schema.json")
             }
+            FILE_CHANGED_INPUT_FIXTURE => {
+                include_str!("../schema/generated/file-changed.command.input.schema.json")
+            }
             _ => panic!("unexpected fixture name: {name}"),
         }
     }
@@ -774,6 +922,7 @@ mod tests {
             USER_PROMPT_SUBMIT_OUTPUT_FIXTURE,
             STOP_INPUT_FIXTURE,
             STOP_OUTPUT_FIXTURE,
+            FILE_CHANGED_INPUT_FIXTURE,
         ] {
             let expected = normalize_newlines(expected_fixture(fixture));
             let actual = std::fs::read_to_string(schema_root.join("generated").join(fixture))
@@ -818,6 +967,10 @@ mod tests {
             &schema_json::<StopCommandInput>().expect("serialize stop input schema"),
         )
         .expect("parse stop input schema");
+        let file_changed: Value = serde_json::from_slice(
+            &schema_json::<FileChangedCommandInput>().expect("serialize file changed input schema"),
+        )
+        .expect("parse file changed input schema");
 
         for schema in [
             &pre_tool_use,
@@ -827,6 +980,7 @@ mod tests {
             &post_compact,
             &user_prompt_submit,
             &stop,
+            &file_changed,
         ] {
             assert_eq!(schema["properties"]["turn_id"]["type"], "string");
             assert!(

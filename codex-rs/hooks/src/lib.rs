@@ -15,15 +15,20 @@ pub use declarations::PluginHookDeclaration;
 pub use declarations::plugin_hook_declarations;
 pub use engine::HookListEntry;
 /// Hook event names as they appear in hooks JSON and config files.
-pub const HOOK_EVENT_NAMES: [&str; 8] = [
+pub const HOOK_EVENT_NAMES: [&str; 13] = [
     "PreToolUse",
     "PermissionRequest",
     "PostToolUse",
     "PreCompact",
     "PostCompact",
+    "PostToolUseFailure",
     "SessionStart",
+    "SessionEnd",
     "UserPromptSubmit",
     "Stop",
+    "StopFailure",
+    "Notification",
+    "FileChanged",
 ];
 
 /// Hook event names whose matcher fields are meaningful during dispatch.
@@ -31,31 +36,44 @@ pub const HOOK_EVENT_NAMES: [&str; 8] = [
 /// Other events can appear in hooks JSON, but Codex ignores their matcher
 /// fields because those events do not dispatch against a tool, compaction
 /// trigger, or session-start source.
-pub const HOOK_EVENT_NAMES_WITH_MATCHERS: [&str; 6] = [
+pub const HOOK_EVENT_NAMES_WITH_MATCHERS: [&str; 8] = [
     "PreToolUse",
     "PermissionRequest",
     "PostToolUse",
     "PreCompact",
     "PostCompact",
+    "PostToolUseFailure",
     "SessionStart",
+    "FileChanged",
 ];
 
 pub use events::compact::PostCompactRequest;
 pub use events::compact::PreCompactOutcome;
 pub use events::compact::PreCompactRequest;
 pub use events::compact::StatelessHookOutcome;
+pub use events::file_changed::FileChangedOutcome;
+pub use events::file_changed::FileChangedRequest;
+pub use events::notification::NotificationOutcome;
+pub use events::notification::NotificationRequest;
 pub use events::permission_request::PermissionRequestDecision;
 pub use events::permission_request::PermissionRequestOutcome;
 pub use events::permission_request::PermissionRequestRequest;
 pub use events::post_tool_use::PostToolUseOutcome;
 pub use events::post_tool_use::PostToolUseRequest;
+pub use events::post_tool_use_failure::PostToolUseFailureOutcome;
+pub use events::post_tool_use_failure::PostToolUseFailureRequest;
 pub use events::pre_tool_use::PreToolUseOutcome;
 pub use events::pre_tool_use::PreToolUseRequest;
+pub use events::session_end::SessionEndOutcome;
+pub use events::session_end::SessionEndReason;
+pub use events::session_end::SessionEndRequest;
 pub use events::session_start::SessionStartOutcome;
 pub use events::session_start::SessionStartRequest;
 pub use events::session_start::SessionStartSource;
 pub use events::stop::StopOutcome;
 pub use events::stop::StopRequest;
+pub use events::stop_failure::StopFailureOutcome;
+pub use events::stop_failure::StopFailureRequest;
 pub use events::user_prompt_submit::UserPromptSubmitOutcome;
 pub use events::user_prompt_submit::UserPromptSubmitRequest;
 pub use legacy_notify::legacy_notify_json;
@@ -81,9 +99,14 @@ pub fn hook_event_key_label(event_name: HookEventName) -> &'static str {
         HookEventName::PostToolUse => "post_tool_use",
         HookEventName::PreCompact => "pre_compact",
         HookEventName::PostCompact => "post_compact",
+        HookEventName::PostToolUseFailure => "post_tool_use_failure",
         HookEventName::SessionStart => "session_start",
+        HookEventName::SessionEnd => "session_end",
         HookEventName::UserPromptSubmit => "user_prompt_submit",
         HookEventName::Stop => "stop",
+        HookEventName::StopFailure => "stop_failure",
+        HookEventName::Notification => "notification",
+        HookEventName::FileChanged => "file_changed",
     }
 }
 

@@ -17,7 +17,9 @@ use ts_rs::TS;
 
 v2_enum_from_core!(
     pub enum HookEventName from CoreHookEventName {
-        PreToolUse, PermissionRequest, PostToolUse, PreCompact, PostCompact, SessionStart, UserPromptSubmit, Stop
+        PreToolUse, PermissionRequest, PostToolUse, PreCompact, PostCompact,
+        PostToolUseFailure, Notification, SessionStart, SessionEnd,
+        UserPromptSubmit, Stop, StopFailure, FileChanged
     }
 );
 
@@ -46,6 +48,7 @@ v2_enum_from_core!(
         Project,
         Mdm,
         SessionFlags,
+        SupervisorSettings,
         Plugin,
         CloudRequirements,
         LegacyManagedConfigFile,
