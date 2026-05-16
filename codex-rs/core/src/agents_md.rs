@@ -16,6 +16,9 @@
 //! 3.  We do **not** walk past the project root.
 
 use crate::config::Config;
+use crate::rules::discover_rule_paths;
+use crate::rules::discover_rules;
+use crate::rules::render_rules;
 use codex_app_server_protocol::ConfigLayerSource;
 use codex_config::ConfigLayerStackOrdering;
 use codex_config::default_project_root_markers;
@@ -41,6 +44,9 @@ pub const LOCAL_AGENTS_MD_FILENAME: &str = "AGENTS.override.md";
 /// When both `Config::instructions` and AGENTS.md docs are present, they will
 /// be concatenated with the following separator.
 const AGENTS_MD_SEPARATOR: &str = "\n\n--- project-doc ---\n\n";
+
+/// Separator placed before conditional rules appended to user instructions.
+const CONDITIONAL_RULES_SEPARATOR: &str = "\n\n";
 
 /// Resolves AGENTS.md files into model-visible user instructions and source
 /// paths.
@@ -99,8 +105,10 @@ impl<'a> AgentsMdManager<'a> {
             output.push_str(&instructions);
         }
 
+        let mut project_doc_bytes_used: usize = 0;
         match agents_md_docs {
             Ok(Some(docs)) => {
+                project_doc_bytes_used = docs.len();
                 if !output.is_empty() {
                     output.push_str(AGENTS_MD_SEPARATOR);
                 }
@@ -119,11 +127,56 @@ impl<'a> AgentsMdManager<'a> {
             output.push_str(HIERARCHICAL_AGENTS_MESSAGE);
         }
 
+        match self
+            .read_conditional_rules(fs, project_doc_bytes_used)
+            .await
+        {
+            Ok(Some(rules_block)) => {
+                if !output.is_empty() {
+                    output.push_str(CONDITIONAL_RULES_SEPARATOR);
+                }
+                output.push_str(&rules_block);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                error!("error trying to discover conditional rules: {e:#}");
+            }
+        }
+
         if !output.is_empty() {
             Some(output)
         } else {
             None
         }
+    }
+
+    async fn read_conditional_rules(
+        &self,
+        fs: &dyn ExecutorFileSystem,
+        bytes_already_used: usize,
+    ) -> io::Result<Option<String>> {
+        let max_bytes = self.config.project_doc_max_bytes;
+        if max_bytes == 0 {
+            return Ok(None);
+        }
+        // Conditional rules share the project-doc budget with AGENTS.md so
+        // that a workspace cannot exceed `project_doc_max_bytes` overall by
+        // splitting content between the two surfaces.
+        let remaining = max_bytes.saturating_sub(bytes_already_used);
+        if remaining == 0 {
+            return Ok(None);
+        }
+        let cwd = self.canonical_cwd()?;
+        let rules = discover_rules(&cwd, fs, remaining).await?;
+        Ok(render_rules(&rules))
+    }
+
+    fn canonical_cwd(&self) -> io::Result<AbsolutePathBuf> {
+        let mut cwd = self.config.cwd.clone();
+        if let Ok(canon) = normalize_path(&cwd) {
+            cwd = AbsolutePathBuf::try_from(canon)?;
+        }
+        Ok(cwd)
     }
 
     /// Returns all instruction source files included in the current config.
@@ -137,7 +190,21 @@ impl<'a> AgentsMdManager<'a> {
                 tracing::warn!(error = %err, "failed to discover AGENTS.md docs for instruction sources");
             }
         }
+        match self.rule_paths(fs).await {
+            Ok(rule_paths) => paths.extend(rule_paths),
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to discover conditional rule files for instruction sources");
+            }
+        }
         paths
+    }
+
+    async fn rule_paths(&self, fs: &dyn ExecutorFileSystem) -> io::Result<Vec<AbsolutePathBuf>> {
+        if self.config.project_doc_max_bytes == 0 {
+            return Ok(Vec::new());
+        }
+        let cwd = self.canonical_cwd()?;
+        discover_rule_paths(&cwd, fs).await
     }
 
     /// Attempt to locate and load AGENTS.md documentation.

@@ -75,6 +75,7 @@ pub(super) async fn spawn_review_thread(
             .enabled(Feature::MultiAgentV2)
             .then_some(config.multi_agent_v2.default_wait_timeout_ms),
     )
+    .with_active_collaboration_mode(parent_turn_context.collaboration_mode.mode)
     .with_agent_type_description(crate::agent::role::spawn_tool_spec::build(
         &config.agent_roles,
     ));

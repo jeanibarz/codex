@@ -72,6 +72,14 @@ fn parses_config_isolation_flags() {
 }
 
 #[test]
+fn parses_plugin_dir_for_exec_session() {
+    let cli = Cli::parse_from(["codex-exec", "--plugin-dir", "/tmp/plugin", "do the work"]);
+
+    assert_eq!(cli.shared.plugin_dirs, vec![PathBuf::from("/tmp/plugin")]);
+    assert_eq!(cli.prompt.as_deref(), Some("do the work"));
+}
+
+#[test]
 fn removed_full_auto_flag_reports_migration_path() {
     let cli = Cli::parse_from(["codex-exec", "--full-auto", "summarize"]);
 

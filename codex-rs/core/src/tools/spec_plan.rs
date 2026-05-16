@@ -406,6 +406,7 @@ fn collect_tool_executors(
 
     executors.push(Arc::new(RequestUserInputHandler {
         available_modes: config.request_user_input_available_modes.clone(),
+        active_mode: config.active_collaboration_mode,
     }));
 
     if config.request_permissions_tool_enabled {
