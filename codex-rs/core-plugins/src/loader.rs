@@ -1,5 +1,7 @@
 use crate::OPENAI_CURATED_MARKETPLACE_NAME;
 use crate::claude::enabled_claude_plugin_roots;
+use crate::config_layer_compat::base_user_home_dir;
+use crate::config_layer_compat::effective_user_config;
 use crate::manifest::PluginManifestHooks;
 use crate::manifest::PluginManifestPaths;
 use crate::manifest::load_plugin_manifest;
@@ -206,10 +208,7 @@ pub fn remote_installed_plugins_to_config(
 }
 
 fn claude_plugins_home_dir(config_layer_stack: &ConfigLayerStack) -> Option<PathBuf> {
-    config_layer_stack
-        .get_active_user_layer()
-        .and_then(codex_config::ConfigLayerEntry::config_folder)
-        .and_then(|config_folder| config_folder.as_path().parent().map(Path::to_path_buf))
+    base_user_home_dir(config_layer_stack)
 }
 
 fn record_mcp_server_names(
@@ -420,7 +419,7 @@ fn refresh_non_curated_plugin_cache_with_mode(
 fn configured_plugins_from_stack(
     config_layer_stack: &ConfigLayerStack,
 ) -> HashMap<String, PluginConfig> {
-    let Some(user_config) = config_layer_stack.effective_user_config() else {
+    let Some(user_config) = effective_user_config(config_layer_stack) else {
         return HashMap::new();
     };
     configured_plugins_from_user_config_value(&user_config)

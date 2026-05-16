@@ -1,6 +1,7 @@
 use super::PluginLoadOutcome;
 use super::startup_remote_sync::start_startup_remote_plugin_sync_once;
 use crate::OPENAI_CURATED_MARKETPLACE_NAME;
+use crate::config_layer_compat::effective_user_config;
 use crate::installed_marketplaces::installed_marketplace_roots_from_layer_stack;
 use crate::loader::configured_curated_plugin_ids_from_codex_home;
 use crate::loader::curated_plugin_cache_version;
@@ -1997,7 +1998,7 @@ pub(crate) fn configured_plugins_from_stack(
     config_layer_stack: &ConfigLayerStack,
 ) -> HashMap<String, PluginConfig> {
     // Plugin entries remain persisted user config only.
-    let Some(user_config) = config_layer_stack.effective_user_config() else {
+    let Some(user_config) = effective_user_config(config_layer_stack) else {
         return HashMap::new();
     };
     configured_plugins_from_user_config_value(&user_config)

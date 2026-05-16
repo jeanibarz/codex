@@ -6,6 +6,7 @@ use self::activation::installed_marketplace_metadata_matches;
 use self::activation::write_installed_marketplace_metadata;
 use self::git::clone_git_source;
 use self::git::git_remote_revision;
+use crate::config_layer_compat::effective_user_config;
 use crate::marketplace::find_marketplace_manifest_path;
 use crate::marketplace::validate_marketplace_root;
 use codex_config::CONFIG_TOML_FILE;
@@ -109,7 +110,7 @@ fn marketplace_install_root(codex_home: &Path) -> PathBuf {
 fn configured_git_marketplaces(
     config_layer_stack: &ConfigLayerStack,
 ) -> Vec<ConfiguredGitMarketplace> {
-    let Some(user_config) = config_layer_stack.effective_user_config() else {
+    let Some(user_config) = effective_user_config(config_layer_stack) else {
         return Vec::new();
     };
     let Some(marketplaces_value) = user_config.get("marketplaces") else {
