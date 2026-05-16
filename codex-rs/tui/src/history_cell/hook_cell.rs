@@ -718,9 +718,14 @@ fn hook_event_label(event_name: HookEventName) -> &'static str {
         HookEventName::PostToolUse => "PostToolUse",
         HookEventName::PreCompact => "PreCompact",
         HookEventName::PostCompact => "PostCompact",
+        HookEventName::PostToolUseFailure => "PostToolUseFailure",
+        HookEventName::Notification => "Notification",
         HookEventName::SessionStart => "SessionStart",
+        HookEventName::SessionEnd => "SessionEnd",
         HookEventName::UserPromptSubmit => "UserPromptSubmit",
         HookEventName::Stop => "Stop",
+        HookEventName::StopFailure => "StopFailure",
+        HookEventName::FileChanged => "FileChanged",
     }
 }
 
