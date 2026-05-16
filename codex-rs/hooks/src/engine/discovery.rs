@@ -1,8 +1,10 @@
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::path::PathBuf;
 
-use codex_config::CONFIG_TOML_FILE;
+use codex_config::version_for_toml;
 use codex_config::ConfigLayerEntry;
 use codex_config::ConfigLayerSource;
 use codex_config::ConfigLayerStack;
@@ -15,17 +17,20 @@ use codex_config::ManagedHooksRequirementsToml;
 use codex_config::MatcherGroup;
 use codex_config::RequirementSource;
 use codex_config::TomlValue;
-use codex_config::version_for_toml;
+use codex_config::CONFIG_TOML_FILE;
 use codex_plugin::PluginHookSource;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use serde::Deserialize;
 use serde::Serialize;
 
+use super::dispatcher::encode_claude_conditional_matcher;
+use super::dispatcher::ClaudeHookCondition;
 use super::ConfiguredHandler;
 use super::HookListEntry;
 use crate::config_rules::hook_states_from_stack;
 use crate::events::common::matcher_pattern_for_event;
 use crate::events::common::validate_matcher_pattern;
+use codex_protocol::protocol::HookEventName;
 use codex_protocol::protocol::HookHandlerType;
 use codex_protocol::protocol::HookSource;
 use codex_protocol::protocol::HookTrustStatus;
@@ -45,6 +50,15 @@ struct HookHandlerSource<'a> {
     hook_states: &'a HashMap<String, HookStateToml>,
     env: HashMap<String, String>,
     plugin_id: Option<String>,
+    claude_conditions: Vec<ClaudeHookConditionByPosition>,
+}
+
+#[derive(Clone)]
+struct ClaudeHookConditionByPosition {
+    event_name: HookEventName,
+    group_index: usize,
+    handler_index: usize,
+    conditions: Vec<ClaudeHookCondition>,
 }
 
 #[derive(Clone, Copy)]
@@ -82,6 +96,11 @@ pub(crate) fn discover_handlers(
     };
 
     if let Some(config_layer_stack) = config_layer_stack {
+        let layers = config_layer_stack.get_layers(
+            ConfigLayerStackOrdering::LowestPrecedenceFirst,
+            /*include_disabled*/ false,
+        );
+
         append_managed_requirement_handlers(
             &mut handlers,
             &mut hook_entries,
@@ -92,10 +111,17 @@ pub(crate) fn discover_handlers(
             policy,
         );
 
-        for layer in config_layer_stack.get_layers(
-            ConfigLayerStackOrdering::LowestPrecedenceFirst,
-            /*include_disabled*/ false,
-        ) {
+        append_claude_settings_handlers(
+            &mut handlers,
+            &mut hook_entries,
+            &mut warnings,
+            &mut display_order,
+            &layers,
+            &hook_states,
+            policy,
+        );
+
+        for layer in &layers {
             let (hook_source, is_managed) = hook_metadata_for_config_layer_source(&layer.name);
             let policy_path = config_toml_source_path(layer);
             let policy_source = HookHandlerSource {
@@ -107,6 +133,7 @@ pub(crate) fn discover_handlers(
                 hook_states: &hook_states,
                 env: HashMap::new(),
                 plugin_id: None,
+                claude_conditions: Vec::new(),
             };
             if !policy.allows(&policy_source) {
                 continue;
@@ -141,6 +168,7 @@ pub(crate) fn discover_handlers(
                         hook_states: &hook_states,
                         env: HashMap::new(),
                         plugin_id: None,
+                        claude_conditions: Vec::new(),
                     },
                     hook_events,
                     policy,
@@ -166,6 +194,138 @@ pub(crate) fn discover_handlers(
     }
 }
 
+fn append_claude_settings_handlers(
+    handlers: &mut Vec<ConfiguredHandler>,
+    hook_entries: &mut Vec<HookListEntry>,
+    warnings: &mut Vec<String>,
+    display_order: &mut i64,
+    layers: &[&ConfigLayerEntry],
+    hook_states: &HashMap<String, HookStateToml>,
+    policy: HookDiscoveryPolicy,
+) {
+    let codex_home_env = std::env::var_os("CODEX_HOME").map(PathBuf::from);
+    let home_dir = home_dir_from_env();
+    for layer in layers {
+        let (hook_source, is_managed) = hook_metadata_for_claude_settings_layer_source(&layer.name);
+        for source_path in
+            claude_settings_paths_for_layer(layer, codex_home_env.as_deref(), home_dir.as_deref())
+        {
+            let Some((source_path, hook_events, claude_conditions)) =
+                load_claude_settings_hooks(source_path.as_path(), warnings)
+            else {
+                continue;
+            };
+            append_hook_events(
+                handlers,
+                hook_entries,
+                warnings,
+                display_order,
+                HookHandlerSource {
+                    path: &source_path,
+                    key_source: source_path.display().to_string(),
+                    source: hook_source,
+                    is_managed,
+                    bypass_hook_trust: policy.bypass_hook_trust,
+                    hook_states,
+                    env: HashMap::new(),
+                    plugin_id: None,
+                    claude_conditions,
+                },
+                hook_events,
+                policy,
+            );
+        }
+    }
+}
+
+fn hook_metadata_for_claude_settings_layer_source(
+    source: &ConfigLayerSource,
+) -> (HookSource, bool) {
+    match source {
+        ConfigLayerSource::User { .. } => (HookSource::User, true),
+        ConfigLayerSource::Project { .. } => (HookSource::Project, false),
+        ConfigLayerSource::System { .. } => (HookSource::System, true),
+        ConfigLayerSource::Mdm { .. } => (HookSource::Mdm, true),
+        ConfigLayerSource::SessionFlags => (HookSource::SessionFlags, false),
+        ConfigLayerSource::LegacyManagedConfigTomlFromFile { .. } => {
+            (HookSource::LegacyManagedConfigFile, true)
+        }
+        ConfigLayerSource::LegacyManagedConfigTomlFromMdm => {
+            (HookSource::LegacyManagedConfigMdm, true)
+        }
+    }
+}
+
+fn claude_settings_paths_for_layer(
+    layer: &ConfigLayerEntry,
+    codex_home_env: Option<&Path>,
+    home_dir: Option<&Path>,
+) -> Vec<PathBuf> {
+    let Some(config_folder) = layer.config_folder() else {
+        return Vec::new();
+    };
+    match &layer.name {
+        ConfigLayerSource::User { .. } => {
+            user_claude_settings_root(config_folder.as_path(), codex_home_env, home_dir)
+                .map(|root| vec![root.join(".claude").join("settings.json")])
+                .unwrap_or_default()
+        }
+        ConfigLayerSource::Project { .. } => {
+            let root = project_root_for_config_folder(config_folder.as_path());
+            let claude_dir = root.join(".claude");
+            vec![
+                claude_dir.join("settings.json"),
+                claude_dir.join("settings.local.json"),
+            ]
+        }
+        ConfigLayerSource::System { .. }
+        | ConfigLayerSource::Mdm { .. }
+        | ConfigLayerSource::SessionFlags
+        | ConfigLayerSource::LegacyManagedConfigTomlFromFile { .. }
+        | ConfigLayerSource::LegacyManagedConfigTomlFromMdm => Vec::new(),
+    }
+}
+
+fn user_claude_settings_root(
+    config_folder: &Path,
+    codex_home_env: Option<&Path>,
+    home_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    if config_folder
+        .file_name()
+        .is_some_and(|name| name == ".codex")
+    {
+        return config_folder.parent().map(Path::to_path_buf);
+    }
+    let (Some(codex_home_env), Some(home_dir)) = (codex_home_env, home_dir) else {
+        return None;
+    };
+    paths_match_after_normalize(config_folder, codex_home_env).then(|| home_dir.to_path_buf())
+}
+
+fn project_root_for_config_folder(config_folder: &Path) -> &Path {
+    if config_folder
+        .file_name()
+        .is_some_and(|name| name == ".codex")
+    {
+        config_folder.parent().unwrap_or(config_folder)
+    } else {
+        config_folder
+    }
+}
+
+fn paths_match_after_normalize(left: &Path, right: &Path) -> bool {
+    let left = fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
+    let right = fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
+    left == right
+}
+
+fn home_dir_from_env() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
+}
+
 fn append_managed_requirement_handlers(
     handlers: &mut Vec<ConfiguredHandler>,
     hook_entries: &mut Vec<HookListEntry>,
@@ -178,6 +338,15 @@ fn append_managed_requirement_handlers(
     let Some(managed_hooks) = config_layer_stack.requirements().managed_hooks.as_ref() else {
         return;
     };
+    if let Some(managed_dir) = managed_hooks.get().managed_dir_for_current_platform()
+        && !managed_dir.is_dir()
+    {
+        warnings.push(format!(
+            "managed hook directory {} does not exist",
+            managed_dir.display()
+        ));
+        return;
+    }
     let source_path = managed_hooks_source_path(managed_hooks.get(), managed_hooks.source.as_ref());
     append_hook_events(
         handlers,
@@ -193,6 +362,7 @@ fn append_managed_requirement_handlers(
             hook_states,
             env: HashMap::new(),
             plugin_id: None,
+            claude_conditions: Vec::new(),
         },
         managed_hooks.get().hooks.clone(),
         policy,
@@ -244,6 +414,7 @@ fn append_plugin_hook_sources(
                 hook_states,
                 env,
                 plugin_id: Some(plugin_id),
+                claude_conditions: Vec::new(),
             },
             hooks,
             policy,
@@ -327,6 +498,316 @@ fn load_hooks_json(
         .ok()?;
 
     (!parsed.hooks.is_empty()).then_some((source_path, parsed.hooks))
+}
+
+fn load_claude_settings_hooks(
+    settings_path: &Path,
+    warnings: &mut Vec<String>,
+) -> Option<(
+    AbsolutePathBuf,
+    HookEventsToml,
+    Vec<ClaudeHookConditionByPosition>,
+)> {
+    if !settings_path.is_file() {
+        return None;
+    }
+
+    let contents = match fs::read_to_string(settings_path) {
+        Ok(contents) => contents,
+        Err(err) => {
+            warnings.push(format!(
+                "failed to read Claude settings file {}: {err}",
+                settings_path.display()
+            ));
+            return None;
+        }
+    };
+
+    let mut value: serde_json::Value = match serde_json::from_str(&contents) {
+        Ok(value) => value,
+        Err(err) => {
+            warnings.push(format!(
+                "failed to parse Claude settings file {}: {err}",
+                settings_path.display()
+            ));
+            return None;
+        }
+    };
+
+    let claude_conditions =
+        filter_unsupported_claude_hook_if_expressions(settings_path, &mut value, warnings);
+    let parsed = match serde_json::from_value::<HooksFile>(value) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            warnings.push(format!(
+                "failed to parse Claude hooks in {}: {err}",
+                settings_path.display()
+            ));
+            return None;
+        }
+    };
+
+    let mut hooks = parsed.hooks;
+    hooks.permission_request.clear();
+    hooks.pre_compact.clear();
+    hooks.post_compact.clear();
+    hooks.post_tool_use_failure.clear();
+    hooks.notification.clear();
+    hooks.session_start.clear();
+    hooks.session_end.clear();
+    hooks.stop_failure.clear();
+    hooks.file_changed.clear();
+
+    let source_path = AbsolutePathBuf::from_absolute_path(settings_path)
+        .inspect_err(|err| {
+            warnings.push(format!(
+                "failed to normalize Claude settings path {}: {err}",
+                settings_path.display()
+            ));
+        })
+        .ok()?;
+
+    (!hooks.is_empty()).then_some((source_path, hooks, claude_conditions))
+}
+
+fn filter_unsupported_claude_hook_if_expressions(
+    settings_path: &Path,
+    value: &mut serde_json::Value,
+    warnings: &mut Vec<String>,
+) -> Vec<ClaudeHookConditionByPosition> {
+    let Some(hooks) = value
+        .get_mut("hooks")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return Vec::new();
+    };
+
+    let mut conditions_by_position = Vec::new();
+    let mut dropped_by_matcher: BTreeMap<String, usize> = BTreeMap::new();
+    for (event_label, event_name) in [
+        ("PreToolUse", HookEventName::PreToolUse),
+        ("PostToolUse", HookEventName::PostToolUse),
+        ("UserPromptSubmit", HookEventName::UserPromptSubmit),
+        ("Stop", HookEventName::Stop),
+    ] {
+        let Some(groups) = hooks
+            .get_mut(event_label)
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+
+        let mut retained_groups = Vec::with_capacity(groups.len());
+        for mut group in std::mem::take(groups) {
+            let matcher = group
+                .get("matcher")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("*")
+                .to_string();
+            let warning_matcher = format!("{event_label}/{matcher}");
+
+            let Some(group_object) = group.as_object_mut() else {
+                retained_groups.push(group);
+                continue;
+            };
+            let group_conditions = match group_object.remove("if") {
+                Some(value) => match parse_supported_claude_if_expression(event_name, &value) {
+                    Some(condition) => vec![condition],
+                    None => {
+                        let dropped_count = group_object
+                            .get("hooks")
+                            .and_then(serde_json::Value::as_array)
+                            .map_or(1, Vec::len);
+                        *dropped_by_matcher.entry(warning_matcher).or_default() += dropped_count;
+                        continue;
+                    }
+                },
+                None => Vec::new(),
+            };
+            let Some(hook_values) = group_object
+                .get_mut("hooks")
+                .and_then(serde_json::Value::as_array_mut)
+            else {
+                retained_groups.push(group);
+                continue;
+            };
+
+            let group_index = retained_groups.len();
+            let mut retained_hooks = Vec::with_capacity(hook_values.len());
+            for hook in std::mem::take(hook_values) {
+                let mut hook_conditions = group_conditions.clone();
+                let mut hook = hook;
+                if let Some(hook_object) = hook.as_object_mut()
+                    && let Some(value) = hook_object.remove("if")
+                {
+                    match parse_supported_claude_if_expression(event_name, &value) {
+                        Some(condition) => hook_conditions.push(condition),
+                        None => {
+                            *dropped_by_matcher
+                                .entry(warning_matcher.clone())
+                                .or_default() += 1;
+                            continue;
+                        }
+                    }
+                }
+
+                let handler_index = retained_hooks.len();
+                if !hook_conditions.is_empty() {
+                    conditions_by_position.push(ClaudeHookConditionByPosition {
+                        event_name,
+                        group_index,
+                        handler_index,
+                        conditions: hook_conditions,
+                    });
+                }
+                retained_hooks.push(hook);
+            }
+
+            *hook_values = retained_hooks;
+            retained_groups.push(group);
+        }
+        *groups = retained_groups;
+    }
+
+    for (matcher, dropped_count) in dropped_by_matcher {
+        let warning = format!(
+            "skipping {dropped_count} Claude settings hook(s) from {} for matcher {matcher}: hook-level if expressions are not supported",
+            settings_path.display()
+        );
+        tracing::warn!(%warning);
+        warnings.push(warning);
+    }
+    conditions_by_position
+}
+
+fn parse_supported_claude_if_expression(
+    event_name: HookEventName,
+    value: &serde_json::Value,
+) -> Option<ClaudeHookCondition> {
+    match event_name {
+        HookEventName::PreToolUse | HookEventName::PostToolUse => {}
+        HookEventName::PermissionRequest
+        | HookEventName::PreCompact
+        | HookEventName::PostCompact
+        | HookEventName::PostToolUseFailure
+        | HookEventName::Notification
+        | HookEventName::SessionStart
+        | HookEventName::SessionEnd
+        | HookEventName::UserPromptSubmit
+        | HookEventName::Stop
+        | HookEventName::StopFailure
+        | HookEventName::FileChanged => return None,
+    }
+    let expression = value.as_str()?.trim();
+    let (tool_name, rest) = expression.split_once('(')?;
+    let command_glob = rest.strip_suffix(')')?;
+    let tool_name = tool_name.trim();
+    let command_glob = command_glob.trim();
+    if tool_name.is_empty() || command_glob.is_empty() {
+        return None;
+    }
+    Some(ClaudeHookCondition::ToolCommandGlob {
+        tool_name: tool_name.to_string(),
+        command_glob: command_glob.to_string(),
+    })
+}
+
+/// Claude-compat: merge hook handlers from a JSON settings file (`--settings FILE`)
+/// into the discovered set. Used by external supervisors (e.g. Looper) to inject
+/// per-session hooks without editing `config.toml`.
+pub(crate) fn append_settings_file_handlers(result: &mut DiscoveryResult, settings_path: &Path) {
+    if !settings_path.is_file() {
+        result.warnings.push(format!(
+            "--settings: file not found at {}",
+            settings_path.display()
+        ));
+        return;
+    }
+
+    let contents = match fs::read_to_string(settings_path) {
+        Ok(contents) => contents,
+        Err(err) => {
+            result.warnings.push(format!(
+                "--settings: failed to read {}: {err}",
+                settings_path.display()
+            ));
+            return;
+        }
+    };
+
+    let mut value: serde_json::Value = match serde_json::from_str(&contents) {
+        Ok(value) => value,
+        Err(err) => {
+            result.warnings.push(format!(
+                "--settings: failed to parse {} as JSON: {err}",
+                settings_path.display()
+            ));
+            return;
+        }
+    };
+    let claude_conditions = filter_unsupported_claude_hook_if_expressions(
+        settings_path,
+        &mut value,
+        &mut result.warnings,
+    );
+    let parsed: HooksFile = match serde_json::from_value(value) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            result.warnings.push(format!(
+                "--settings: failed to parse hooks in {}: {err}",
+                settings_path.display()
+            ));
+            return;
+        }
+    };
+
+    if parsed.hooks.is_empty() {
+        return;
+    }
+
+    let source_path = match AbsolutePathBuf::try_from(settings_path.to_path_buf()) {
+        Ok(path) => path,
+        Err(err) => {
+            result.warnings.push(format!(
+                "--settings: failed to canonicalize {}: {err}",
+                settings_path.display()
+            ));
+            return;
+        }
+    };
+
+    let hook_states = HashMap::new();
+    let source = HookHandlerSource {
+        path: &source_path,
+        key_source: source_path.display().to_string(),
+        source: HookSource::SupervisorSettings,
+        is_managed: true,
+        bypass_hook_trust: false,
+        hook_states: &hook_states,
+        env: HashMap::new(),
+        plugin_id: None,
+        claude_conditions,
+    };
+    let mut display_order = result
+        .handlers
+        .iter()
+        .map(|handler| handler.display_order)
+        .max()
+        .unwrap_or(-1)
+        + 1;
+
+    append_hook_events(
+        &mut result.handlers,
+        &mut result.hook_entries,
+        &mut result.warnings,
+        &mut display_order,
+        source,
+        parsed.hooks,
+        HookDiscoveryPolicy {
+            allow_managed_hooks_only: false,
+            bypass_hook_trust: false,
+        },
+    );
 }
 
 fn load_toml_hooks_from_layer(
@@ -440,6 +921,16 @@ fn append_matcher_groups(
                     } else {
                         command
                     };
+                    let claude_conditions = source
+                        .claude_conditions
+                        .iter()
+                        .find(|condition| {
+                            condition.event_name == event_name
+                                && condition.group_index == group_index
+                                && condition.handler_index == handler_index
+                        })
+                        .map(|condition| condition.conditions.clone())
+                        .unwrap_or_default();
                     if r#async {
                         warnings.push(format!(
                             "skipping async hook in {}: async hooks are not supported yet",
@@ -462,8 +953,13 @@ fn append_matcher_groups(
                         r#async,
                         status_message: status_message.clone(),
                     };
-                    let current_hash =
-                        command_hook_hash(event_name, matcher, &group, normalized_handler);
+                    let current_hash = command_hook_hash(
+                        event_name,
+                        matcher,
+                        &group,
+                        &claude_conditions,
+                        normalized_handler,
+                    );
                     let command = source.env.iter().fold(command, |command, (key, value)| {
                         command.replace(&format!("${{{key}}}"), value)
                     });
@@ -501,7 +997,7 @@ fn append_matcher_groups(
                     {
                         handlers.push(ConfiguredHandler {
                             event_name,
-                            matcher: matcher.map(ToOwned::to_owned),
+                            matcher: encode_claude_conditional_matcher(matcher, &claude_conditions),
                             command,
                             timeout_sec,
                             status_message,
@@ -529,16 +1025,19 @@ fn append_matcher_groups(
 /// Hash a normalized, config-derived identity instead of source text so equivalent
 /// hooks from config TOML and hooks.json converge on the same trust identity.
 #[derive(Serialize)]
-struct NormalizedHookIdentity {
+struct NormalizedHookIdentity<'a> {
     event_name: &'static str,
     #[serde(flatten)]
     group: MatcherGroup,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    claude_conditions: Option<&'a [ClaudeHookCondition]>,
 }
 
 fn command_hook_hash(
     event_name: codex_protocol::protocol::HookEventName,
     matcher: Option<&str>,
     group: &MatcherGroup,
+    claude_conditions: &[ClaudeHookCondition],
     normalized_handler: HookHandlerConfig,
 ) -> String {
     let mut group = group.clone();
@@ -547,6 +1046,7 @@ fn command_hook_hash(
     let identity = NormalizedHookIdentity {
         event_name: crate::hook_event_key_label(event_name),
         group,
+        claude_conditions: (!claude_conditions.is_empty()).then_some(claude_conditions),
     };
     let Ok(value) = TomlValue::try_from(identity) else {
         unreachable!("normalized hook identity should serialize to TOML");
@@ -616,15 +1116,17 @@ mod tests {
     use codex_config::ConfigLayerEntry;
     use codex_config::ConfigLayerSource;
     use codex_config::HookEventsToml;
+    use codex_config::CONFIG_TOML_FILE;
     use codex_protocol::protocol::HookEventName;
     use codex_protocol::protocol::HookSource;
-    use codex_utils_absolute_path::AbsolutePathBuf;
-    use codex_utils_absolute_path::test_support::PathBufExt;
     use codex_utils_absolute_path::test_support::test_path_buf;
+    use codex_utils_absolute_path::test_support::PathBufExt;
+    use codex_utils_absolute_path::AbsolutePathBuf;
     use pretty_assertions::assert_eq;
 
-    use super::ConfiguredHandler;
     use super::append_matcher_groups;
+    use super::claude_settings_paths_for_layer;
+    use super::ConfiguredHandler;
     use codex_config::HookHandlerConfig;
     use codex_config::HookStateToml;
     use codex_config::MatcherGroup;
@@ -652,6 +1154,7 @@ mod tests {
             hook_states,
             env: std::collections::HashMap::new(),
             plugin_id: None,
+            claude_conditions: Vec::new(),
         }
     }
 
@@ -669,6 +1172,7 @@ mod tests {
             hook_states,
             env: std::collections::HashMap::new(),
             plugin_id: None,
+            claude_conditions: Vec::new(),
         }
     }
 
@@ -683,6 +1187,45 @@ mod tests {
                 status_message: None,
             }],
         }
+    }
+
+    #[test]
+    fn user_claude_settings_path_uses_home_when_codex_home_is_custom() {
+        let codex_home = test_path_buf("/custom/codex-home");
+        let home = test_path_buf("/home/user");
+        let layer = ConfigLayerEntry::new(
+            ConfigLayerSource::User {
+                file: codex_home.join(CONFIG_TOML_FILE).abs(),
+                profile: None,
+            },
+            TomlValue::Table(Default::default()),
+        );
+
+        assert_eq!(
+            claude_settings_paths_for_layer(
+                &layer,
+                Some(codex_home.as_path()),
+                Some(home.as_path())
+            ),
+            vec![home.join(".claude").join("settings.json")]
+        );
+    }
+
+    #[test]
+    fn user_claude_settings_path_uses_dot_codex_parent_without_env() {
+        let codex_home = test_path_buf("/home/user/.codex");
+        let layer = ConfigLayerEntry::new(
+            ConfigLayerSource::User {
+                file: codex_home.join(CONFIG_TOML_FILE).abs(),
+                profile: None,
+            },
+            TomlValue::Table(Default::default()),
+        );
+
+        assert_eq!(
+            claude_settings_paths_for_layer(&layer, None, None),
+            vec![test_path_buf("/home/user/.claude/settings.json")]
+        );
     }
 
     #[test]

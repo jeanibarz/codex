@@ -41,12 +41,22 @@ pub struct HookEventsToml {
     pub pre_compact: Vec<MatcherGroup>,
     #[serde(rename = "PostCompact", default)]
     pub post_compact: Vec<MatcherGroup>,
+    #[serde(rename = "PostToolUseFailure", default)]
+    pub post_tool_use_failure: Vec<MatcherGroup>,
+    #[serde(rename = "Notification", default)]
+    pub notification: Vec<MatcherGroup>,
     #[serde(rename = "SessionStart", default)]
     pub session_start: Vec<MatcherGroup>,
+    #[serde(rename = "SessionEnd", default)]
+    pub session_end: Vec<MatcherGroup>,
     #[serde(rename = "UserPromptSubmit", default)]
     pub user_prompt_submit: Vec<MatcherGroup>,
     #[serde(rename = "Stop", default)]
     pub stop: Vec<MatcherGroup>,
+    #[serde(rename = "StopFailure", default)]
+    pub stop_failure: Vec<MatcherGroup>,
+    #[serde(rename = "FileChanged", default)]
+    pub file_changed: Vec<MatcherGroup>,
 }
 
 impl HookEventsToml {
@@ -57,18 +67,28 @@ impl HookEventsToml {
             post_tool_use,
             pre_compact,
             post_compact,
+            post_tool_use_failure,
+            notification,
             session_start,
+            session_end,
             user_prompt_submit,
             stop,
+            stop_failure,
+            file_changed,
         } = self;
         pre_tool_use.is_empty()
             && permission_request.is_empty()
             && post_tool_use.is_empty()
             && pre_compact.is_empty()
             && post_compact.is_empty()
+            && post_tool_use_failure.is_empty()
+            && notification.is_empty()
             && session_start.is_empty()
+            && session_end.is_empty()
             && user_prompt_submit.is_empty()
             && stop.is_empty()
+            && stop_failure.is_empty()
+            && file_changed.is_empty()
     }
 
     pub fn handler_count(&self) -> usize {
@@ -78,9 +98,14 @@ impl HookEventsToml {
             post_tool_use,
             pre_compact,
             post_compact,
+            post_tool_use_failure,
+            notification,
             session_start,
+            session_end,
             user_prompt_submit,
             stop,
+            stop_failure,
+            file_changed,
         } = self;
         [
             pre_tool_use,
@@ -88,9 +113,14 @@ impl HookEventsToml {
             post_tool_use,
             pre_compact,
             post_compact,
+            post_tool_use_failure,
+            notification,
             session_start,
+            session_end,
             user_prompt_submit,
             stop,
+            stop_failure,
+            file_changed,
         ]
         .into_iter()
         .flatten()
@@ -98,16 +128,24 @@ impl HookEventsToml {
         .sum()
     }
 
-    pub fn into_matcher_groups(self) -> [(HookEventName, Vec<MatcherGroup>); 8] {
+    pub fn into_matcher_groups(self) -> [(HookEventName, Vec<MatcherGroup>); 13] {
         [
             (HookEventName::PreToolUse, self.pre_tool_use),
             (HookEventName::PermissionRequest, self.permission_request),
             (HookEventName::PostToolUse, self.post_tool_use),
             (HookEventName::PreCompact, self.pre_compact),
             (HookEventName::PostCompact, self.post_compact),
+            (
+                HookEventName::PostToolUseFailure,
+                self.post_tool_use_failure,
+            ),
+            (HookEventName::Notification, self.notification),
             (HookEventName::SessionStart, self.session_start),
+            (HookEventName::SessionEnd, self.session_end),
             (HookEventName::UserPromptSubmit, self.user_prompt_submit),
             (HookEventName::Stop, self.stop),
+            (HookEventName::StopFailure, self.stop_failure),
+            (HookEventName::FileChanged, self.file_changed),
         ]
     }
 }
