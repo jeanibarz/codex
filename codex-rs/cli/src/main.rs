@@ -88,7 +88,7 @@ use codex_terminal_detection::TerminalName;
 #[derive(Debug, Parser)]
 #[clap(
     author,
-    version,
+    version = env!("CODEX_BUILD_VERSION"),
     // If a sub‑command is given, ignore requirements of the default args.
     subcommand_negates_reqs = true,
     // The executable is sometimes invoked via a platform‑specific name like
@@ -1684,9 +1684,10 @@ async fn run_debug_trace_reduce_command(cmd: DebugTraceReduceCommand) -> anyhow:
 async fn run_debug_prompt_input_command(
     cmd: DebugPromptInputCommand,
     root_config_overrides: CliConfigOverrides,
-    interactive: TuiCli,
+    mut interactive: TuiCli,
     arg0_paths: Arg0DispatchPaths,
 ) -> anyhow::Result<()> {
+    resolve_prompt_file(&mut interactive)?;
     let loader_overrides = loader_overrides_for_profile(interactive.config_profile_v2.as_ref())?;
     let shared = interactive.shared.into_inner();
     let mut cli_kv_overrides = root_config_overrides
@@ -1722,6 +1723,7 @@ async fn run_debug_prompt_input_command(
         ephemeral: Some(true),
         bypass_hook_trust: shared.bypass_hook_trust.then_some(true),
         additional_writable_roots: shared.add_dir,
+        cli_plugin_dirs: shared.plugin_dirs,
         ..Default::default()
     };
     let config = ConfigBuilder::default()
@@ -2014,14 +2016,66 @@ fn read_remote_auth_token_from_env_var(env_var_name: &str) -> anyhow::Result<Str
     read_remote_auth_token_from_env_var_with(env_var_name, |name| std::env::var(name))
 }
 
+/// Upper bound on `--prompt-file` size. The positional `PROMPT` argument is
+/// implicitly capped by `ARG_MAX` (~2 MiB usable); `--prompt-file` removes that
+/// ceiling, so a hard limit is reintroduced here to keep an accidental log or
+/// binary file from allocating unbounded memory at startup and injecting a
+/// runaway initial context item. 10 MiB is far above any real task prompt
+/// (which cannot usefully exceed the model context window) yet well below
+/// "pointed at the wrong file" territory.
+const MAX_PROMPT_FILE_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Fold `--prompt-file` into the positional `prompt` slot. After this runs the
+/// file-sourced prompt is indistinguishable from a positional CLI prompt: it
+/// sets `skip_update_prompt` and is submitted internally via
+/// `create_initial_user_message`, so an orchestrator launching Codex in a PTY
+/// can deliver the initial prompt without a terminal-input race.
+///
+/// `--prompt-file` and a positional `PROMPT` are mutually exclusive at the clap
+/// layer; the `prompt.is_some()` guard only matters if the two ever arrive
+/// through separate arg matchers (base CLI vs. a flattened subcommand).
+///
+/// The file size is checked against [`MAX_PROMPT_FILE_BYTES`] before it is read,
+/// so an oversized file is rejected rather than read into memory.
+fn resolve_prompt_file(interactive: &mut TuiCli) -> std::io::Result<()> {
+    if interactive.prompt.is_some() {
+        return Ok(());
+    }
+    if let Some(path) = interactive.prompt_file.take() {
+        let read_err = |e: std::io::Error| {
+            std::io::Error::new(
+                e.kind(),
+                format!("failed to read --prompt-file {}: {e}", path.display()),
+            )
+        };
+        let len = std::fs::metadata(&path).map_err(&read_err)?.len();
+        if len > MAX_PROMPT_FILE_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "--prompt-file {} is {len} bytes, over the {MAX_PROMPT_FILE_BYTES}-byte limit",
+                    path.display(),
+                ),
+            ));
+        }
+        let text = std::fs::read_to_string(&path).map_err(&read_err)?;
+        interactive.prompt = Some(text);
+    }
+    Ok(())
+}
+
 async fn run_interactive_tui(
     mut interactive: TuiCli,
     remote: Option<String>,
     remote_auth_token_env: Option<String>,
     arg0_paths: Arg0DispatchPaths,
 ) -> std::io::Result<AppExitInfo> {
+    if let Err(e) = resolve_prompt_file(&mut interactive) {
+        return Ok(AppExitInfo::fatal(e.to_string()));
+    }
     if let Some(prompt) = interactive.prompt.take() {
         // Normalize CRLF/CR to LF so CLI-provided text can't leak `\r` into TUI state.
+        // Runs after resolve_prompt_file, so file-sourced prompts are normalized too.
         interactive.prompt = Some(prompt.replace("\r\n", "\n").replace('\r', "\n"));
     }
 
@@ -2187,6 +2241,7 @@ fn merge_interactive_cli_flags(interactive: &mut TuiCli, subcommand_cli: TuiCli)
         approval_policy,
         web_search,
         prompt,
+        prompt_file,
         config_overrides,
         ..
     } = subcommand_cli;
@@ -2206,11 +2261,21 @@ fn merge_interactive_cli_flags(interactive: &mut TuiCli, subcommand_cli: TuiCli)
         // Normalize CRLF/CR to LF so CLI-provided text can't leak `\r` into TUI state.
         interactive.prompt = Some(prompt.replace("\r\n", "\n").replace('\r', "\n"));
     }
+    // Carry `--prompt-file` from a subcommand-scoped CLI (e.g. `codex resume
+    // --prompt-file X`) into the merged interactive CLI; `..` above would
+    // otherwise silently drop it. Resolution into `prompt` happens later in
+    // `run_interactive_tui`.
+    if let Some(prompt_file) = prompt_file {
+        interactive.prompt_file = Some(prompt_file);
+    }
 
     interactive
         .config_overrides
         .raw_overrides
         .extend(config_overrides.raw_overrides);
+    if interactive.config_overrides.settings_file.is_none() {
+        interactive.config_overrides.settings_file = config_overrides.settings_file;
+    }
 }
 
 fn print_completion(cmd: CompletionCommand) {
@@ -3448,5 +3513,108 @@ mod tests {
         cli.feature_toggles
             .to_overrides()
             .expect_err("feature should be rejected")
+    }
+
+    #[test]
+    fn prompt_file_flag_parses_into_interactive() {
+        let cli = MultitoolCli::try_parse_from(["codex", "--prompt-file", "/tmp/p.txt"])
+            .expect("parse should succeed");
+        assert_eq!(
+            cli.interactive.prompt_file.as_deref(),
+            Some(std::path::Path::new("/tmp/p.txt")),
+        );
+        assert_eq!(cli.interactive.prompt, None);
+    }
+
+    #[test]
+    fn prompt_file_conflicts_with_positional_prompt() {
+        let result =
+            MultitoolCli::try_parse_from(["codex", "hello", "--prompt-file", "/tmp/p.txt"]);
+        assert!(
+            result.is_err(),
+            "positional PROMPT + --prompt-file must conflict"
+        );
+    }
+
+    #[test]
+    fn resolve_prompt_file_reads_file_into_prompt() {
+        let path = std::env::temp_dir().join(format!(
+            "codex-prompt-file-resolve-{}.txt",
+            std::process::id()
+        ));
+        std::fs::write(&path, "do the thing").expect("write temp prompt");
+        let mut cli = MultitoolCli::try_parse_from([
+            "codex",
+            "--prompt-file",
+            path.to_str().expect("utf8 path"),
+        ])
+        .expect("parse should succeed")
+        .interactive;
+
+        resolve_prompt_file(&mut cli).expect("resolve should succeed");
+
+        assert_eq!(cli.prompt.as_deref(), Some("do the thing"));
+        assert_eq!(cli.prompt_file, None);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn resolve_prompt_file_missing_file_is_error() {
+        let mut cli = MultitoolCli::try_parse_from([
+            "codex",
+            "--prompt-file",
+            "/nonexistent/codex-prompt-file/zzz.txt",
+        ])
+        .expect("parse should succeed")
+        .interactive;
+
+        let err = resolve_prompt_file(&mut cli).expect_err("missing file must error");
+        assert!(
+            err.to_string().contains("--prompt-file"),
+            "error should name the flag: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_prompt_file_rejects_oversize_file() {
+        let path = std::env::temp_dir().join(format!(
+            "codex-prompt-file-oversize-{}.txt",
+            std::process::id()
+        ));
+        std::fs::write(&path, vec![b'x'; MAX_PROMPT_FILE_BYTES as usize + 1])
+            .expect("write oversize temp prompt");
+        let mut cli = MultitoolCli::try_parse_from([
+            "codex",
+            "--prompt-file",
+            path.to_str().expect("utf8 path"),
+        ])
+        .expect("parse should succeed")
+        .interactive;
+
+        let err = resolve_prompt_file(&mut cli).expect_err("oversize file must error");
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            err.to_string().contains("limit"),
+            "error should mention the size limit: {err}"
+        );
+        assert_eq!(cli.prompt, None, "oversize file must not populate the prompt");
+    }
+
+    #[test]
+    fn merge_interactive_cli_flags_carries_prompt_file() {
+        let mut base = MultitoolCli::try_parse_from(["codex"])
+            .expect("parse should succeed")
+            .interactive;
+        let subcommand = MultitoolCli::try_parse_from(["codex", "--prompt-file", "/tmp/sub.txt"])
+            .expect("parse should succeed")
+            .interactive;
+
+        merge_interactive_cli_flags(&mut base, subcommand);
+
+        assert_eq!(
+            base.prompt_file.as_deref(),
+            Some(std::path::Path::new("/tmp/sub.txt")),
+            "subcommand --prompt-file must survive the merge",
+        );
     }
 }
