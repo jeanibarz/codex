@@ -32,10 +32,10 @@
     },
     "reason": {
       "enum": [
-        "other",
         "clear",
         "logout",
-        "prompt_input_exit"
+        "prompt_input_exit",
+        "other"
       ],
       "type": "string"
     },
