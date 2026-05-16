@@ -179,7 +179,7 @@ async fn run_http_sync(
 }
 
 fn assert_curated_gmail_repo(repo_path: &Path) {
-    assert!(repo_path.join(".agents/plugins/marketplace.json").is_file());
+    assert!(find_marketplace_manifest_path(repo_path).is_some());
     assert!(
         repo_path
             .join("plugins/gmail/.codex-plugin/plugin.json")
@@ -206,6 +206,21 @@ fn read_curated_plugins_sha_reads_trimmed_sha_file() {
         read_curated_plugins_sha(tmp.path()).as_deref(),
         Some("abc123")
     );
+}
+
+#[test]
+fn local_curated_snapshot_accepts_claude_marketplace_layout() {
+    let tmp = tempdir().expect("tempdir");
+    let repo_path = curated_plugins_repo_path(tmp.path());
+    write_file(
+        &repo_path.join(".claude/plugins/marketplace.json"),
+        r#"{"name":"openai-curated","plugins":[]}"#,
+    );
+    write_curated_plugin_sha(tmp.path());
+
+    assert!(has_local_curated_plugins_snapshot(tmp.path()));
+    ensure_marketplace_manifest_exists(repo_path.as_path())
+        .expect("claude marketplace layout should be supported");
 }
 
 #[cfg(unix)]
@@ -562,7 +577,7 @@ async fn sync_openai_plugins_repo_skips_archive_download_when_sha_matches() {
     .expect("sync should succeed");
 
     assert_eq!(read_curated_plugins_sha(tmp.path()).as_deref(), Some(sha));
-    assert!(repo_path.join(".agents/plugins/marketplace.json").is_file());
+    assert!(find_marketplace_manifest_path(repo_path.as_path()).is_some());
 }
 
 #[tokio::test]

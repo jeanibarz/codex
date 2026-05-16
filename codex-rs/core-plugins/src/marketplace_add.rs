@@ -212,6 +212,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::marketplace::find_marketplace_manifest_path;
     use anyhow::Result;
     use pretty_assertions::assert_eq;
     use tempfile::TempDir;
@@ -238,13 +239,7 @@ mod tests {
         assert_eq!(result.marketplace_name, "debug");
         assert_eq!(result.source_display, "https://github.com/owner/repo.git");
         assert!(!result.already_added);
-        assert!(
-            result
-                .installed_root
-                .as_path()
-                .join(".agents/plugins/marketplace.json")
-                .is_file()
-        );
+        assert!(find_marketplace_manifest_path(result.installed_root.as_path()).is_some());
 
         let config = fs::read_to_string(codex_home.path().join(codex_config::CONFIG_TOML_FILE))?;
         assert!(config.contains("[marketplaces.debug]"));
