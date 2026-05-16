@@ -1,3 +1,40 @@
+# feat/claude-compat daily rebase
+
+For the daily rebase workflow that keeps `feat/claude-compat` on top of
+`upstream/main`, enable Git `rerere` in the local repository checkout used by
+the cron task:
+
+```bash
+git config --local rerere.enabled true
+git config --local rerere.autoupdate false
+```
+
+Use repo-local config, not user-global config, so recorded conflict resolutions
+stay scoped to this fork checkout. Keep `rerere.autoupdate` set to `false`:
+rerere may write a known resolution into the working tree, but the operator must
+still inspect the file and stage it explicitly with `git add` before
+`git rebase --continue`.
+
+When rerere applies a known Tier 1/Tier 2 resolution, still record the conflict
+in the daily rebase conflict-resolution log. Treat the file as resolved only
+after reviewing the working tree diff and confirming the original tier
+classification still applies.
+
+Rerere does not weaken the Tier 3 policy. If a conflict is genuine semantic
+divergence, a removed or renamed upstream symbol used by fork code, a large
+conflict region, or more than 3 hunks in one file, run `git rebase --abort` and
+report it instead of accepting the recorded resolution.
+
+Useful commands:
+
+```bash
+git rerere status                 # paths currently tracked by rerere
+git rerere diff                   # recorded preimage vs resolved result
+find "$(git rev-parse --git-common-dir)/rr-cache" -maxdepth 2 -type f
+git rerere forget path/to/file    # clear one bad recorded resolution
+rm -rf "$(git rev-parse --git-common-dir)/rr-cache" # clear all recordings
+```
+
 # Rust/codex-rs
 
 In the codex-rs folder where the rust code lives:
