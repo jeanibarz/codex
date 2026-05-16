@@ -23,6 +23,8 @@ use std::sync::RwLock;
 use toml::Value as TomlValue;
 use tracing::warn;
 
+use crate::process_config_overrides::apply_process_settings_file;
+
 /// Shared app-server entry point for loading effective Codex configuration.
 #[derive(Clone)]
 pub(crate) struct ConfigManager {
@@ -237,9 +239,7 @@ impl ConfigManager {
             )
             .collect::<Vec<_>>();
         let mut typesafe_overrides = typesafe_overrides;
-        if typesafe_overrides.settings_file.is_none() {
-            typesafe_overrides.settings_file = self.process_settings_file.clone();
-        }
+        apply_process_settings_file(&mut typesafe_overrides, &self.process_settings_file);
 
         let mut config = codex_core::config::ConfigBuilder::default()
             .codex_home(self.codex_home.clone())

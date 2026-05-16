@@ -1,6 +1,7 @@
 pub(crate) mod agent_jobs;
 pub(crate) mod agent_jobs_spec;
 pub(crate) mod apply_patch;
+mod apply_patch_file_changed;
 pub(crate) mod apply_patch_spec;
 mod dynamic;
 pub(crate) mod extension_tools;
