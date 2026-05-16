@@ -1,5 +1,6 @@
 use super::*;
 use crate::error_code::method_not_found;
+use crate::process_config_overrides::apply_thread_runtime_overrides;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
 
@@ -1268,15 +1269,7 @@ impl ThreadRequestProcessor {
     }
 
     fn apply_process_thread_config_overrides(&self, overrides: &mut ConfigOverrides) {
-        if overrides.settings_file.is_none() {
-            overrides.settings_file = self.config.settings_file.clone();
-        }
-        if overrides.bypass_hook_trust.is_none() {
-            overrides.bypass_hook_trust = Some(self.config.bypass_hook_trust);
-        }
-        if overrides.cli_plugin_dirs.is_empty() {
-            overrides.cli_plugin_dirs = self.config.cli_plugin_dirs.clone();
-        }
+        apply_thread_runtime_overrides(overrides, &self.config);
     }
 
     fn parse_environment_selections(
