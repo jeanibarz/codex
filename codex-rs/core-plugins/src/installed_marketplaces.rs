@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::path::PathBuf;
 
+use crate::config_layer_compat::effective_user_config;
 use codex_config::ConfigLayerStack;
 use codex_plugin::validate_plugin_segment;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -18,7 +19,7 @@ pub fn installed_marketplace_roots_from_layer_stack(
     config_layer_stack: &ConfigLayerStack,
     codex_home: &Path,
 ) -> Vec<AbsolutePathBuf> {
-    let Some(user_config) = config_layer_stack.effective_user_config() else {
+    let Some(user_config) = effective_user_config(config_layer_stack) else {
         return Vec::new();
     };
     let Some(marketplaces_value) = user_config.get("marketplaces") else {
