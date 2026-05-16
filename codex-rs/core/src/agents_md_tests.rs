@@ -360,6 +360,63 @@ async fn uses_configured_fallback_when_agents_missing() {
     assert_eq!(res, "example instructions");
 }
 
+/// CLAUDE.md is used by default when AGENTS.md is absent.
+#[tokio::test]
+async fn uses_claude_md_fallback_by_default_when_agents_missing() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::write(
+        tmp.path().join("CLAUDE.md"),
+        "This is the CLAUDE.md test instruction.",
+    )
+    .unwrap();
+
+    let cfg = make_config(&tmp, /*limit*/ 4096, /*instructions*/ None).await;
+
+    let res = get_user_instructions(&cfg)
+        .await
+        .expect("CLAUDE.md fallback doc expected");
+
+    assert_eq!(res, "This is the CLAUDE.md test instruction.");
+}
+
+/// AGENTS.md remains preferred over the default CLAUDE.md fallback.
+#[tokio::test]
+async fn agents_md_preferred_over_default_claude_md_fallback() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::write(tmp.path().join("AGENTS.md"), "primary").unwrap();
+    fs::write(tmp.path().join("CLAUDE.md"), "secondary").unwrap();
+
+    let cfg = make_config(&tmp, /*limit*/ 4096, /*instructions*/ None).await;
+
+    let res = get_user_instructions(&cfg)
+        .await
+        .expect("AGENTS.md should win");
+
+    assert_eq!(res, "primary");
+}
+
+/// Explicit fallback config replaces the default CLAUDE.md fallback list.
+#[tokio::test]
+async fn configured_fallbacks_replace_default_claude_md_fallback() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::write(tmp.path().join("CLAUDE.md"), "claude instructions").unwrap();
+    fs::write(tmp.path().join("WORKFLOW.md"), "workflow instructions").unwrap();
+
+    let cfg = make_config_with_fallback(
+        &tmp,
+        /*limit*/ 4096,
+        /*instructions*/ None,
+        &["WORKFLOW.md"],
+    )
+    .await;
+
+    let res = get_user_instructions(&cfg)
+        .await
+        .expect("configured fallback doc expected");
+
+    assert_eq!(res, "workflow instructions");
+}
+
 /// AGENTS.md remains preferred when both AGENTS.md and fallbacks are present.
 #[tokio::test]
 async fn agents_md_preferred_over_fallbacks() {
@@ -497,6 +554,91 @@ async fn apps_feature_does_not_append_to_agents_md_user_instructions() {
         .await
         .expect("instructions expected");
     assert_eq!(res, "base doc");
+}
+
+/// Conditional rules share the project-doc budget with AGENTS.md so a
+/// workspace cannot smuggle past `project_doc_max_bytes` by splitting
+/// content between AGENTS.md and `.codex/rules`.
+#[tokio::test]
+async fn conditional_rules_share_project_doc_budget_with_agents_md() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let agents_doc = "x".repeat(50);
+    fs::write(tmp.path().join("AGENTS.md"), &agents_doc).unwrap();
+    fs::create_dir_all(tmp.path().join(".codex/rules")).unwrap();
+    fs::write(tmp.path().join(".codex/rules/a.md"), "y".repeat(50)).unwrap();
+
+    // Budget exactly fits AGENTS.md; nothing left for rules.
+    let cfg = make_config(&tmp, /*limit*/ 50, /*instructions*/ None).await;
+    let res = get_user_instructions(&cfg)
+        .await
+        .expect("instructions expected");
+    assert_eq!(res, agents_doc);
+    assert!(!res.contains("--- conditional-rules ---"));
+}
+
+/// When AGENTS.md leaves room under the budget, conditional rules are
+/// loaded — but only up to the remaining bytes.
+#[tokio::test]
+async fn conditional_rules_consume_only_remaining_project_doc_budget() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::write(tmp.path().join("AGENTS.md"), "x".repeat(30)).unwrap();
+    fs::create_dir_all(tmp.path().join(".codex/rules")).unwrap();
+    fs::write(tmp.path().join(".codex/rules/a.md"), "y".repeat(20)).unwrap();
+    fs::write(tmp.path().join(".codex/rules/b.md"), "z".repeat(20)).unwrap();
+
+    // 30 used by AGENTS.md, 20 remaining — fits exactly the first rule.
+    let cfg = make_config(&tmp, /*limit*/ 50, /*instructions*/ None).await;
+    let res = get_user_instructions(&cfg)
+        .await
+        .expect("instructions expected");
+    assert!(res.contains("--- conditional-rules ---"));
+    assert!(res.contains(".codex/rules/a.md"));
+    assert!(!res.contains(".codex/rules/b.md"));
+}
+
+/// `instruction_sources` reports conditional rule files alongside AGENTS.md
+/// so callers (e.g. app-server `ThreadStartResponse.instruction_sources`)
+/// can audit the full prompt-source list.
+#[tokio::test]
+async fn instruction_sources_include_conditional_rule_paths() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::write(tmp.path().join("AGENTS.md"), "agents").unwrap();
+    fs::create_dir_all(tmp.path().join(".codex/rules")).unwrap();
+    fs::create_dir_all(tmp.path().join(".claude/rules")).unwrap();
+    fs::write(tmp.path().join(".codex/rules/codex_rule.md"), "codex").unwrap();
+    fs::write(tmp.path().join(".claude/rules/claude_rule.md"), "claude").unwrap();
+
+    let cfg = make_config(&tmp, /*limit*/ 4096, /*instructions*/ None).await;
+    let sources = AgentsMdManager::new(&cfg)
+        .instruction_sources(LOCAL_FS.as_ref())
+        .await;
+    let names: Vec<String> = sources
+        .iter()
+        .map(|p| {
+            p.file_name()
+                .expect("source path has filename")
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert!(names.contains(&"AGENTS.md".to_string()));
+    assert!(names.contains(&"codex_rule.md".to_string()));
+    assert!(names.contains(&"claude_rule.md".to_string()));
+}
+
+/// `instruction_sources` returns no rule paths when `project_doc_max_bytes`
+/// is zero (rules would not be loaded, so they should not be reported).
+#[tokio::test]
+async fn instruction_sources_omit_rule_paths_when_budget_zero() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::create_dir_all(tmp.path().join(".codex/rules")).unwrap();
+    fs::write(tmp.path().join(".codex/rules/a.md"), "rule").unwrap();
+
+    let cfg = make_config(&tmp, /*limit*/ 0, /*instructions*/ None).await;
+    let sources = AgentsMdManager::new(&cfg)
+        .instruction_sources(LOCAL_FS.as_ref())
+        .await;
+    assert!(sources.is_empty());
 }
 
 fn create_skill(codex_home: PathBuf, name: &str, description: &str) {

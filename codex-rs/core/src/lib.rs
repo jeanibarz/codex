@@ -8,6 +8,12 @@
 mod apply_patch;
 mod apps;
 mod arc_monitor;
+// Claude-compat: Bash permission rules loader (`permissions.allow` / `deny` /
+// `ask` lists from settings.json). Not yet wired into ExecPolicyManager in
+// this rebase — tracked as a known gap and left as dead code so the module
+// stays compilable against upstream API changes.
+#[allow(dead_code)]
+mod claude_permissions_compat;
 mod client;
 mod client_common;
 mod realtime_context;
@@ -93,6 +99,7 @@ pub(crate) use skills::build_skill_name_counts;
 pub(crate) use skills::collect_env_var_dependencies;
 pub(crate) use skills::collect_explicit_skill_mentions;
 pub(crate) use skills::default_skill_metadata_budget;
+pub(crate) use skills::include_cli_plugin_skill_roots;
 pub(crate) use skills::injection;
 pub(crate) use skills::manager;
 pub(crate) use skills::maybe_emit_implicit_skill_invocation;
@@ -127,6 +134,7 @@ pub type NewConversation = NewThread;
 #[deprecated(note = "use CodexThread")]
 pub type CodexConversation = CodexThread;
 pub(crate) mod agents_md;
+pub(crate) mod rules;
 pub use agents_md::AgentsMdManager;
 pub use agents_md::DEFAULT_AGENTS_MD_FILENAME;
 pub use agents_md::LOCAL_AGENTS_MD_FILENAME;

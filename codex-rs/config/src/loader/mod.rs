@@ -1150,12 +1150,24 @@ async fn load_project_layers(
     let mut startup_warnings = Vec::new();
     for dir in dirs {
         let dot_codex_abs = dir.join(".codex");
-        if !fs
+        let has_dot_codex = fs
             .get_metadata(&dot_codex_abs, /*sandbox*/ None)
             .await
             .map(|metadata| metadata.is_directory)
+            .unwrap_or(false);
+        let claude_settings_abs = dir.join(".claude").join("settings.json");
+        let claude_settings_local_abs = dir.join(".claude").join("settings.local.json");
+        let has_claude_settings = fs
+            .get_metadata(&claude_settings_abs, /*sandbox*/ None)
+            .await
+            .map(|metadata| !metadata.is_directory)
             .unwrap_or(false)
-        {
+            || fs
+                .get_metadata(&claude_settings_local_abs, /*sandbox*/ None)
+                .await
+                .map(|metadata| !metadata.is_directory)
+                .unwrap_or(false);
+        if !has_dot_codex && !has_claude_settings {
             continue;
         }
 

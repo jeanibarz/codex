@@ -1,5 +1,6 @@
 use crate::agents_md::DEFAULT_AGENTS_MD_FILENAME;
 use crate::agents_md::LOCAL_AGENTS_MD_FILENAME;
+use crate::config::DEFAULT_PROJECT_DOC_FALLBACK_FILENAMES;
 use crate::config::ThreadStoreConfig;
 use crate::config::edit::ConfigEdit;
 use crate::config::edit::ConfigEditsBuilder;
@@ -7652,13 +7653,16 @@ async fn test_precedence_fixture_with_o3_profile() -> std::io::Result<()> {
             mcp_servers: Constrained::allow_any(HashMap::new()),
             mcp_oauth_credentials_store_mode: resolve_mcp_oauth_credentials_store_mode(
                 Default::default(),
-                LOCAL_DEV_BUILD_VERSION,
+                env!("CARGO_PKG_VERSION"),
             ),
             mcp_oauth_callback_port: None,
             mcp_oauth_callback_url: None,
             model_providers: fixture.model_provider_map.clone(),
             project_doc_max_bytes: AGENTS_MD_MAX_BYTES,
-            project_doc_fallback_filenames: Vec::new(),
+            project_doc_fallback_filenames: DEFAULT_PROJECT_DOC_FALLBACK_FILENAMES
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
             tool_output_token_limit: None,
             agent_max_threads: DEFAULT_AGENT_MAX_THREADS,
             agent_max_depth: DEFAULT_AGENT_MAX_DEPTH,
@@ -7748,6 +7752,8 @@ async fn test_precedence_fixture_with_o3_profile() -> std::io::Result<()> {
             tui_pet_anchor: TuiPetAnchor::Composer,
             tui_session_picker_view: SessionPickerViewMode::Dense,
             otel: OtelConfig::default(),
+            settings_file: None,
+            cli_plugin_dirs: Vec::new(),
         },
         o3_profile_config
     );
@@ -8103,13 +8109,16 @@ async fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
         mcp_servers: Constrained::allow_any(HashMap::new()),
         mcp_oauth_credentials_store_mode: resolve_mcp_oauth_credentials_store_mode(
             Default::default(),
-            LOCAL_DEV_BUILD_VERSION,
+            env!("CARGO_PKG_VERSION"),
         ),
         mcp_oauth_callback_port: None,
         mcp_oauth_callback_url: None,
         model_providers: fixture.model_provider_map.clone(),
         project_doc_max_bytes: AGENTS_MD_MAX_BYTES,
-        project_doc_fallback_filenames: Vec::new(),
+        project_doc_fallback_filenames: DEFAULT_PROJECT_DOC_FALLBACK_FILENAMES
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
         tool_output_token_limit: None,
         agent_max_threads: DEFAULT_AGENT_MAX_THREADS,
         agent_max_depth: DEFAULT_AGENT_MAX_DEPTH,
@@ -8199,6 +8208,8 @@ async fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
         tui_pet_anchor: TuiPetAnchor::Composer,
         tui_session_picker_view: SessionPickerViewMode::Dense,
         otel: OtelConfig::default(),
+        settings_file: None,
+        cli_plugin_dirs: Vec::new(),
     };
 
     assert_eq!(expected_gpt3_profile_config, gpt3_profile_config);
@@ -8268,13 +8279,16 @@ async fn test_precedence_fixture_with_zdr_profile() -> std::io::Result<()> {
         mcp_servers: Constrained::allow_any(HashMap::new()),
         mcp_oauth_credentials_store_mode: resolve_mcp_oauth_credentials_store_mode(
             Default::default(),
-            LOCAL_DEV_BUILD_VERSION,
+            env!("CARGO_PKG_VERSION"),
         ),
         mcp_oauth_callback_port: None,
         mcp_oauth_callback_url: None,
         model_providers: fixture.model_provider_map.clone(),
         project_doc_max_bytes: AGENTS_MD_MAX_BYTES,
-        project_doc_fallback_filenames: Vec::new(),
+        project_doc_fallback_filenames: DEFAULT_PROJECT_DOC_FALLBACK_FILENAMES
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
         tool_output_token_limit: None,
         agent_max_threads: DEFAULT_AGENT_MAX_THREADS,
         agent_max_depth: DEFAULT_AGENT_MAX_DEPTH,
@@ -8364,6 +8378,8 @@ async fn test_precedence_fixture_with_zdr_profile() -> std::io::Result<()> {
         tui_pet_anchor: TuiPetAnchor::Composer,
         tui_session_picker_view: SessionPickerViewMode::Dense,
         otel: OtelConfig::default(),
+        settings_file: None,
+        cli_plugin_dirs: Vec::new(),
     };
 
     assert_eq!(expected_zdr_profile_config, zdr_profile_config);
@@ -8418,13 +8434,16 @@ async fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
         mcp_servers: Constrained::allow_any(HashMap::new()),
         mcp_oauth_credentials_store_mode: resolve_mcp_oauth_credentials_store_mode(
             Default::default(),
-            LOCAL_DEV_BUILD_VERSION,
+            env!("CARGO_PKG_VERSION"),
         ),
         mcp_oauth_callback_port: None,
         mcp_oauth_callback_url: None,
         model_providers: fixture.model_provider_map.clone(),
         project_doc_max_bytes: AGENTS_MD_MAX_BYTES,
-        project_doc_fallback_filenames: Vec::new(),
+        project_doc_fallback_filenames: DEFAULT_PROJECT_DOC_FALLBACK_FILENAMES
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
         tool_output_token_limit: None,
         agent_max_threads: DEFAULT_AGENT_MAX_THREADS,
         agent_max_depth: DEFAULT_AGENT_MAX_DEPTH,
@@ -8514,6 +8533,8 @@ async fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
         tui_pet_anchor: TuiPetAnchor::Composer,
         tui_session_picker_view: SessionPickerViewMode::Dense,
         otel: OtelConfig::default(),
+        settings_file: None,
+        cli_plugin_dirs: Vec::new(),
     };
 
     assert_eq!(expected_gpt5_profile_config, gpt5_profile_config);

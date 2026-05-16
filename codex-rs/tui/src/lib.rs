@@ -807,8 +807,12 @@ pub async fn run_main(
     // When using `--oss`, let the bootstrapper pick the model (defaulting to
     // gpt-oss:20b) and ensure it is present locally. Also, force the built‑in
     let raw_overrides = cli.config_overrides.raw_overrides.clone();
+    let settings_file = cli.config_overrides.settings_file.clone();
     // `oss` model provider.
-    let overrides_cli = codex_utils_cli::CliConfigOverrides { raw_overrides };
+    let overrides_cli = codex_utils_cli::CliConfigOverrides {
+        raw_overrides,
+        settings_file,
+    };
     let cli_kv_overrides = match overrides_cli.parse_overrides() {
         // Parse `-c` overrides from the CLI.
         Ok(v) => v,
@@ -964,6 +968,8 @@ pub async fn run_main(
         show_raw_agent_reasoning: cli.oss.then_some(true),
         bypass_hook_trust: cli.bypass_hook_trust.then_some(true),
         additional_writable_roots: additional_dirs,
+        settings_file: cli.config_overrides.settings_file.clone(),
+        cli_plugin_dirs: cli.plugin_dirs.clone(),
         ..Default::default()
     };
 
@@ -1822,10 +1828,15 @@ mod tests {
     use codex_app_server_protocol::RequestId;
     use codex_app_server_protocol::ThreadStartParams;
     use codex_app_server_protocol::ThreadStartResponse;
+    use codex_app_server_protocol::TurnStartParams;
+    use codex_app_server_protocol::TurnStartResponse;
+    use codex_app_server_protocol::UserInput;
     use codex_config::config_toml::ProjectConfig;
     use pretty_assertions::assert_eq;
     use serial_test::serial;
     use tempfile::TempDir;
+    use tokio::time::Duration;
+    use tokio::time::sleep;
 
     async fn build_config(temp_dir: &TempDir) -> std::io::Result<Config> {
         ConfigBuilder::default()
@@ -1837,12 +1848,19 @@ mod tests {
     async fn start_test_embedded_app_server(
         config: Config,
     ) -> color_eyre::Result<InProcessAppServerClient> {
+        start_test_embedded_app_server_with_cli_overrides(config, Vec::new()).await
+    }
+
+    async fn start_test_embedded_app_server_with_cli_overrides(
+        config: Config,
+        cli_overrides: Vec<(String, toml::Value)>,
+    ) -> color_eyre::Result<InProcessAppServerClient> {
         let state_db =
             init_state_db_for_app_server_target(&config, &AppServerTarget::Embedded).await?;
         start_embedded_app_server(
             Arg0DispatchPaths::default(),
             config,
-            Vec::new(),
+            cli_overrides,
             LoaderOverrides::default(),
             /*strict_config*/ false,
             CloudRequirementsLoader::default(),
@@ -2333,6 +2351,105 @@ mod tests {
             .await
             .expect("thread/start should succeed");
         assert!(!response.thread.id.is_empty());
+
+        app_server.shutdown().await?;
+        Ok(())
+    }
+
+    #[test]
+    fn embedded_app_server_turn_start_uses_settings_file_hooks() -> color_eyre::Result<()> {
+        const TEST_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
+
+        let handle = std::thread::Builder::new()
+            .name("embedded_app_server_turn_start_uses_settings_file_hooks".to_string())
+            .stack_size(TEST_STACK_SIZE_BYTES)
+            .spawn(|| -> color_eyre::Result<()> {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .thread_stack_size(TEST_STACK_SIZE_BYTES)
+                    .enable_all()
+                    .build()?;
+                runtime.block_on(embedded_app_server_hooks_impl())
+            })?;
+
+        match handle.join() {
+            Ok(result) => result,
+            Err(_) => Err(color_eyre::eyre::eyre!(
+                "embedded_app_server_turn_start_uses_settings_file_hooks thread panicked"
+            )),
+        }
+    }
+
+    async fn embedded_app_server_hooks_impl() -> color_eyre::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let hook_script = temp_dir.path().join("session_start_hook.sh");
+        let marker = temp_dir.path().join("session_start_marker");
+        std::fs::write(
+            &hook_script,
+            format!(
+                "#!/bin/sh\necho session-start-fired > {}\n",
+                marker.display()
+            ),
+        )?;
+        let settings_file = temp_dir.path().join("settings.json");
+        std::fs::write(
+            &settings_file,
+            serde_json::json!({
+                "hooks": {
+                    "SessionStart": [{
+                        "matcher": "*",
+                        "hooks": [{
+                            "type": "command",
+                            "command": format!("sh {}", hook_script.display()),
+                        }],
+                    }],
+                },
+            })
+            .to_string(),
+        )?;
+
+        let mut config = build_config(&temp_dir).await?;
+        config.settings_file = Some(settings_file);
+        let app_server = start_test_embedded_app_server_with_cli_overrides(
+            config,
+            vec![(
+                "features.codex_hooks".to_string(),
+                toml::Value::Boolean(true),
+            )],
+        )
+        .await?;
+        let response: ThreadStartResponse = app_server
+            .request_typed(ClientRequest::ThreadStart {
+                request_id: RequestId::Integer(1),
+                params: ThreadStartParams {
+                    ephemeral: Some(true),
+                    ..ThreadStartParams::default()
+                },
+            })
+            .await
+            .expect("thread/start should succeed");
+        assert!(!response.thread.id.is_empty());
+        let _: TurnStartResponse = app_server
+            .request_typed(ClientRequest::TurnStart {
+                request_id: RequestId::Integer(2),
+                params: TurnStartParams {
+                    thread_id: response.thread.id,
+                    input: vec![UserInput::Text {
+                        text: "hello".to_string(),
+                        text_elements: Vec::new(),
+                    }],
+                    ..TurnStartParams::default()
+                },
+            })
+            .await
+            .expect("turn/start should succeed");
+        for _ in 0..20 {
+            if marker.exists() {
+                break;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(std::fs::read_to_string(&marker)?, "session-start-fired\n");
 
         app_server.shutdown().await?;
         Ok(())
