@@ -1,18 +1,15 @@
 use clap::Args;
 use clap::CommandFactory;
 use clap::Parser;
-use clap_complete::Shell;
 use clap_complete::generate;
+use clap_complete::Shell;
 use codex_app_server_daemon::BootstrapOptions as AppServerBootstrapOptions;
 use codex_app_server_daemon::LifecycleCommand as AppServerLifecycleCommand;
 use codex_app_server_daemon::RemoteControlMode as AppServerRemoteControlMode;
-use codex_arg0::Arg0DispatchPaths;
 use codex_arg0::arg0_dispatch_or_else;
-use codex_chatgpt::apply_command::ApplyCommand;
+use codex_arg0::Arg0DispatchPaths;
 use codex_chatgpt::apply_command::run_apply_command;
-use codex_cli::LandlockCommand;
-use codex_cli::SeatbeltCommand;
-use codex_cli::WindowsCommand;
+use codex_chatgpt::apply_command::ApplyCommand;
 use codex_cli::read_access_token_from_stdin;
 use codex_cli::read_api_key_from_stdin;
 use codex_cli::run_login_status;
@@ -21,24 +18,27 @@ use codex_cli::run_login_with_api_key;
 use codex_cli::run_login_with_chatgpt;
 use codex_cli::run_login_with_device_code;
 use codex_cli::run_logout;
+use codex_cli::LandlockCommand;
+use codex_cli::SeatbeltCommand;
+use codex_cli::WindowsCommand;
 use codex_cloud_tasks::Cli as CloudTasksCli;
 use codex_exec::Cli as ExecCli;
 use codex_exec::Command as ExecCommand;
 use codex_exec::ReviewArgs;
 use codex_execpolicy::ExecPolicyCheckCommand;
 use codex_responses_api_proxy::Args as ResponsesApiProxyArgs;
-use codex_rollout_trace::REDUCED_STATE_FILE_NAME;
 use codex_rollout_trace::replay_bundle;
-use codex_state::StateRuntime;
+use codex_rollout_trace::REDUCED_STATE_FILE_NAME;
 use codex_state::state_db_path;
+use codex_state::StateRuntime;
 use codex_tui::AppExitInfo;
 use codex_tui::Cli as TuiCli;
 use codex_tui::ExitReason;
 use codex_tui::UpdateAction;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_cli::resume_command;
 use codex_utils_cli::CliConfigOverrides;
 use codex_utils_cli::ProfileV2Name;
-use codex_utils_cli::resume_command;
 use owo_colors::OwoColorize;
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -52,6 +52,7 @@ mod doctor;
 mod marketplace_cmd;
 mod mcp_cmd;
 mod plugin_cmd;
+mod prompt_file;
 mod state_db_recovery;
 #[cfg(not(windows))]
 mod wsl_paths;
@@ -59,22 +60,24 @@ mod wsl_paths;
 use crate::mcp_cmd::McpCli;
 use crate::plugin_cmd::PluginCli;
 use crate::plugin_cmd::PluginSubcommand;
+use crate::prompt_file::normalize_prompt;
+use crate::prompt_file::resolve_prompt_file;
 use doctor::DoctorCommand;
 use state_db_recovery as local_state_db;
 
 use codex_config::LoaderOverrides;
 use codex_core::build_models_manager;
-use codex_core::config::ConfigBuilder;
-use codex_core::config::ConfigOverrides;
 use codex_core::config::edit::ConfigEditsBuilder;
 use codex_core::config::find_codex_home;
 use codex_core::config::resolve_profile_v2_config_path;
-use codex_features::FEATURES;
-use codex_features::Stage;
+use codex_core::config::ConfigBuilder;
+use codex_core::config::ConfigOverrides;
 use codex_features::is_known_feature_key;
+use codex_features::Stage;
+use codex_features::FEATURES;
+use codex_login::read_codex_access_token_from_env;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
-use codex_login::read_codex_access_token_from_env;
 use codex_memories_write::clear_memory_roots_contents;
 use codex_models_manager::bundled_models_response;
 use codex_models_manager::manager::RefreshStrategy;
@@ -1684,9 +1687,12 @@ async fn run_debug_trace_reduce_command(cmd: DebugTraceReduceCommand) -> anyhow:
 async fn run_debug_prompt_input_command(
     cmd: DebugPromptInputCommand,
     root_config_overrides: CliConfigOverrides,
-    interactive: TuiCli,
+    mut interactive: TuiCli,
     arg0_paths: Arg0DispatchPaths,
 ) -> anyhow::Result<()> {
+    if cmd.prompt.is_none() {
+        resolve_prompt_file(&mut interactive)?;
+    }
     let loader_overrides = loader_overrides_for_profile(interactive.config_profile_v2.as_ref())?;
     let shared = interactive.shared.into_inner();
     let mut cli_kv_overrides = root_config_overrides
@@ -1739,7 +1745,7 @@ async fn run_debug_prompt_input_command(
         .collect::<Vec<_>>();
     if let Some(prompt) = cmd.prompt.or(interactive.prompt) {
         input.push(UserInput::Text {
-            text: prompt.replace("\r\n", "\n").replace('\r', "\n"),
+            text: normalize_prompt(prompt),
             text_elements: Vec::new(),
         });
     }
@@ -2020,9 +2026,13 @@ async fn run_interactive_tui(
     remote_auth_token_env: Option<String>,
     arg0_paths: Arg0DispatchPaths,
 ) -> std::io::Result<AppExitInfo> {
+    if let Err(err) = resolve_prompt_file(&mut interactive) {
+        return Ok(AppExitInfo::fatal(err.to_string()));
+    }
+
     if let Some(prompt) = interactive.prompt.take() {
         // Normalize CRLF/CR to LF so CLI-provided text can't leak `\r` into TUI state.
-        interactive.prompt = Some(prompt.replace("\r\n", "\n").replace('\r', "\n"));
+        interactive.prompt = Some(normalize_prompt(prompt));
     }
 
     let terminal_info = codex_terminal_detection::terminal_info();
@@ -2187,6 +2197,7 @@ fn merge_interactive_cli_flags(interactive: &mut TuiCli, subcommand_cli: TuiCli)
         approval_policy,
         web_search,
         prompt,
+        prompt_file,
         config_overrides,
         ..
     } = subcommand_cli;
@@ -2204,7 +2215,12 @@ fn merge_interactive_cli_flags(interactive: &mut TuiCli, subcommand_cli: TuiCli)
     }
     if let Some(prompt) = prompt {
         // Normalize CRLF/CR to LF so CLI-provided text can't leak `\r` into TUI state.
-        interactive.prompt = Some(prompt.replace("\r\n", "\n").replace('\r', "\n"));
+        interactive.prompt = Some(normalize_prompt(prompt));
+        interactive.prompt_file = None;
+    }
+    if let Some(prompt_file) = prompt_file {
+        interactive.prompt = None;
+        interactive.prompt_file = Some(prompt_file);
     }
 
     interactive
@@ -2374,6 +2390,103 @@ mod tests {
     }
 
     #[test]
+    fn prompt_file_flag_parses_into_interactive() {
+        let cli = MultitoolCli::try_parse_from(["codex", "--prompt-file", "/tmp/prompt.txt"])
+            .expect("parse should succeed");
+
+        assert_eq!(
+            cli.interactive.prompt_file.as_deref(),
+            Some(std::path::Path::new("/tmp/prompt.txt"))
+        );
+        assert_eq!(cli.interactive.prompt, None);
+    }
+
+    #[test]
+    fn prompt_file_conflicts_with_positional_prompt() {
+        let err =
+            MultitoolCli::try_parse_from(["codex", "--prompt-file", "/tmp/prompt.txt", "hello"])
+                .expect_err("prompt file and positional prompt must conflict");
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn merge_interactive_cli_flags_carries_prompt_file() {
+        let mut interactive = MultitoolCli::try_parse_from(["codex"])
+            .expect("parse should succeed")
+            .interactive;
+        let subcommand_cli =
+            MultitoolCli::try_parse_from(["codex", "--prompt-file", "/tmp/resume-prompt.txt"])
+                .expect("parse should succeed")
+                .interactive;
+
+        merge_interactive_cli_flags(&mut interactive, subcommand_cli);
+
+        assert_eq!(
+            interactive.prompt_file.as_deref(),
+            Some(std::path::Path::new("/tmp/resume-prompt.txt"))
+        );
+        assert_eq!(interactive.prompt, None);
+    }
+
+    #[tokio::test]
+    async fn interactive_tui_returns_fatal_for_missing_prompt_file() {
+        let interactive = MultitoolCli::try_parse_from([
+            "codex",
+            "--prompt-file",
+            "/nonexistent/codex-prompt-file/missing.txt",
+        ])
+        .expect("parse should succeed")
+        .interactive;
+
+        let exit_info = run_interactive_tui(interactive, None, None, Arg0DispatchPaths::default())
+            .await
+            .expect("missing prompt file returns a fatal exit");
+
+        let ExitReason::Fatal(message) = exit_info.exit_reason else {
+            panic!("expected fatal exit");
+        };
+        assert!(
+            message.contains("--prompt-file"),
+            "error should name the flag: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn debug_prompt_input_prompt_takes_precedence_over_missing_root_prompt_file() {
+        let cli = MultitoolCli::try_parse_from([
+            "codex",
+            "--prompt-file",
+            "/nonexistent/codex-prompt-file/missing.txt",
+            "debug",
+            "prompt-input",
+            "hi",
+        ])
+        .expect("parse should succeed");
+        let MultitoolCli {
+            interactive,
+            config_overrides: root_overrides,
+            subcommand,
+            feature_toggles: _,
+            remote: _,
+        } = cli;
+        let Some(Subcommand::Debug(DebugCommand {
+            subcommand: DebugSubcommand::PromptInput(cmd),
+        })) = subcommand
+        else {
+            panic!("expected debug prompt-input subcommand");
+        };
+
+        let arg0_paths = Arg0DispatchPaths {
+            codex_self_exe: Some(std::env::current_exe().expect("current exe")),
+            ..Default::default()
+        };
+        run_debug_prompt_input_command(cmd, root_overrides, interactive, arg0_paths)
+            .await
+            .expect("subcommand prompt should not read lower-priority root prompt file");
+    }
+
+    #[test]
     fn dangerous_bypass_conflicts_with_approval_policy() {
         let err = MultitoolCli::try_parse_from([
             "codex",
@@ -2444,11 +2557,9 @@ mod tests {
     #[test]
     fn responses_subcommand_is_not_registered() {
         let command = MultitoolCli::command();
-        assert!(
-            command
-                .get_subcommands()
-                .all(|subcommand| subcommand.get_name() != "responses")
-        );
+        assert!(command
+            .get_subcommands()
+            .all(|subcommand| subcommand.get_name() != "responses"));
     }
 
     fn help_from_args(args: &[&str]) -> String {
@@ -3029,10 +3140,9 @@ mod tests {
             "exec",
         )
         .expect_err("non-interactive subcommands should reject --remote");
-        assert!(
-            err.to_string()
-                .contains("only supported for interactive TUI commands")
-        );
+        assert!(err
+            .to_string()
+            .contains("only supported for interactive TUI commands"));
     }
 
     #[test]
@@ -3043,10 +3153,9 @@ mod tests {
             "exec",
         )
         .expect_err("non-interactive subcommands should reject --remote-auth-token-env");
-        assert!(
-            err.to_string()
-                .contains("only supported for interactive TUI commands")
-        );
+        assert!(err
+            .to_string()
+            .contains("only supported for interactive TUI commands"));
     }
 
     #[test]
