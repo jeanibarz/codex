@@ -90,6 +90,7 @@ mod mcp_refresh;
 mod message_processor;
 mod models;
 mod outgoing_message;
+mod process_config_overrides;
 mod request_processors;
 mod request_serialization;
 mod server_request_error;
@@ -423,7 +424,6 @@ pub async fn run_main_with_transport_options(
     auth: AppServerWebsocketAuthSettings,
     runtime_options: AppServerRuntimeOptions,
 ) -> IoResult<()> {
-    let settings_file = cli_config_overrides.settings_file.clone();
     let (transport_event_tx, mut transport_event_rx) =
         mpsc::channel::<TransportEvent>(CHANNEL_CAPACITY);
     let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<OutgoingEnvelope>(CHANNEL_CAPACITY);
@@ -459,7 +459,7 @@ pub async fn run_main_with_transport_options(
         arg0_paths.clone(),
         Arc::new(NoopThreadConfigLoader),
     )
-    .with_process_settings_file(settings_file);
+    .with_process_settings_file(cli_config_overrides.settings_file.clone());
     match config_manager
         .load_latest_config(/*fallback_cwd*/ None)
         .await

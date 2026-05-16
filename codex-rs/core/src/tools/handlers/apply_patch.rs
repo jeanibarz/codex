@@ -10,7 +10,6 @@ use crate::apply_patch;
 use crate::apply_patch::InternalApplyPatchInvocation;
 use crate::apply_patch::convert_apply_patch_to_protocol;
 use crate::function_tool::FunctionCallError;
-use crate::hook_runtime::run_file_changed_hooks;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::session::turn_context::TurnEnvironment;
@@ -23,6 +22,7 @@ use crate::tools::context::boxed_tool_output;
 use crate::tools::events::ToolEmitter;
 use crate::tools::events::ToolEventCtx;
 use crate::tools::handlers::apply_granted_turn_permissions;
+use crate::tools::handlers::apply_patch_file_changed::run_apply_patch_file_changed_hooks;
 use crate::tools::handlers::apply_patch_spec::create_apply_patch_freeform_tool;
 use crate::tools::handlers::resolve_tool_environment;
 use crate::tools::handlers::updated_hook_command;
@@ -417,11 +417,10 @@ impl ToolExecutor<ToolInvocation> for ApplyPatchHandler {
                             Some(&tracker),
                         );
                         let content = emitter.finish(event_ctx, out, delta.as_ref()).await?;
-                        run_file_changed_hooks(
+                        run_apply_patch_file_changed_hooks(
                             &session,
                             &turn,
                             call_id.clone(),
-                            "apply_patch".to_string(),
                             hook_changes,
                         )
                         .await;
@@ -577,11 +576,10 @@ pub(crate) async fn intercept_apply_patch(
                         tracker.as_ref().copied(),
                     );
                     let content = emitter.finish(event_ctx, out, delta.as_ref()).await?;
-                    run_file_changed_hooks(
+                    run_apply_patch_file_changed_hooks(
                         &session,
                         &turn,
                         call_id.to_string(),
-                        "apply_patch".to_string(),
                         hook_changes,
                     )
                     .await;

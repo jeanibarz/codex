@@ -1,6 +1,5 @@
 use crate::OPENAI_CURATED_MARKETPLACE_NAME;
-use crate::claude::enabled_claude_plugin_roots;
-use crate::config_layer_compat::base_user_home_dir;
+use crate::claude_loader::load_enabled_claude_plugins;
 use crate::config_layer_compat::effective_user_config;
 use crate::manifest::PluginManifestHooks;
 use crate::manifest::PluginManifestPaths;
@@ -43,7 +42,6 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
-use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -145,26 +143,16 @@ pub async fn load_plugins_from_layer_stack(
         plugins.push(loaded_plugin);
     }
 
-    let home_dir = claude_plugins_home_dir(config_layer_stack);
-    let claude_mcp_server_policies: HashMap<String, PluginMcpServerConfig> = HashMap::new();
-    for claude_plugin in enabled_claude_plugin_roots(home_dir.as_deref()) {
-        let config_name = claude_plugin.plugin_id.as_key();
-        if configured_plugin_keys.contains(&config_name) {
-            continue;
-        }
-        let plugin_data_root = store.plugin_data_root(&claude_plugin.plugin_id);
-        let loaded_plugin = load_plugin_from_root(
-            config_name,
-            claude_plugin.source_path,
-            /*enabled*/ true,
-            &claude_plugin.plugin_id,
-            plugin_data_root,
-            restriction_product,
-            &skill_config_rules,
-            &claude_mcp_server_policies,
-            plugin_hooks_enabled,
-        )
-        .await;
+    for loaded_plugin in load_enabled_claude_plugins(
+        config_layer_stack,
+        store,
+        restriction_product,
+        &skill_config_rules,
+        &configured_plugin_keys,
+        plugin_hooks_enabled,
+    )
+    .await
+    {
         record_mcp_server_names(&loaded_plugin, &mut seen_mcp_server_names);
         plugins.push(loaded_plugin);
     }
@@ -205,10 +193,6 @@ pub fn remote_installed_plugins_to_config(
             ))
         })
         .collect()
-}
-
-fn claude_plugins_home_dir(config_layer_stack: &ConfigLayerStack) -> Option<PathBuf> {
-    base_user_home_dir(config_layer_stack)
 }
 
 fn record_mcp_server_names(
@@ -589,7 +573,7 @@ async fn load_plugin(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn load_plugin_from_root(
+pub(crate) async fn load_plugin_from_root(
     config_name: String,
     plugin_root: AbsolutePathBuf,
     enabled: bool,

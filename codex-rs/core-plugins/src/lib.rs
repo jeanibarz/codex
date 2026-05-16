@@ -1,4 +1,5 @@
 pub mod claude;
+mod claude_loader;
 mod config_layer_compat;
 pub mod installed_marketplaces;
 pub mod loader;
