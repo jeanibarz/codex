@@ -4,7 +4,7 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 
-use codex_config::version_for_toml;
+use codex_config::CONFIG_TOML_FILE;
 use codex_config::ConfigLayerEntry;
 use codex_config::ConfigLayerSource;
 use codex_config::ConfigLayerStack;
@@ -17,16 +17,16 @@ use codex_config::ManagedHooksRequirementsToml;
 use codex_config::MatcherGroup;
 use codex_config::RequirementSource;
 use codex_config::TomlValue;
-use codex_config::CONFIG_TOML_FILE;
+use codex_config::version_for_toml;
 use codex_plugin::PluginHookSource;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::dispatcher::encode_claude_conditional_matcher;
-use super::dispatcher::ClaudeHookCondition;
 use super::ConfiguredHandler;
 use super::HookListEntry;
+use super::dispatcher::ClaudeHookCondition;
+use super::dispatcher::encode_claude_conditional_matcher;
 use crate::config_rules::hook_states_from_stack;
 use crate::events::common::matcher_pattern_for_event;
 use crate::events::common::validate_matcher_pattern;
@@ -1113,20 +1113,20 @@ fn hook_source_for_requirement_source(source: Option<&RequirementSource>) -> Hoo
 
 #[cfg(test)]
 mod tests {
+    use codex_config::CONFIG_TOML_FILE;
     use codex_config::ConfigLayerEntry;
     use codex_config::ConfigLayerSource;
     use codex_config::HookEventsToml;
-    use codex_config::CONFIG_TOML_FILE;
     use codex_protocol::protocol::HookEventName;
     use codex_protocol::protocol::HookSource;
-    use codex_utils_absolute_path::test_support::test_path_buf;
-    use codex_utils_absolute_path::test_support::PathBufExt;
     use codex_utils_absolute_path::AbsolutePathBuf;
+    use codex_utils_absolute_path::test_support::PathBufExt;
+    use codex_utils_absolute_path::test_support::test_path_buf;
     use pretty_assertions::assert_eq;
 
+    use super::ConfiguredHandler;
     use super::append_matcher_groups;
     use super::claude_settings_paths_for_layer;
-    use super::ConfiguredHandler;
     use codex_config::HookHandlerConfig;
     use codex_config::HookStateToml;
     use codex_config::MatcherGroup;

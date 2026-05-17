@@ -19,12 +19,12 @@ use codex_config::Sourced;
 use codex_config::TomlValue;
 use codex_plugin::PluginHookSource;
 use codex_plugin::PluginId;
+use codex_protocol::ThreadId;
 use codex_protocol::protocol::HookOutputEntry;
 use codex_protocol::protocol::HookOutputEntryKind;
 use codex_protocol::protocol::HookRunStatus;
 use codex_protocol::protocol::HookSource;
 use codex_protocol::protocol::HookTrustStatus;
-use codex_protocol::ThreadId;
 use pretty_assertions::assert_eq;
 use tempfile::tempdir;
 
@@ -1047,20 +1047,22 @@ fn requirements_managed_hooks_warn_when_managed_dir_is_missing() {
             && warning.contains(&missing_dir.display().to_string())
     }));
     let cwd = cwd();
-    assert!(engine
-        .preview_pre_tool_use(&PreToolUseRequest {
-            session_id: ThreadId::new(),
-            turn_id: "turn-1".to_string(),
-            cwd,
-            transcript_path: None,
-            model: "gpt-test".to_string(),
-            permission_mode: "default".to_string(),
-            tool_name: "Bash".to_string(),
-            matcher_aliases: Vec::new(),
-            tool_use_id: "tool-1".to_string(),
-            tool_input: serde_json::json!({ "command": "echo hello" }),
-        })
-        .is_empty());
+    assert!(
+        engine
+            .preview_pre_tool_use(&PreToolUseRequest {
+                session_id: ThreadId::new(),
+                turn_id: "turn-1".to_string(),
+                cwd,
+                transcript_path: None,
+                model: "gpt-test".to_string(),
+                permission_mode: "default".to_string(),
+                tool_name: "Bash".to_string(),
+                matcher_aliases: Vec::new(),
+                tool_use_id: "tool-1".to_string(),
+                tool_input: serde_json::json!({ "command": "echo hello" }),
+            })
+            .is_empty()
+    );
 }
 
 #[test]
