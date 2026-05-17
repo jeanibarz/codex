@@ -46,7 +46,7 @@ fn active_user_layer_is_highest_precedence_user_layer() {
     let profile_file = test_user_config_path(&temp_dir, "work.config.toml");
     let base_layer = ConfigLayerEntry::new(
         ConfigLayerSource::User {
-            file: base_file,
+            file: base_file.clone(),
             profile: None,
         },
         toml::from_str(
@@ -72,6 +72,7 @@ approval_policy = "on-failure"
     .expect("multiple user layers should be valid");
 
     assert_eq!(stack.get_user_config_file(), Some(&profile_file));
+    assert_eq!(stack.get_base_user_config_file(), Some(&base_file));
     assert_eq!(
         stack
             .effective_user_config()
@@ -88,6 +89,110 @@ approval_policy = "on-failure"
             .and_then(toml::Value::as_str),
         Some("on-failure")
     );
+}
+
+#[test]
+fn base_user_home_dir_uses_base_user_layer_when_profile_overlay_is_active() {
+    let home = TempDir::new().expect("home tempdir");
+    let profile_home = TempDir::new().expect("profile home tempdir");
+    let base_file = AbsolutePathBuf::from_absolute_path(home.path().join(".codex/config.toml"))
+        .expect("base user config path should be absolute");
+    let profile_file =
+        AbsolutePathBuf::from_absolute_path(profile_home.path().join(".codex/work.config.toml"))
+            .expect("profile user config path should be absolute");
+    let base_layer = ConfigLayerEntry::new(
+        ConfigLayerSource::User {
+            file: base_file,
+            profile: None,
+        },
+        toml::from_str(r#"model = "base""#).expect("base config"),
+    );
+    let profile_layer = ConfigLayerEntry::new(
+        ConfigLayerSource::User {
+            file: profile_file,
+            profile: Some("work".to_string()),
+        },
+        toml::from_str(r#"model = "profile""#).expect("profile config"),
+    );
+    let stack = ConfigLayerStack::new(
+        vec![base_layer, profile_layer],
+        ConfigRequirements::default(),
+        ConfigRequirementsToml::default(),
+    )
+    .expect("multiple user layers should be valid");
+
+    assert_eq!(stack.base_user_home_dir(), Some(home.path().to_path_buf()));
+}
+
+#[test]
+fn effective_user_config_merges_nested_user_tables_in_layer_order() {
+    let temp_dir = TempDir::new().expect("tempdir");
+    let base_file = test_user_config_path(&temp_dir, "config.toml");
+    let profile_file = test_user_config_path(&temp_dir, "work.config.toml");
+    let base_layer = ConfigLayerEntry::new(
+        ConfigLayerSource::User {
+            file: base_file,
+            profile: None,
+        },
+        toml::from_str(
+            r#"
+[features]
+plugins = true
+
+[plugins."sample@test"]
+enabled = false
+
+[plugins."sample@test".mcp_servers.foo]
+enabled = false
+approval_mode = "never"
+
+[plugins."other@test"]
+enabled = true
+"#,
+        )
+        .expect("base config"),
+    );
+    let profile_layer = ConfigLayerEntry::new(
+        ConfigLayerSource::User {
+            file: profile_file,
+            profile: Some("work".to_string()),
+        },
+        toml::from_str(
+            r#"
+[plugins."sample@test"]
+enabled = true
+
+[plugins."sample@test".mcp_servers.foo]
+approval_mode = "on-request"
+"#,
+        )
+        .expect("profile config"),
+    );
+    let stack = ConfigLayerStack::new(
+        vec![base_layer, profile_layer],
+        ConfigRequirements::default(),
+        ConfigRequirementsToml::default(),
+    )
+    .expect("multiple user layers should be valid");
+    let expected = toml::from_str(
+        r#"
+[features]
+plugins = true
+
+[plugins."sample@test"]
+enabled = true
+
+[plugins."sample@test".mcp_servers.foo]
+enabled = false
+approval_mode = "on-request"
+
+[plugins."other@test"]
+enabled = true
+"#,
+    )
+    .expect("expected merged config");
+
+    assert_eq!(stack.effective_user_config(), Some(expected));
 }
 
 #[test]

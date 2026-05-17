@@ -298,6 +298,42 @@ impl ConfigLayerStack {
         Some(file)
     }
 
+    /// Returns the base raw user config layer, if any.
+    ///
+    /// This is the `$CODEX_HOME/config.toml` layer beneath any active
+    /// profile-v2 overlay. Use [`Self::get_active_user_layer`] for the writable
+    /// profile-aware layer.
+    pub fn get_base_user_layer(&self) -> Option<&ConfigLayerEntry> {
+        self.layers.iter().find(|layer| {
+            !layer.is_disabled()
+                && matches!(&layer.name, ConfigLayerSource::User { profile: None, .. })
+        })
+    }
+
+    /// Returns the config file for the base user layer, if any.
+    ///
+    /// When profile-v2 is active, this remains the base config file rather than
+    /// the profile overlay file returned by [`Self::get_user_config_file`].
+    pub fn get_base_user_config_file(&self) -> Option<&AbsolutePathBuf> {
+        let layer = self.get_base_user_layer()?;
+        let ConfigLayerSource::User { file, .. } = &layer.name else {
+            return None;
+        };
+        Some(file)
+    }
+
+    /// Returns the home directory containing the base user config folder.
+    ///
+    /// For the standard `$HOME/.codex/config.toml` layout, this returns
+    /// `$HOME`.
+    pub fn base_user_home_dir(&self) -> Option<PathBuf> {
+        self.get_base_user_layer()?
+            .config_folder()?
+            .as_path()
+            .parent()
+            .map(Path::to_path_buf)
+    }
+
     /// Returns all user config layers in the requested precedence order.
     ///
     /// With profile-v2 enabled, `LowestPrecedenceFirst` returns the base user
