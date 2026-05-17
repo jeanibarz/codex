@@ -12,10 +12,7 @@ pub struct Cli {
     #[arg(value_name = "PROMPT", value_hint = clap::ValueHint::Other)]
     pub prompt: Option<String>,
 
-    /// Read the initial user prompt from a file instead of the positional
-    /// PROMPT argument. The path is tiny in argv (no ARG_MAX limit) and is
-    /// read at startup, so an orchestrator launching Codex in a PTY can
-    /// deliver the prompt without a terminal-input race.
+    /// Read the initial user prompt from a UTF-8 encoded file.
     #[arg(
         long = "prompt-file",
         value_name = "PATH",

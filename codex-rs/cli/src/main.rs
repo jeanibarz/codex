@@ -80,6 +80,7 @@ use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::user_input::UserInput;
 use codex_terminal_detection::TerminalName;
+use prompt_file::normalize_prompt;
 use prompt_file::resolve_prompt_file;
 
 /// Codex CLI
@@ -1600,7 +1601,9 @@ async fn run_debug_prompt_input_command(
     mut interactive: TuiCli,
     arg0_paths: Arg0DispatchPaths,
 ) -> anyhow::Result<()> {
-    resolve_prompt_file(&mut interactive)?;
+    if cmd.prompt.is_none() {
+        resolve_prompt_file(&mut interactive)?;
+    }
     let loader_overrides = loader_overrides_for_profile(interactive.config_profile_v2.as_ref())?;
     let shared = interactive.shared.into_inner();
     let mut cli_kv_overrides = root_config_overrides
@@ -1940,8 +1943,7 @@ async fn run_interactive_tui(
     }
     if let Some(prompt) = interactive.prompt.take() {
         // Normalize CRLF/CR to LF so CLI-provided text can't leak `\r` into TUI state.
-        // Runs after resolve_prompt_file, so file-sourced prompts are normalized too.
-        interactive.prompt = Some(prompt.replace("\r\n", "\n").replace('\r', "\n"));
+        interactive.prompt = Some(normalize_prompt(prompt));
     }
 
     let terminal_info = codex_terminal_detection::terminal_info();
@@ -2124,13 +2126,11 @@ fn merge_interactive_cli_flags(interactive: &mut TuiCli, subcommand_cli: TuiCli)
     }
     if let Some(prompt) = prompt {
         // Normalize CRLF/CR to LF so CLI-provided text can't leak `\r` into TUI state.
-        interactive.prompt = Some(prompt.replace("\r\n", "\n").replace('\r', "\n"));
+        interactive.prompt = Some(normalize_prompt(prompt));
+        interactive.prompt_file = None;
     }
-    // Carry `--prompt-file` from a subcommand-scoped CLI (e.g. `codex resume
-    // --prompt-file X`) into the merged interactive CLI; `..` above would
-    // otherwise silently drop it. Resolution into `prompt` happens later in
-    // `run_interactive_tui`.
     if let Some(prompt_file) = prompt_file {
+        interactive.prompt = None;
         interactive.prompt_file = Some(prompt_file);
     }
 
@@ -3417,5 +3417,96 @@ mod tests {
             Some(std::path::Path::new("/tmp/sub.txt")),
             "subcommand --prompt-file must survive the merge",
         );
+        assert_eq!(base.prompt, None);
+    }
+
+    #[test]
+    fn merge_interactive_cli_flags_prompt_file_clears_existing_prompt() {
+        let mut base = MultitoolCli::try_parse_from(["codex", "root prompt"])
+            .expect("parse should succeed")
+            .interactive;
+        let subcommand = MultitoolCli::try_parse_from(["codex", "--prompt-file", "/tmp/sub.txt"])
+            .expect("parse should succeed")
+            .interactive;
+
+        merge_interactive_cli_flags(&mut base, subcommand);
+
+        assert_eq!(
+            base.prompt_file.as_deref(),
+            Some(std::path::Path::new("/tmp/sub.txt")),
+        );
+        assert_eq!(base.prompt, None);
+    }
+
+    #[test]
+    fn merge_interactive_cli_flags_prompt_clears_existing_prompt_file() {
+        let mut base = MultitoolCli::try_parse_from(["codex", "--prompt-file", "/tmp/root.txt"])
+            .expect("parse should succeed")
+            .interactive;
+        let subcommand = MultitoolCli::try_parse_from(["codex", "sub\r\nprompt"])
+            .expect("parse should succeed")
+            .interactive;
+
+        merge_interactive_cli_flags(&mut base, subcommand);
+
+        assert_eq!(base.prompt.as_deref(), Some("sub\nprompt"));
+        assert_eq!(base.prompt_file, None);
+    }
+
+    #[tokio::test]
+    async fn interactive_tui_returns_fatal_for_missing_prompt_file() {
+        let interactive = MultitoolCli::try_parse_from([
+            "codex",
+            "--prompt-file",
+            "/nonexistent/codex-prompt-file/missing.txt",
+        ])
+        .expect("parse should succeed")
+        .interactive;
+
+        let exit_info = run_interactive_tui(interactive, None, None, Arg0DispatchPaths::default())
+            .await
+            .expect("missing prompt file returns a fatal exit");
+
+        let ExitReason::Fatal(message) = exit_info.exit_reason else {
+            panic!("expected fatal exit");
+        };
+        assert!(
+            message.contains("--prompt-file"),
+            "error should name the flag: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn debug_prompt_input_prompt_takes_precedence_over_missing_root_prompt_file() {
+        let cli = MultitoolCli::try_parse_from([
+            "codex",
+            "--prompt-file",
+            "/nonexistent/codex-prompt-file/missing.txt",
+            "debug",
+            "prompt-input",
+            "hi",
+        ])
+        .expect("parse should succeed");
+        let MultitoolCli {
+            interactive,
+            config_overrides: root_overrides,
+            subcommand,
+            feature_toggles: _,
+            remote: _,
+        } = cli;
+        let Some(Subcommand::Debug(DebugCommand {
+            subcommand: DebugSubcommand::PromptInput(cmd),
+        })) = subcommand
+        else {
+            panic!("expected debug prompt-input subcommand");
+        };
+
+        let arg0_paths = Arg0DispatchPaths {
+            codex_self_exe: Some(std::env::current_exe().expect("current exe")),
+            ..Default::default()
+        };
+        run_debug_prompt_input_command(cmd, root_overrides, interactive, arg0_paths)
+            .await
+            .expect("subcommand prompt should not read lower-priority root prompt file");
     }
 }
