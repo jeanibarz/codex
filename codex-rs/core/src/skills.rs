@@ -31,7 +31,6 @@ pub use codex_core_skills::SkillsLoadInput;
 pub use codex_core_skills::SkillsManager;
 pub use codex_core_skills::build_available_skills;
 pub use codex_core_skills::build_skill_name_counts;
-pub use codex_core_skills::collect_env_var_dependencies;
 pub use codex_core_skills::config_rules;
 pub use codex_core_skills::default_skill_metadata_budget;
 pub use codex_core_skills::detect_implicit_skill_invocation_for_command;
