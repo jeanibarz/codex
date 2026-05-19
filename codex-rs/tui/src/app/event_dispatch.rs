@@ -152,7 +152,7 @@ impl App {
                                         if let Some(usage_line) = summary.usage_line {
                                             lines.push(usage_line.into());
                                         }
-                                        if let Some(command) = summary.resume_command {
+                                        if let Some(command) = summary.resume_hint {
                                             let spans = vec![
                                                 "To continue this session, run ".into(),
                                                 command.cyan(),
@@ -296,10 +296,14 @@ impl App {
                 self.chat_widget.on_commit_tick();
             }
             AppEvent::Exit(mode) => {
+                if mode == ExitMode::ShutdownFirst {
+                    self.show_shutdown_feedback(tui)?;
+                }
                 return Ok(self.handle_exit_mode(app_server, mode).await);
             }
             AppEvent::Logout => match app_server.logout_account().await {
                 Ok(()) => {
+                    self.show_shutdown_feedback(tui)?;
                     return Ok(self
                         .handle_exit_mode(app_server, ExitMode::ShutdownFirst)
                         .await);
@@ -415,6 +419,9 @@ impl App {
             }
             AppEvent::RefreshConnectors { force_refetch } => {
                 self.chat_widget.refresh_connectors(force_refetch);
+            }
+            AppEvent::FetchConnectorsList { force_refetch } => {
+                self.fetch_connectors_list(app_server, force_refetch);
             }
             AppEvent::PluginInstallAuthAdvance { refresh_connectors } => {
                 if refresh_connectors {
@@ -1303,8 +1310,10 @@ impl App {
             }
             AppEvent::PersistServiceTierSelection { service_tier } => {
                 self.refresh_status_line();
-                let profile = self.active_profile.as_deref();
                 self.config.service_tier = service_tier.clone();
+                self.sync_active_thread_service_tier_to_cached_session()
+                    .await;
+                let profile = self.active_profile.as_deref();
                 let edits = crate::config_update::build_service_tier_selection_edits(
                     profile,
                     service_tier.as_deref(),
@@ -1662,18 +1671,18 @@ impl App {
                 self.chat_widget.open_manage_skills_popup();
             }
             AppEvent::SetSkillEnabled { path, enabled } => {
-                let edits = [ConfigEdit::SetSkillConfig {
-                    path: path.to_path_buf(),
+                match crate::config_update::write_skill_enabled(
+                    app_server.request_handle(),
+                    path.clone(),
                     enabled,
-                }];
-                match ConfigEditsBuilder::for_config(&self.config)
-                    .with_edits(edits)
-                    .apply()
-                    .await
+                )
+                .await
                 {
                     Ok(()) => {
                         self.chat_widget.update_skill_enabled(path, enabled);
-                        if let Err(err) = self.refresh_in_memory_config_from_disk().await {
+                        if !app_server.is_remote()
+                            && let Err(err) = self.refresh_in_memory_config_from_disk().await
+                        {
                             tracing::warn!(
                                 error = %err,
                                 "failed to refresh config after skill toggle"
@@ -1691,44 +1700,35 @@ impl App {
             AppEvent::SetAppEnabled { id, enabled } => {
                 let edits = if enabled {
                     vec![
-                        ConfigEdit::ClearPath {
-                            segments: vec!["apps".to_string(), id.clone(), "enabled".to_string()],
-                        },
-                        ConfigEdit::ClearPath {
-                            segments: vec![
-                                "apps".to_string(),
-                                id.clone(),
-                                "disabled_reason".to_string(),
-                            ],
-                        },
+                        crate::config_update::clear_config_value(
+                            crate::config_update::app_scoped_key_path(&id, "enabled"),
+                        ),
+                        crate::config_update::clear_config_value(
+                            crate::config_update::app_scoped_key_path(&id, "disabled_reason"),
+                        ),
                     ]
                 } else {
                     vec![
-                        ConfigEdit::SetPath {
-                            segments: vec!["apps".to_string(), id.clone(), "enabled".to_string()],
-                            value: false.into(),
-                        },
-                        ConfigEdit::SetPath {
-                            segments: vec![
-                                "apps".to_string(),
-                                id.clone(),
-                                "disabled_reason".to_string(),
-                            ],
-                            value: "user".into(),
-                        },
+                        crate::config_update::replace_config_value(
+                            crate::config_update::app_scoped_key_path(&id, "enabled"),
+                            serde_json::json!(false),
+                        ),
+                        crate::config_update::replace_config_value(
+                            crate::config_update::app_scoped_key_path(&id, "disabled_reason"),
+                            serde_json::json!("user"),
+                        ),
                     ]
                 };
-                match ConfigEditsBuilder::for_config(&self.config)
-                    .with_edits(edits)
-                    .apply()
+                match crate::config_update::write_config_batch(app_server.request_handle(), edits)
                     .await
                 {
-                    Ok(()) => {
+                    Ok(_) => {
                         self.chat_widget.update_connector_enabled(&id, enabled);
-                        if let Err(err) = self.refresh_in_memory_config_from_disk().await {
+                        if !app_server.is_remote()
+                            && let Err(err) = self.refresh_in_memory_config_from_disk().await
+                        {
                             tracing::warn!(error = %err, "failed to refresh config after app toggle");
                         }
-                        self.chat_widget.submit_op(AppCommand::reload_user_config());
                     }
                     Err(err) => {
                         self.chat_widget.add_error_message(format!(

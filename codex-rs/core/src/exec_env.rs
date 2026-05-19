@@ -25,6 +25,17 @@ pub fn create_env(
     shell_environment::create_env(policy, thread_id.as_deref())
 }
 
+pub(crate) fn apply_dependency_env(
+    env: &mut HashMap<String, String>,
+    explicit_env_overrides: &mut HashMap<String, String>,
+    dependency_env: &HashMap<String, String>,
+) {
+    for (key, value) in dependency_env {
+        env.insert(key.clone(), value.clone());
+        explicit_env_overrides.insert(key.clone(), value.clone());
+    }
+}
+
 #[cfg(all(test, target_os = "windows"))]
 fn create_env_from_vars<I>(
     vars: I,

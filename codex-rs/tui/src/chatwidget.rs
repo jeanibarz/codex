@@ -128,7 +128,6 @@ use codex_config::types::ApprovalsReviewer;
 use codex_config::types::Notifications;
 use codex_config::types::WindowsSandboxModeToml;
 use codex_core_skills::model::SkillMetadata;
-use codex_exec_server::EnvironmentManager;
 use codex_features::FEATURES;
 use codex_features::Feature;
 #[cfg(test)]
@@ -166,7 +165,7 @@ use codex_terminal_detection::TerminalInfo;
 use codex_terminal_detection::TerminalName;
 use codex_terminal_detection::terminal_info;
 use codex_utils_absolute_path::AbsolutePathBuf;
-use codex_utils_cli::resume_command;
+use codex_utils_cli::resume_hint;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
@@ -464,7 +463,6 @@ const MAX_AGENT_COPY_HISTORY: usize = 32;
 /// Common initialization parameters shared by all `ChatWidget` constructors.
 pub(crate) struct ChatWidgetInit {
     pub(crate) config: Config,
-    pub(crate) environment_manager: Arc<EnvironmentManager>,
     pub(crate) frame_requester: FrameRequester,
     pub(crate) app_event_tx: AppEventSender,
     /// App-server-backed runner used by status surfaces for workspace metadata probes.
@@ -516,7 +514,6 @@ pub(crate) struct ChatWidget {
     bottom_pane: BottomPane,
     transcript: TranscriptState,
     config: Config,
-    environment_manager: Arc<EnvironmentManager>,
     raw_output_mode: bool,
     /// Runtime value resolved by core. `config.service_tier` remains the explicit user choice.
     effective_service_tier: Option<String>,
@@ -1277,6 +1274,10 @@ impl ChatWidget {
             .send(AppEvent::Exit(ExitMode::ShutdownFirst));
     }
 
+    pub(crate) fn show_shutdown_in_progress(&mut self) {
+        self.bottom_pane.show_shutdown_in_progress();
+    }
+
     fn request_redraw(&mut self) {
         self.frame_requester.schedule_frame();
     }
@@ -1436,16 +1437,14 @@ impl ChatWidget {
     }
 
     fn rename_confirmation_cell(name: &str, thread_id: Option<ThreadId>) -> PlainHistoryCell {
-        let resume_cmd =
-            resume_command(Some(name), thread_id).unwrap_or_else(|| format!("codex resume {name}"));
-        let name = name.to_string();
-        let line = vec![
+        let mut line = vec![
             "• ".into(),
             "Thread renamed to ".into(),
-            name.cyan(),
-            ", to resume this thread run ".into(),
-            resume_cmd.cyan(),
+            name.to_string().cyan(),
         ];
+        if let Some(hint) = resume_hint(Some(name), thread_id) {
+            line.extend([". To resume this thread run ".into(), hint.cyan()]);
+        }
         PlainHistoryCell::new(vec![line.into()])
     }
 

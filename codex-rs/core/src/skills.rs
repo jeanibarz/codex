@@ -142,7 +142,7 @@ pub(crate) fn include_cli_plugin_hook_sources(
 
 pub(crate) async fn resolve_skill_dependencies_for_turn(
     sess: &Arc<Session>,
-    turn_context: &Arc<TurnContext>,
+    turn_context: &TurnContext,
     dependencies: &[SkillDependencyInfo],
 ) {
     if dependencies.is_empty() {
@@ -184,7 +184,7 @@ pub(crate) async fn resolve_skill_dependencies_for_turn(
 
 async fn request_skill_dependencies(
     sess: &Arc<Session>,
-    turn_context: &Arc<TurnContext>,
+    turn_context: &TurnContext,
     dependencies: &[SkillDependencyInfo],
 ) {
     let questions = dependencies

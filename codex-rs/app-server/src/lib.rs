@@ -401,6 +401,7 @@ pub enum PluginStartupTasks {
 pub struct AppServerRuntimeOptions {
     pub plugin_startup_tasks: PluginStartupTasks,
     pub remote_control_enabled: bool,
+    pub install_shutdown_signal_handler: bool,
 }
 
 impl Default for AppServerRuntimeOptions {
@@ -408,6 +409,7 @@ impl Default for AppServerRuntimeOptions {
         Self {
             plugin_startup_tasks: PluginStartupTasks::Start,
             remote_control_enabled: false,
+            install_shutdown_signal_handler: true,
         }
     }
 }
@@ -519,10 +521,9 @@ pub async fn run_main_with_transport_options(
     let state_db = match rollout_state_db::try_init(&config).await {
         Ok(state_db) => Some(state_db),
         Err(err) => {
-            let state_db_path = codex_state::state_db_path(config.sqlite_home.as_path());
             return Err(std::io::Error::other(format!(
-                "failed to initialize sqlite state db at {}: {err}",
-                state_db_path.display()
+                "failed to initialize sqlite state runtime under {}: {err}",
+                config.sqlite_home.display()
             )));
         }
     };
@@ -647,7 +648,8 @@ pub async fn run_main_with_transport_options(
 
     let single_client_mode = matches!(&transport, AppServerTransport::Stdio);
     let shutdown_when_no_connections = single_client_mode;
-    let graceful_signal_restart_enabled = !single_client_mode;
+    let graceful_signal_restart_enabled =
+        runtime_options.install_shutdown_signal_handler && !single_client_mode;
     let mut app_server_client_name_rx = None;
 
     match &transport {

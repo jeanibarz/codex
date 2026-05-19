@@ -104,6 +104,40 @@ fn test_set_overrides() {
 }
 
 #[test]
+fn dependency_env_overrides_exec_env_and_explicit_overrides() {
+    let mut env = hashmap! {
+        "PATH".to_string() => "/usr/bin".to_string(),
+        "API_TOKEN".to_string() => "old".to_string(),
+    };
+    let mut explicit_env_overrides = hashmap! {
+        "PATH".to_string() => "/custom/bin".to_string(),
+    };
+    let dependency_env = hashmap! {
+        "API_TOKEN".to_string() => "prompted".to_string(),
+        "EXTRA_TOKEN".to_string() => "extra".to_string(),
+    };
+
+    apply_dependency_env(&mut env, &mut explicit_env_overrides, &dependency_env);
+
+    assert_eq!(
+        env,
+        hashmap! {
+            "PATH".to_string() => "/usr/bin".to_string(),
+            "API_TOKEN".to_string() => "prompted".to_string(),
+            "EXTRA_TOKEN".to_string() => "extra".to_string(),
+        }
+    );
+    assert_eq!(
+        explicit_env_overrides,
+        hashmap! {
+            "PATH".to_string() => "/custom/bin".to_string(),
+            "API_TOKEN".to_string() => "prompted".to_string(),
+            "EXTRA_TOKEN".to_string() => "extra".to_string(),
+        }
+    );
+}
+
+#[test]
 fn populate_env_inserts_thread_id() {
     let vars = make_vars(&[("PATH", "/usr/bin")]);
     let policy = ShellEnvironmentPolicy::default();

@@ -1008,16 +1008,20 @@ impl UnifiedExecProcessManager {
             CODEX_THREAD_ID_ENV_VAR.to_string(),
             context.session.conversation_id.to_string(),
         );
-        let env = apply_unified_exec_env(env);
+        let mut env = apply_unified_exec_env(env);
         let exec_server_env_config = ExecServerEnvConfig {
             policy: exec_env_policy_from_shell_policy(&context.turn.shell_environment_policy),
             local_policy_env,
         };
-        let mut orchestrator = ToolOrchestrator::new();
-        let mut runtime = UnifiedExecRuntime::new(
-            self,
-            context.turn.tools_config.unified_exec_shell_mode.clone(),
+        let mut explicit_env_overrides = context.turn.shell_environment_policy.r#set.clone();
+        crate::exec_env::apply_dependency_env(
+            &mut env,
+            &mut explicit_env_overrides,
+            &context.session.dependency_env().await,
         );
+        let mut orchestrator = ToolOrchestrator::new();
+        let mut runtime =
+            UnifiedExecRuntime::new(self, context.turn.unified_exec_shell_mode.clone());
         let file_system_sandbox_policy = context.turn.file_system_sandbox_policy();
         let exec_approval_requirement = context
             .session
@@ -1049,7 +1053,7 @@ impl UnifiedExecProcessManager {
             environment: Arc::clone(&request.environment),
             env,
             exec_server_env_config: Some(exec_server_env_config),
-            explicit_env_overrides: context.turn.shell_environment_policy.r#set.clone(),
+            explicit_env_overrides,
             network: request.network.clone(),
             tty: request.tty,
             sandbox_permissions: request.sandbox_permissions,

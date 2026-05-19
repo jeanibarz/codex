@@ -52,7 +52,6 @@ struct RunExecLikeArgs {
     turn: Arc<TurnContext>,
     tracker: crate::tools::context::SharedTurnDiffTracker,
     call_id: String,
-    freeform: bool,
     shell_runtime_backend: ShellRuntimeBackend,
 }
 
@@ -68,7 +67,6 @@ async fn run_exec_like(args: RunExecLikeArgs) -> Result<FunctionToolOutput, Func
         turn,
         tracker,
         call_id,
-        freeform,
         shell_runtime_backend,
     } = args;
 
@@ -80,17 +78,12 @@ async fn run_exec_like(args: RunExecLikeArgs) -> Result<FunctionToolOutput, Func
     };
     let fs = turn_environment.environment.get_filesystem();
 
-    let dependency_env = session.dependency_env().await;
-    if !dependency_env.is_empty() {
-        exec_params.env.extend(dependency_env.clone());
-    }
-
     let mut explicit_env_overrides = turn.shell_environment_policy.r#set.clone();
-    for key in dependency_env.keys() {
-        if let Some(value) = exec_params.env.get(key) {
-            explicit_env_overrides.insert(key.clone(), value.clone());
-        }
-    }
+    crate::exec_env::apply_dependency_env(
+        &mut exec_params.env,
+        &mut explicit_env_overrides,
+        &session.dependency_env().await,
+    );
 
     let exec_permission_approvals_enabled =
         session.features().enabled(Feature::ExecPermissionApprovals);
@@ -162,12 +155,7 @@ async fn run_exec_like(args: RunExecLikeArgs) -> Result<FunctionToolOutput, Func
     }
 
     let source = ExecCommandSource::Agent;
-    let emitter = ToolEmitter::shell(
-        exec_params.command.clone(),
-        exec_params.cwd.clone(),
-        source,
-        freeform,
-    );
+    let emitter = ToolEmitter::shell(exec_params.command.clone(), exec_params.cwd.clone(), source);
     let event_ctx = ToolEventCtx::new(
         session.as_ref(),
         turn.as_ref(),

@@ -764,6 +764,30 @@
             },
             "method": {
               "enum": [
+                "plugin/installed"
+              ],
+              "title": "Plugin/installedRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/PluginInstalledParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Plugin/installedRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
                 "plugin/read"
               ],
               "title": "Plugin/readRequestMethod",
@@ -6290,6 +6314,25 @@
           }
         ]
       },
+      "AutoCompactTokenLimitScope": {
+        "description": "Selects which part of the active context is charged against `model_auto_compact_token_limit`.",
+        "oneOf": [
+          {
+            "description": "Count the full active context against the limit.",
+            "enum": [
+              "total"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "Count sampled output and later growth after the carried window prefix.",
+            "enum": [
+              "body_after_prefix"
+            ],
+            "type": "string"
+          }
+        ]
+      },
       "AutoReviewDecisionSource": {
         "description": "[UNSTABLE] Source that produced a terminal approval auto-review decision.",
         "enum": [
@@ -7136,6 +7179,16 @@
             "type": [
               "integer",
               "null"
+            ]
+          },
+          "model_auto_compact_token_limit_scope": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/AutoCompactTokenLimitScope"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "model_context_window": {
@@ -8168,6 +8221,13 @@
             "minimum": 0.0,
             "type": [
               "integer",
+              "null"
+            ]
+          },
+          "threadId": {
+            "description": "Optional loaded thread id. Pass this when showing feature state for an existing thread so enablement is computed from that thread's refreshed config, including project-local config for the thread's cwd.",
+            "type": [
+              "string",
               "null"
             ]
           }
@@ -11829,6 +11889,56 @@
           "authPolicy"
         ],
         "title": "PluginInstallResponse",
+        "type": "object"
+      },
+      "PluginInstalledParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "cwds": {
+            "description": "Optional working directories used to discover repo marketplaces.",
+            "items": {
+              "$ref": "#/definitions/v2/AbsolutePathBuf"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "installSuggestionPluginNames": {
+            "description": "Additional uninstalled plugin names that should be returned when present locally. This is used by mention surfaces that intentionally expose install entrypoints.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "title": "PluginInstalledParams",
+        "type": "object"
+      },
+      "PluginInstalledResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "marketplaceLoadErrors": {
+            "default": [],
+            "items": {
+              "$ref": "#/definitions/v2/MarketplaceLoadErrorInfo"
+            },
+            "type": "array"
+          },
+          "marketplaces": {
+            "items": {
+              "$ref": "#/definitions/v2/PluginMarketplaceEntry"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "marketplaces"
+        ],
+        "title": "PluginInstalledResponse",
         "type": "object"
       },
       "PluginInterface": {
@@ -15493,6 +15603,8 @@
         "enum": [
           "active",
           "paused",
+          "blocked",
+          "usageLimited",
           "budgetLimited",
           "complete"
         ],
