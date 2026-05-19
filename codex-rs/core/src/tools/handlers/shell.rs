@@ -78,17 +78,12 @@ async fn run_exec_like(args: RunExecLikeArgs) -> Result<FunctionToolOutput, Func
     };
     let fs = turn_environment.environment.get_filesystem();
 
-    let dependency_env = session.dependency_env().await;
-    if !dependency_env.is_empty() {
-        exec_params.env.extend(dependency_env.clone());
-    }
-
     let mut explicit_env_overrides = turn.shell_environment_policy.r#set.clone();
-    for key in dependency_env.keys() {
-        if let Some(value) = exec_params.env.get(key) {
-            explicit_env_overrides.insert(key.clone(), value.clone());
-        }
-    }
+    crate::exec_env::apply_dependency_env(
+        &mut exec_params.env,
+        &mut explicit_env_overrides,
+        &session.dependency_env().await,
+    );
 
     let exec_permission_approvals_enabled =
         session.features().enabled(Feature::ExecPermissionApprovals);

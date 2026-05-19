@@ -3060,12 +3060,12 @@ impl Session {
         state.record_mcp_dependency_prompted(names);
     }
 
-    pub async fn dependency_env(&self) -> HashMap<String, String> {
+    pub(crate) async fn dependency_env(&self) -> HashMap<String, String> {
         let state = self.state.lock().await;
         state.dependency_env()
     }
 
-    pub async fn set_dependency_env(&self, values: HashMap<String, String>) {
+    pub(crate) async fn set_dependency_env(&self, values: HashMap<String, String>) {
         let mut state = self.state.lock().await;
         state.set_dependency_env(values);
     }
