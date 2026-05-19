@@ -15,6 +15,16 @@ rerere may write a known resolution into the working tree, but the operator must
 still inspect the file and stage it explicitly with `git add` before
 `git rebase --continue`.
 
+For this workflow, `origin/feat/claude-compat` is the canonical integration
+branch. If the local `feat/claude-compat` checkout diverges from
+`origin/feat/claude-compat` after fetch, but the worktree has no tracked
+changes and the local-only commits are patch-equivalent replayed copies of
+commits already on the remote side, create a dated local backup tag for the
+current local tip and reset the local branch to `origin/feat/claude-compat`
+without asking for additional approval. If the local-only commits are not
+patch-equivalent to the remote side, or the worktree has tracked changes, stop
+and report instead.
+
 When rerere applies a known Tier 1/Tier 2 resolution, still record the conflict
 in the daily rebase conflict-resolution log. Treat the file as resolved only
 after reviewing the working tree diff and confirming the original tier
