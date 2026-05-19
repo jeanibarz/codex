@@ -124,31 +124,31 @@ async fn advertised_tools_for_mode(
     let (sandbox_policy, permission_profile) =
         turn_permission_fields(PermissionProfile::Disabled, cwd.path());
     codex
-        .submit(Op::UserTurn {
+        .submit(Op::UserInput {
             environments: None,
             items: vec![UserInput::Text {
                 text: "list tools".into(),
                 text_elements: Vec::new(),
             }],
             final_output_json_schema: None,
-            cwd: cwd.path().to_path_buf(),
-            approval_policy: AskForApproval::Never,
-            approvals_reviewer: None,
-            sandbox_policy,
-            permission_profile,
-            model: session_model.clone(),
-            effort: None,
-            summary: None,
-            service_tier: None,
-            collaboration_mode: Some(CollaborationMode {
-                mode,
-                settings: Settings {
-                    model: session_model,
-                    reasoning_effort: None,
-                    developer_instructions: None,
-                },
-            }),
-            personality: None,
+            responsesapi_client_metadata: None,
+            thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
+                cwd: Some(cwd.path().to_path_buf()),
+                approval_policy: Some(AskForApproval::Never),
+                approvals_reviewer: None,
+                sandbox_policy: Some(sandbox_policy),
+                permission_profile,
+                model: Some(session_model.clone()),
+                collaboration_mode: Some(CollaborationMode {
+                    mode,
+                    settings: Settings {
+                        model: session_model,
+                        reasoning_effort: None,
+                        developer_instructions: None,
+                    },
+                }),
+                ..Default::default()
+            },
         })
         .await?;
 
