@@ -22,7 +22,6 @@ use codex_config::loader::project_trust_key;
 use codex_config::types::ToolSuggestDisabledTool;
 
 use codex_features::Feature;
-use codex_features::Features;
 use codex_login::CodexAuth;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_models_manager::bundled_models_response;
@@ -55,6 +54,7 @@ use codex_protocol::request_permissions::PermissionGrantScope;
 use codex_protocol::request_permissions::RequestPermissionProfile;
 use tracing::Span;
 
+use crate::goals::CreateGoalRequest;
 use crate::goals::ExternalGoalPreviousStatus;
 use crate::goals::ExternalGoalSet;
 use crate::goals::GoalRuntimeEvent;
@@ -536,8 +536,8 @@ async fn preview_session_start_hooks(
 }
 
 fn test_tool_runtime(session: Arc<Session>, turn_context: Arc<TurnContext>) -> ToolCallRuntime {
-    let router = Arc::new(ToolRouter::from_config(
-        &turn_context.tools_config,
+    let router = Arc::new(ToolRouter::from_turn_context(
+        &turn_context,
         crate::tools::router::ToolRouterParams {
             mcp_tools: None,
             deferred_mcp_tools: None,
@@ -6746,40 +6746,6 @@ async fn build_initial_context_omits_multi_agent_v2_usage_hints_when_feature_dis
 }
 
 #[tokio::test]
-async fn configured_multi_agent_v2_usage_hint_texts_use_effective_enabled_feature_state() {
-    let (mut session, _turn_context) =
-        make_multi_agent_v2_usage_hint_test_session(/*enable_multi_agent_v2*/ false).await;
-    let mut effective_features = Features::with_defaults();
-    effective_features.enable(Feature::MultiAgentV2);
-    Arc::get_mut(&mut session)
-        .expect("session should not be shared")
-        .features = effective_features.into();
-
-    let hint_texts = session.configured_multi_agent_v2_usage_hint_texts().await;
-
-    assert_eq!(
-        hint_texts,
-        vec![
-            "Root guidance.".to_string(),
-            "Subagent guidance.".to_string()
-        ]
-    );
-}
-
-#[tokio::test]
-async fn configured_multi_agent_v2_usage_hint_texts_omit_effectively_disabled_feature() {
-    let (mut session, _turn_context) =
-        make_multi_agent_v2_usage_hint_test_session(/*enable_multi_agent_v2*/ true).await;
-    Arc::get_mut(&mut session)
-        .expect("session should not be shared")
-        .features = Features::with_defaults().into();
-
-    let hint_texts = session.configured_multi_agent_v2_usage_hint_texts().await;
-
-    assert_eq!(hint_texts, Vec::<String>::new());
-}
-
-#[tokio::test]
 async fn build_initial_context_omits_default_image_save_location_with_image_history() {
     let (session, turn_context) = make_session_and_context().await;
     session
@@ -7758,15 +7724,21 @@ async fn task_finish_emits_turn_item_lifecycle_for_leftover_pending_user_input()
 
     while rx.try_recv().is_ok() {}
 
-    sess.inject_response_items(vec![ResponseInputItem::Message {
-        role: "user".to_string(),
-        content: vec![ContentItem::InputText {
-            text: "late pending input".to_string(),
-        }],
-        phase: None,
-    }])
+    let text_element = codex_protocol::user_input::TextElement::new(
+        codex_protocol::user_input::ByteRange { start: 5, end: 12 },
+        Some("pending marker".to_string()),
+    );
+    let pending_user_input = vec![UserInput::Text {
+        text: "late pending input".to_string(),
+        text_elements: vec![text_element.clone()],
+    }];
+    sess.steer_input(
+        pending_user_input.clone(),
+        Some(&tc.sub_id),
+        /*responsesapi_client_metadata*/ None,
+    )
     .await
-    .expect("inject pending input into active turn");
+    .expect("steer pending input into active turn");
 
     sess.on_task_finished(Arc::clone(&tc), /*last_agent_message*/ None)
         .await;
@@ -7800,10 +7772,7 @@ async fn task_finish_emits_turn_item_lifecycle_for_leftover_pending_user_input()
         EventMsg::ItemStarted(ItemStartedEvent {
             item: TurnItem::UserMessage(UserMessageItem { content, .. }),
             ..
-        }) if content == vec![UserInput::Text {
-            text: "late pending input".to_string(),
-            text_elements: Vec::new(),
-        }]
+        }) if content == pending_user_input
     ));
 
     let third = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
@@ -7815,10 +7784,7 @@ async fn task_finish_emits_turn_item_lifecycle_for_leftover_pending_user_input()
         EventMsg::ItemCompleted(ItemCompletedEvent {
             item: TurnItem::UserMessage(UserMessageItem { content, .. }),
             ..
-        }) if content == vec![UserInput::Text {
-            text: "late pending input".to_string(),
-            text_elements: Vec::new(),
-        }]
+        }) if content == pending_user_input
     ));
 
     let fourth = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
@@ -7835,7 +7801,7 @@ async fn task_finish_emits_turn_item_lifecycle_for_leftover_pending_user_input()
             ..
         }) if message == "late pending input"
             && images == Some(Vec::new())
-            && text_elements.is_empty()
+            && text_elements == vec![text_element]
             && local_images.is_empty()
     ));
 
@@ -7989,69 +7955,6 @@ async fn steer_input_returns_active_turn_id() {
 }
 
 #[tokio::test]
-async fn prepend_pending_input_keeps_older_tail_ahead_of_newer_input() {
-    let (sess, tc, _rx) = make_session_and_context_with_rx().await;
-    let input = vec![UserInput::Text {
-        text: "hello".to_string(),
-        text_elements: Vec::new(),
-    }];
-    sess.spawn_task(
-        Arc::clone(&tc),
-        input,
-        NeverEndingTask {
-            kind: TaskKind::Regular,
-            listen_to_cancellation_token: false,
-        },
-    )
-    .await;
-
-    let blocked = ResponseInputItem::Message {
-        role: "user".to_string(),
-        content: vec![ContentItem::InputText {
-            text: "blocked queued prompt".to_string(),
-        }],
-        phase: None,
-    };
-    let later = ResponseInputItem::Message {
-        role: "user".to_string(),
-        content: vec![ContentItem::InputText {
-            text: "later queued prompt".to_string(),
-        }],
-        phase: None,
-    };
-    let newer = ResponseInputItem::Message {
-        role: "user".to_string(),
-        content: vec![ContentItem::InputText {
-            text: "newer queued prompt".to_string(),
-        }],
-        phase: None,
-    };
-
-    sess.inject_response_items(vec![blocked.clone(), later.clone()])
-        .await
-        .expect("inject initial pending input into active turn");
-
-    let drained = sess.input_queue.get_pending_input(&sess.active_turn).await;
-    assert_eq!(drained, vec![blocked, later.clone()]);
-
-    sess.inject_response_items(vec![newer.clone()])
-        .await
-        .expect("inject newer pending input into active turn");
-
-    let mut drained_iter = drained.into_iter();
-    let _blocked = drained_iter.next().expect("blocked prompt should exist");
-    sess.input_queue
-        .prepend_pending_input(&sess.active_turn, drained_iter.collect())
-        .await
-        .expect("requeue later pending input at the front of the queue");
-
-    assert_eq!(
-        sess.input_queue.get_pending_input(&sess.active_turn).await,
-        vec![later, newer]
-    );
-}
-
-#[tokio::test]
 async fn queued_response_items_for_next_turn_move_into_next_active_turn() {
     let (sess, tc, _rx) = make_session_and_context_with_rx().await;
     let queued_item = ResponseInputItem::Message {
@@ -8078,7 +7981,7 @@ async fn queued_response_items_for_next_turn_move_into_next_active_turn() {
 
     assert_eq!(
         sess.input_queue.get_pending_input(&sess.active_turn).await,
-        vec![queued_item]
+        vec![TurnInput::ResponseInputItem(queued_item)]
     );
 }
 
@@ -8123,7 +8026,10 @@ async fn abort_empty_active_turn_preserves_pending_input() {
         Arc::clone(&active_turn.turn_state)
     };
     sess.input_queue
-        .extend_pending_input_for_turn_state(turn_state.as_ref(), vec![pending_item.clone()])
+        .extend_pending_input_for_turn_state(
+            turn_state.as_ref(),
+            vec![TurnInput::ResponseInputItem(pending_item.clone())],
+        )
         .await;
 
     sess.abort_all_tasks(TurnAbortReason::Replaced).await;
@@ -8133,7 +8039,7 @@ async fn abort_empty_active_turn_preserves_pending_input() {
         sess.input_queue
             .take_pending_input_for_turn_state(turn_state.as_ref())
             .await,
-        vec![pending_item]
+        vec![TurnInput::ResponseInputItem(pending_item)]
     );
 }
 
@@ -8451,6 +8357,66 @@ async fn goal_test_state_db(sess: &Session) -> anyhow::Result<crate::StateDbHand
 }
 
 #[tokio::test]
+async fn create_thread_goal_fills_empty_thread_preview() -> anyhow::Result<()> {
+    let (sess, tc, _rx, _codex_home) = make_goal_session_and_context_with_rx().await;
+    let state_db = goal_test_state_db(sess.as_ref()).await?;
+
+    let page = state_db
+        .list_threads(
+            /*page_size*/ 10,
+            codex_state::ThreadFilterOptions {
+                archived_only: false,
+                allowed_sources: &[],
+                model_providers: None,
+                cwd_filters: None,
+                anchor: None,
+                sort_key: codex_state::SortKey::UpdatedAt,
+                sort_direction: codex_state::SortDirection::Desc,
+                search_term: None,
+            },
+        )
+        .await?;
+    assert!(page.items.is_empty());
+
+    sess.create_thread_goal(
+        tc.as_ref(),
+        CreateGoalRequest {
+            objective: "Keep improving the benchmark".to_string(),
+            token_budget: None,
+        },
+    )
+    .await?;
+
+    let page = state_db
+        .list_threads(
+            /*page_size*/ 10,
+            codex_state::ThreadFilterOptions {
+                archived_only: false,
+                allowed_sources: &[],
+                model_providers: None,
+                cwd_filters: None,
+                anchor: None,
+                sort_key: codex_state::SortKey::UpdatedAt,
+                sort_direction: codex_state::SortDirection::Desc,
+                search_term: None,
+            },
+        )
+        .await?;
+    let ids = page
+        .items
+        .iter()
+        .map(|thread| thread.id)
+        .collect::<Vec<_>>();
+    assert_eq!(vec![sess.conversation_id], ids);
+    assert_eq!(
+        Some("Keep improving the benchmark"),
+        page.items[0].preview.as_deref()
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn budget_limited_accounting_steers_active_turn_without_aborting() -> anyhow::Result<()> {
     let (sess, tc, rx, _codex_home) = make_goal_session_and_context_with_rx().await;
     sess.set_thread_goal(
@@ -8497,7 +8463,9 @@ async fn budget_limited_accounting_steers_active_turn_without_aborting() -> anyh
     .await?;
 
     let pending_input = sess.input_queue.get_pending_input(&sess.active_turn).await;
-    let [ResponseInputItem::Message { role, content, .. }] = pending_input.as_slice() else {
+    let [TurnInput::ResponseInputItem(ResponseInputItem::Message { role, content, .. })] =
+        pending_input.as_slice()
+    else {
         panic!("expected one budget-limit steering message, got {pending_input:#?}");
     };
     assert_eq!("user", role);
@@ -8722,7 +8690,7 @@ async fn external_objective_change_steers_active_turn() -> anyhow::Result<()> {
         pending_input.iter().any(|item| {
             matches!(
                 item,
-                ResponseInputItem::Message { role, content, .. }
+                TurnInput::ResponseInputItem(ResponseInputItem::Message { role, content, .. })
                     if role == "user"
                         && content.iter().any(|content| matches!(
                             content,
@@ -8945,7 +8913,9 @@ async fn queue_only_mailbox_mail_waits_for_next_turn_after_answer_boundary() {
 
     assert_eq!(
         sess.input_queue.get_pending_input(&sess.active_turn).await,
-        vec![communication.to_response_input_item()],
+        vec![TurnInput::ResponseInputItem(
+            communication.to_response_input_item()
+        )],
     );
 }
 
@@ -9025,11 +8995,11 @@ async fn steered_input_reopens_mailbox_delivery_for_current_turn() {
     assert_eq!(
         sess.input_queue.get_pending_input(&sess.active_turn).await,
         vec![
-            ResponseInputItem::from(vec![UserInput::Text {
+            TurnInput::UserInput(vec![UserInput::Text {
                 text: "follow up".to_string(),
                 text_elements: Vec::new(),
             }]),
-            communication.to_response_input_item(),
+            TurnInput::ResponseInputItem(communication.to_response_input_item()),
         ],
     );
 }
@@ -9078,11 +9048,11 @@ async fn stale_defer_mailbox_delivery_does_not_override_steered_input() {
     assert_eq!(
         sess.input_queue.get_pending_input(&sess.active_turn).await,
         vec![
-            ResponseInputItem::from(vec![UserInput::Text {
+            TurnInput::UserInput(vec![UserInput::Text {
                 text: "follow up".to_string(),
                 text_elements: Vec::new(),
             }]),
-            communication.to_response_input_item(),
+            TurnInput::ResponseInputItem(communication.to_response_input_item()),
         ],
     );
 }
@@ -9137,7 +9107,9 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
     assert!(output.tool_future.is_some());
     assert_eq!(
         sess.input_queue.get_pending_input(&sess.active_turn).await,
-        vec![communication.to_response_input_item()],
+        vec![TurnInput::ResponseInputItem(
+            communication.to_response_input_item()
+        )],
     );
 }
 
@@ -9233,8 +9205,8 @@ async fn fatal_tool_error_stops_turn_and_reports_error() {
             .await
     };
     let deferred_mcp_tools = Some(tools.clone());
-    let router = ToolRouter::from_config(
-        &turn_context.tools_config,
+    let router = ToolRouter::from_turn_context(
+        &turn_context,
         crate::tools::router::ToolRouterParams {
             deferred_mcp_tools,
             mcp_tools: Some(tools),
@@ -9802,9 +9774,10 @@ async fn rejects_escalated_permissions_when_policy_not_on_request() {
     turn_context_mut.permission_profile = PermissionProfile::Disabled;
 
     let file_system_sandbox_policy = turn_context.file_system_sandbox_policy();
-    let command = session
-        .user_shell()
-        .derive_exec_args(command_script, turn_context.tools_config.allow_login_shell);
+    let command = session.user_shell().derive_exec_args(
+        command_script,
+        turn_context.config.permissions.allow_login_shell,
+    );
     let exec_approval_requirement = session
         .services
         .exec_policy
