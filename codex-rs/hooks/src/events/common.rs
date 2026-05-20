@@ -103,10 +103,11 @@ pub(crate) fn matcher_pattern_for_event(
         HookEventName::PreToolUse
         | HookEventName::PermissionRequest
         | HookEventName::PostToolUse
+        | HookEventName::SessionStart
+        | HookEventName::SubagentStart
         | HookEventName::PreCompact
         | HookEventName::PostCompact
         | HookEventName::PostToolUseFailure
-        | HookEventName::SessionStart
         | HookEventName::FileChanged => matcher,
         HookEventName::Notification
         | HookEventName::SessionEnd
@@ -274,6 +275,10 @@ mod tests {
         assert_eq!(
             matcher_pattern_for_event(HookEventName::SessionStart, Some("startup|resume")),
             Some("startup|resume")
+        );
+        assert_eq!(
+            matcher_pattern_for_event(HookEventName::SubagentStart, Some("worker")),
+            Some("worker")
         );
         assert_eq!(
             matcher_pattern_for_event(HookEventName::PreCompact, Some("^auto$")),

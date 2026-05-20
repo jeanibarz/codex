@@ -1085,7 +1085,7 @@
       "enum": [
         "read",
         "write",
-        "none"
+        "deny"
       ],
       "type": "string"
     },
@@ -1743,6 +1743,7 @@
         "sessionStart",
         "sessionEnd",
         "userPromptSubmit",
+        "subagentStart",
         "stop",
         "stopFailure",
         "fileChanged"

@@ -588,6 +588,7 @@ fn filter_unsupported_claude_hook_if_expressions(
         ("PreToolUse", HookEventName::PreToolUse),
         ("PostToolUse", HookEventName::PostToolUse),
         ("UserPromptSubmit", HookEventName::UserPromptSubmit),
+        ("SubagentStart", HookEventName::SubagentStart),
         ("Stop", HookEventName::Stop),
     ] {
         let Some(groups) = hooks
@@ -693,6 +694,7 @@ fn parse_supported_claude_if_expression(
         | HookEventName::Notification
         | HookEventName::SessionStart
         | HookEventName::SessionEnd
+        | HookEventName::SubagentStart
         | HookEventName::UserPromptSubmit
         | HookEventName::Stop
         | HookEventName::StopFailure
@@ -1409,6 +1411,42 @@ mod tests {
         assert_eq!(handlers.len(), 1);
         assert_eq!(handlers[0].event_name, HookEventName::PostToolUse);
         assert_eq!(handlers[0].matcher.as_deref(), Some("Edit|Write"));
+    }
+
+    #[test]
+    fn claude_settings_subagent_start_if_expression_is_skipped() {
+        let settings_path = test_path_buf("/tmp/settings.json").abs();
+        let mut value = serde_json::json!({
+            "hooks": {
+                "SubagentStart": [{
+                    "matcher": "*",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "echo subagent",
+                        "if": "Bash(*)"
+                    }]
+                }]
+            }
+        });
+        let mut warnings = Vec::new();
+
+        let conditions = super::filter_unsupported_claude_hook_if_expressions(
+            settings_path.as_path(),
+            &mut value,
+            &mut warnings,
+        );
+        let parsed: codex_config::HooksFile =
+            serde_json::from_value(value).expect("filtered settings should parse");
+
+        assert_eq!(conditions.len(), 0);
+        assert_eq!(parsed.hooks.subagent_start[0].hooks.len(), 0);
+        assert_eq!(
+            warnings,
+            vec![format!(
+                "skipping 1 Claude settings hook(s) from {} for matcher SubagentStart/*: hook-level if expressions are not supported",
+                settings_path.display()
+            )]
+        );
     }
 
     #[test]

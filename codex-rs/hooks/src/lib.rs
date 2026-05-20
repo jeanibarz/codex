@@ -15,19 +15,20 @@ pub use declarations::PluginHookDeclaration;
 pub use declarations::plugin_hook_declarations;
 pub use engine::HookListEntry;
 /// Hook event names as they appear in hooks JSON and config files.
-pub const HOOK_EVENT_NAMES: [&str; 13] = [
+pub const HOOK_EVENT_NAMES: [&str; 14] = [
     "PreToolUse",
     "PermissionRequest",
     "PostToolUse",
     "PreCompact",
     "PostCompact",
     "PostToolUseFailure",
+    "Notification",
     "SessionStart",
     "SessionEnd",
     "UserPromptSubmit",
+    "SubagentStart",
     "Stop",
     "StopFailure",
-    "Notification",
     "FileChanged",
 ];
 
@@ -36,7 +37,7 @@ pub const HOOK_EVENT_NAMES: [&str; 13] = [
 /// Other events can appear in hooks JSON, but Codex ignores their matcher
 /// fields because those events do not dispatch against a tool, compaction
 /// trigger, or session-start source.
-pub const HOOK_EVENT_NAMES_WITH_MATCHERS: [&str; 8] = [
+pub const HOOK_EVENT_NAMES_WITH_MATCHERS: [&str; 9] = [
     "PreToolUse",
     "PermissionRequest",
     "PostToolUse",
@@ -44,6 +45,7 @@ pub const HOOK_EVENT_NAMES_WITH_MATCHERS: [&str; 8] = [
     "PostCompact",
     "PostToolUseFailure",
     "SessionStart",
+    "SubagentStart",
     "FileChanged",
 ];
 
@@ -70,6 +72,7 @@ pub use events::session_end::SessionEndRequest;
 pub use events::session_start::SessionStartOutcome;
 pub use events::session_start::SessionStartRequest;
 pub use events::session_start::SessionStartSource;
+pub use events::session_start::StartHookTarget;
 pub use events::stop::StopOutcome;
 pub use events::stop::StopRequest;
 pub use events::stop_failure::StopFailureOutcome;
@@ -103,6 +106,7 @@ pub fn hook_event_key_label(event_name: HookEventName) -> &'static str {
         HookEventName::SessionStart => "session_start",
         HookEventName::SessionEnd => "session_end",
         HookEventName::UserPromptSubmit => "user_prompt_submit",
+        HookEventName::SubagentStart => "subagent_start",
         HookEventName::Stop => "stop",
         HookEventName::StopFailure => "stop_failure",
         HookEventName::Notification => "notification",

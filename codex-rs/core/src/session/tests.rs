@@ -328,13 +328,14 @@ async fn request_mcp_server_elicitation_auto_accepts_when_auto_deny_is_enabled()
         .await;
 
     assert_eq!(
-        response,
+        response.response,
         Some(ElicitationResponse {
             action: ElicitationAction::Accept,
             content: Some(json!({})),
             meta: None,
         })
     );
+    assert!(!response.sent);
     assert!(rx.try_recv().is_err());
 }
 
@@ -530,7 +531,9 @@ async fn preview_session_start_hooks(
             transcript_path: None,
             model: "gpt-5.2".to_string(),
             permission_mode: "default".to_string(),
-            source: codex_hooks::SessionStartSource::Startup,
+            target: codex_hooks::StartHookTarget::SessionStart {
+                source: codex_hooks::SessionStartSource::Startup,
+            },
         }),
     )
 }
@@ -1296,7 +1299,9 @@ async fn reload_user_config_layer_refreshes_hooks() -> anyhow::Result<()> {
         transcript_path: None,
         model: "gpt-5.2".to_string(),
         permission_mode: "default".to_string(),
-        source: codex_hooks::SessionStartSource::Startup,
+        target: codex_hooks::StartHookTarget::SessionStart {
+            source: codex_hooks::SessionStartSource::Startup,
+        },
     };
     assert!(session.hooks().preview_session_start(&request).is_empty());
 
@@ -1401,7 +1406,9 @@ async fn refresh_runtime_config_refreshes_hooks() -> anyhow::Result<()> {
         transcript_path: None,
         model: "gpt-5.2".to_string(),
         permission_mode: "default".to_string(),
-        source: codex_hooks::SessionStartSource::Startup,
+        target: codex_hooks::StartHookTarget::SessionStart {
+            source: codex_hooks::SessionStartSource::Startup,
+        },
     };
     assert!(session.hooks().preview_session_start(&request).is_empty());
 
@@ -3522,7 +3529,7 @@ async fn session_configuration_apply_permission_profile_preserves_existing_deny_
         path: FileSystemPath::GlobPattern {
             pattern: "**/*.env".to_string(),
         },
-        access: FileSystemAccessMode::None,
+        access: FileSystemAccessMode::Deny,
     };
     let mut existing_file_system_policy =
         FileSystemSandboxPolicy::from_legacy_sandbox_policy_for_cwd(
@@ -7137,7 +7144,7 @@ fn file_system_policy_with_unreadable_glob(turn_context: &TurnContext) -> FileSy
         path: FileSystemPath::GlobPattern {
             pattern: format!("{cwd_display}/**/*.env"),
         },
-        access: FileSystemAccessMode::None,
+        access: FileSystemAccessMode::Deny,
     });
     policy
 }
