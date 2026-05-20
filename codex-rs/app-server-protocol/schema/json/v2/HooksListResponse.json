@@ -32,6 +32,7 @@
         "sessionStart",
         "sessionEnd",
         "userPromptSubmit",
+        "subagentStart",
         "stop",
         "stopFailure",
         "fileChanged"

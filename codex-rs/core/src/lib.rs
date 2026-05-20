@@ -7,7 +7,6 @@
 
 mod apply_patch;
 mod apps;
-mod arc_monitor;
 // Claude-compat: Bash permission rules loader (`permissions.allow` / `deny` /
 // `ask` lists from settings.json). Not yet wired into ExecPolicyManager in
 // this rebase — tracked as a known gap and left as dead code so the module

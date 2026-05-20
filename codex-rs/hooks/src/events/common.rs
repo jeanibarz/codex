@@ -103,10 +103,11 @@ pub(crate) fn matcher_pattern_for_event(
         HookEventName::PreToolUse
         | HookEventName::PermissionRequest
         | HookEventName::PostToolUse
+        | HookEventName::SessionStart
+        | HookEventName::SubagentStart
         | HookEventName::PreCompact
         | HookEventName::PostCompact
         | HookEventName::PostToolUseFailure
-        | HookEventName::SessionStart
         | HookEventName::FileChanged => matcher,
         HookEventName::Notification
         | HookEventName::SessionEnd

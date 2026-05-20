@@ -119,6 +119,7 @@ fn select_handlers_for_matcher_inputs_and_tool_input(
                 | HookEventName::PostCompact
                 | HookEventName::PostToolUseFailure
                 | HookEventName::SessionStart
+                | HookEventName::SubagentStart
                 | HookEventName::FileChanged => {
                     if matcher_inputs.is_empty() {
                         matches_matcher(matcher, /*input*/ None)
@@ -323,9 +324,10 @@ pub(crate) fn completed_summary(
 
 fn scope_for_event(event_name: HookEventName) -> HookScope {
     match event_name {
-        HookEventName::SessionStart | HookEventName::SessionEnd | HookEventName::Notification => {
-            HookScope::Thread
-        }
+        HookEventName::SessionStart
+        | HookEventName::SessionEnd
+        | HookEventName::Notification
+        | HookEventName::SubagentStart => HookScope::Thread,
         HookEventName::PreToolUse
         | HookEventName::PermissionRequest
         | HookEventName::PostToolUse
