@@ -22,13 +22,13 @@ pub const HOOK_EVENT_NAMES: [&str; 14] = [
     "PreCompact",
     "PostCompact",
     "PostToolUseFailure",
+    "Notification",
     "SessionStart",
     "SessionEnd",
     "UserPromptSubmit",
     "SubagentStart",
     "Stop",
     "StopFailure",
-    "Notification",
     "FileChanged",
 ];
 
@@ -45,8 +45,8 @@ pub const HOOK_EVENT_NAMES_WITH_MATCHERS: [&str; 9] = [
     "PostCompact",
     "PostToolUseFailure",
     "SessionStart",
-    "FileChanged",
     "SubagentStart",
+    "FileChanged",
 ];
 
 pub use events::compact::PostCompactRequest;

@@ -277,6 +277,10 @@ mod tests {
             Some("startup|resume")
         );
         assert_eq!(
+            matcher_pattern_for_event(HookEventName::SubagentStart, Some("worker")),
+            Some("worker")
+        );
+        assert_eq!(
             matcher_pattern_for_event(HookEventName::PreCompact, Some("^auto$")),
             Some("^auto$")
         );
