@@ -18,6 +18,7 @@
         "sessionEnd",
         "userPromptSubmit",
         "subagentStart",
+        "subagentStop",
         "stop",
         "stopFailure",
         "fileChanged"

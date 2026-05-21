@@ -15,7 +15,7 @@ pub use declarations::PluginHookDeclaration;
 pub use declarations::plugin_hook_declarations;
 pub use engine::HookListEntry;
 /// Hook event names as they appear in hooks JSON and config files.
-pub const HOOK_EVENT_NAMES: [&str; 14] = [
+pub const HOOK_EVENT_NAMES: [&str; 15] = [
     "PreToolUse",
     "PermissionRequest",
     "PostToolUse",
@@ -27,6 +27,7 @@ pub const HOOK_EVENT_NAMES: [&str; 14] = [
     "SessionEnd",
     "UserPromptSubmit",
     "SubagentStart",
+    "SubagentStop",
     "Stop",
     "StopFailure",
     "FileChanged",
@@ -37,7 +38,7 @@ pub const HOOK_EVENT_NAMES: [&str; 14] = [
 /// Other events can appear in hooks JSON, but Codex ignores their matcher
 /// fields because those events do not dispatch against a tool, compaction
 /// trigger, or session-start source.
-pub const HOOK_EVENT_NAMES_WITH_MATCHERS: [&str; 9] = [
+pub const HOOK_EVENT_NAMES_WITH_MATCHERS: [&str; 10] = [
     "PreToolUse",
     "PermissionRequest",
     "PostToolUse",
@@ -46,6 +47,7 @@ pub const HOOK_EVENT_NAMES_WITH_MATCHERS: [&str; 9] = [
     "PostToolUseFailure",
     "SessionStart",
     "SubagentStart",
+    "SubagentStop",
     "FileChanged",
 ];
 
@@ -73,6 +75,7 @@ pub use events::session_start::SessionStartOutcome;
 pub use events::session_start::SessionStartRequest;
 pub use events::session_start::SessionStartSource;
 pub use events::session_start::StartHookTarget;
+pub use events::stop::StopHookTarget;
 pub use events::stop::StopOutcome;
 pub use events::stop::StopRequest;
 pub use events::stop_failure::StopFailureOutcome;
@@ -107,6 +110,7 @@ pub fn hook_event_key_label(event_name: HookEventName) -> &'static str {
         HookEventName::SessionEnd => "session_end",
         HookEventName::UserPromptSubmit => "user_prompt_submit",
         HookEventName::SubagentStart => "subagent_start",
+        HookEventName::SubagentStop => "subagent_stop",
         HookEventName::Stop => "stop",
         HookEventName::StopFailure => "stop_failure",
         HookEventName::Notification => "notification",
