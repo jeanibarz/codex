@@ -19,7 +19,8 @@ v2_enum_from_core!(
     pub enum HookEventName from CoreHookEventName {
         PreToolUse, PermissionRequest, PostToolUse, PreCompact, PostCompact,
         PostToolUseFailure, Notification, SessionStart, SessionEnd,
-        UserPromptSubmit, SubagentStart, Stop, StopFailure, FileChanged
+        UserPromptSubmit, SubagentStart, SubagentStop, Stop, StopFailure,
+        FileChanged
     }
 );
 

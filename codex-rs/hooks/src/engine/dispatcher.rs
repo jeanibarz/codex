@@ -120,6 +120,7 @@ fn select_handlers_for_matcher_inputs_and_tool_input(
                 | HookEventName::PostToolUseFailure
                 | HookEventName::SessionStart
                 | HookEventName::SubagentStart
+                | HookEventName::SubagentStop
                 | HookEventName::FileChanged => {
                     if matcher_inputs.is_empty() {
                         matches_matcher(matcher, /*input*/ None)
@@ -335,9 +336,10 @@ fn scope_for_event(event_name: HookEventName) -> HookScope {
         | HookEventName::PostCompact
         | HookEventName::PostToolUseFailure
         | HookEventName::UserPromptSubmit
+        | HookEventName::SubagentStop
+        | HookEventName::FileChanged
         | HookEventName::Stop
-        | HookEventName::StopFailure
-        | HookEventName::FileChanged => HookScope::Turn,
+        | HookEventName::StopFailure => HookScope::Turn,
     }
 }
 

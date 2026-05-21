@@ -695,6 +695,7 @@ fn parse_supported_claude_if_expression(
         | HookEventName::SessionStart
         | HookEventName::SessionEnd
         | HookEventName::SubagentStart
+        | HookEventName::SubagentStop
         | HookEventName::UserPromptSubmit
         | HookEventName::Stop
         | HookEventName::StopFailure

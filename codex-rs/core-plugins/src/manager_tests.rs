@@ -1694,6 +1694,7 @@ enabled = false
                     id: "enabled-plugin@debug".to_string(),
                     name: "enabled-plugin".to_string(),
                     local_version: None,
+                    installed_version: Some("local".to_string()),
                     source: MarketplacePluginSource::Local {
                         path: AbsolutePathBuf::try_from(tmp.path().join("repo/enabled-plugin"))
                             .unwrap(),
@@ -1712,6 +1713,7 @@ enabled = false
                     id: "disabled-plugin@debug".to_string(),
                     name: "disabled-plugin".to_string(),
                     local_version: None,
+                    installed_version: Some("local".to_string()),
                     source: MarketplacePluginSource::Local {
                         path: AbsolutePathBuf::try_from(tmp.path().join("repo/disabled-plugin"),)
                             .unwrap(),
@@ -1833,6 +1835,7 @@ plugins = true
             id: "default-plugin@debug".to_string(),
             name: "default-plugin".to_string(),
             local_version: None,
+            installed_version: None,
             source: MarketplacePluginSource::Local {
                 path: AbsolutePathBuf::try_from(tmp.path().join("repo/default-plugin")).unwrap(),
             },
@@ -2265,6 +2268,7 @@ enabled = true
             id: "toolkit@debug".to_string(),
             name: "toolkit".to_string(),
             local_version: None,
+            installed_version: Some("local".to_string()),
             source: MarketplacePluginSource::Git {
                 url: missing_remote_repo_url,
                 path: Some("plugins/toolkit".to_string()),
@@ -2382,6 +2386,7 @@ plugins = true
                 id: "linear@openai-curated".to_string(),
                 name: "linear".to_string(),
                 local_version: None,
+                installed_version: None,
                 source: MarketplacePluginSource::Local {
                     path: AbsolutePathBuf::try_from(curated_root.join("plugins/linear")).unwrap(),
                 },
@@ -2677,6 +2682,7 @@ enabled = false
             id: "dup-plugin@debug".to_string(),
             name: "dup-plugin".to_string(),
             local_version: None,
+            installed_version: None,
             source: MarketplacePluginSource::Local {
                 path: AbsolutePathBuf::try_from(tmp.path().join("repo-a/from-a")).unwrap(),
             },
@@ -2708,6 +2714,7 @@ enabled = false
             id: "b-only-plugin@debug".to_string(),
             name: "b-only-plugin".to_string(),
             local_version: None,
+            installed_version: None,
             source: MarketplacePluginSource::Local {
                 path: AbsolutePathBuf::try_from(tmp.path().join("repo-b/from-b-only")).unwrap(),
             },
@@ -2793,6 +2800,7 @@ enabled = true
                 id: "sample-plugin@debug".to_string(),
                 name: "sample-plugin".to_string(),
                 local_version: None,
+                installed_version: None,
                 source: MarketplacePluginSource::Local {
                     path: AbsolutePathBuf::try_from(tmp.path().join("repo/sample-plugin")).unwrap(),
                 },

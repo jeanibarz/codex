@@ -419,6 +419,7 @@ fn map_requirements_toml_to_api(requirements: ConfigRequirementsToml) -> ConfigR
                 .filter_map(map_sandbox_mode_requirement_to_api)
                 .collect()
         }),
+        allowed_permissions: requirements.allowed_permissions,
         allowed_web_search_modes: requirements.allowed_web_search_modes.map(|modes| {
             let mut normalized = modes
                 .into_iter()
@@ -467,6 +468,7 @@ fn map_hooks_requirements_to_api(hooks: ManagedHooksRequirementsToml) -> Managed
         session_start,
         user_prompt_submit,
         subagent_start,
+        subagent_stop,
         stop,
         // Claude-compat extensions (PostToolUseFailure, Notification, SessionEnd,
         // StopFailure, FileChanged) are not yet exported through the app-server API.
@@ -488,6 +490,7 @@ fn map_hooks_requirements_to_api(hooks: ManagedHooksRequirementsToml) -> Managed
         session_start: map_hook_matcher_groups_to_api(session_start),
         user_prompt_submit: map_hook_matcher_groups_to_api(user_prompt_submit),
         subagent_start: map_hook_matcher_groups_to_api(subagent_start),
+        subagent_stop: map_hook_matcher_groups_to_api(subagent_stop),
         stop: map_hook_matcher_groups_to_api(stop),
     }
 }
@@ -643,10 +646,21 @@ mod tests {
     #[test]
     fn requirements_api_includes_allow_managed_hooks_only() {
         let mapped = map_requirements_toml_to_api(ConfigRequirementsToml {
+            allowed_permissions: Some(vec![
+                "managed-standard".to_string(),
+                "managed-build".to_string(),
+            ]),
             allow_managed_hooks_only: Some(true),
             ..ConfigRequirementsToml::default()
         });
 
+        assert_eq!(
+            mapped.allowed_permissions,
+            Some(vec![
+                "managed-standard".to_string(),
+                "managed-build".to_string(),
+            ])
+        );
         assert_eq!(mapped.allow_managed_hooks_only, Some(true));
         assert_eq!(mapped.hooks, None);
     }
