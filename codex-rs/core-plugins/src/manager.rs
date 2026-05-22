@@ -91,6 +91,7 @@ pub struct PluginsConfigInput {
     pub config_layer_stack: ConfigLayerStack,
     pub plugins_enabled: bool,
     pub remote_plugin_enabled: bool,
+    pub plugin_hooks_enabled: bool,
     pub chatgpt_base_url: String,
 }
 
@@ -99,12 +100,14 @@ impl PluginsConfigInput {
         config_layer_stack: ConfigLayerStack,
         plugins_enabled: bool,
         remote_plugin_enabled: bool,
+        plugin_hooks_enabled: bool,
         chatgpt_base_url: String,
     ) -> Self {
         Self {
             config_layer_stack,
             plugins_enabled,
             remote_plugin_enabled,
+            plugin_hooks_enabled,
             chatgpt_base_url,
         }
     }
@@ -493,6 +496,7 @@ impl PluginsManager {
             self.remote_installed_plugin_configs(),
             &self.store,
             self.restriction_product,
+            config.plugin_hooks_enabled,
         )
         .await;
         log_plugin_load_errors(&outcome);
@@ -538,6 +542,7 @@ impl PluginsManager {
             self.remote_installed_plugin_configs(),
             &self.store,
             self.restriction_product,
+            config.plugin_hooks_enabled,
         )
         .await
     }

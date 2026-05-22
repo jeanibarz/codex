@@ -115,6 +115,7 @@ pub async fn load_plugins_from_layer_stack(
     extra_plugins: HashMap<String, PluginConfig>,
     store: &PluginStore,
     restriction_product: Option<Product>,
+    plugin_hooks_enabled: bool,
 ) -> PluginLoadOutcome<McpServerConfig> {
     let skill_config_rules = skill_config_rules_from_stack(config_layer_stack);
     let mut configured_plugins = configured_plugins_from_stack(config_layer_stack);
@@ -135,6 +136,7 @@ pub async fn load_plugins_from_layer_stack(
             store,
             restriction_product,
             &skill_config_rules,
+            plugin_hooks_enabled,
         )
         .await;
         record_mcp_server_names(&loaded_plugin, &mut seen_mcp_server_names);
@@ -522,6 +524,7 @@ async fn load_plugin(
     store: &PluginStore,
     restriction_product: Option<Product>,
     skill_config_rules: &SkillConfigRules,
+    plugin_hooks_enabled: bool,
 ) -> LoadedPlugin<McpServerConfig> {
     let plugin_id = PluginId::parse(&config_name);
     let active_plugin_root = plugin_id

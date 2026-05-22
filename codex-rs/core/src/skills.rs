@@ -340,16 +340,17 @@ mod tests {
         let mut config = crate::config::test_config().await;
         config.cli_plugin_dirs = vec![plugin_root.clone()];
         let canonical_plugin_root = fs::canonicalize(plugin_root).expect("canonical plugin root");
-        let expected_skill_root =
+        let expected_plugin_root =
             AbsolutePathBuf::from_absolute_path_checked(canonical_plugin_root)
-                .expect("absolute plugin root")
-                .join("skills");
+                .expect("absolute plugin root");
+        let expected_skill_root = expected_plugin_root.join("skills");
 
         assert_eq!(
             include_cli_plugin_skill_roots(&config, Vec::new()),
             vec![PluginSkillRoot {
                 path: expected_skill_root,
                 plugin_id: "kookr-toolkit".to_string(),
+                plugin_root: expected_plugin_root,
             }]
         );
     }
