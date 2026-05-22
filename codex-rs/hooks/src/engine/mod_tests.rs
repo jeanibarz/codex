@@ -892,6 +892,7 @@ fn pre_tool_use_request(tool_use_id: &str, command: &str) -> PreToolUseRequest {
     PreToolUseRequest {
         session_id: ThreadId::new(),
         turn_id: "turn-1".to_string(),
+        subagent: None,
         cwd: cwd(),
         transcript_path: None,
         model: "gpt-test".to_string(),
