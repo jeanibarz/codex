@@ -338,15 +338,6 @@ fn append_managed_requirement_handlers(
     let Some(managed_hooks) = config_layer_stack.requirements().managed_hooks.as_ref() else {
         return;
     };
-    if let Some(managed_dir) = managed_hooks.get().managed_dir_for_current_platform()
-        && !managed_dir.is_dir()
-    {
-        warnings.push(format!(
-            "managed hook directory {} does not exist",
-            managed_dir.display()
-        ));
-        return;
-    }
     let source_path = managed_hooks_source_path(managed_hooks.get(), managed_hooks.source.as_ref());
     append_hook_events(
         handlers,

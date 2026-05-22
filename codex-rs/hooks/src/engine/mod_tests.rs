@@ -226,6 +226,7 @@ with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
     let preview = engine.preview_pre_tool_use(&PreToolUseRequest {
         session_id: ThreadId::new(),
         turn_id: "turn-1".to_string(),
+        subagent: None,
         cwd: cwd.clone(),
         transcript_path: None,
         model: "gpt-test".to_string(),
@@ -242,6 +243,7 @@ with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
         .run_pre_tool_use(PreToolUseRequest {
             session_id: ThreadId::new(),
             turn_id: "turn-1".to_string(),
+            subagent: None,
             cwd,
             transcript_path: None,
             model: "gpt-test".to_string(),
@@ -314,6 +316,7 @@ async fn requirements_managed_hooks_execute_windows_command_override() {
         .run_pre_tool_use(PreToolUseRequest {
             session_id: ThreadId::new(),
             turn_id: "turn-1".to_string(),
+            subagent: None,
             cwd: cwd(),
             transcript_path: None,
             model: "gpt-test".to_string(),
@@ -889,6 +892,7 @@ fn pre_tool_use_request(tool_use_id: &str, command: &str) -> PreToolUseRequest {
     PreToolUseRequest {
         session_id: ThreadId::new(),
         turn_id: "turn-1".to_string(),
+        subagent: None,
         cwd: cwd(),
         transcript_path: None,
         model: "gpt-test".to_string(),
@@ -993,7 +997,7 @@ fn trusted_plugin_hook_stack(
 }
 
 #[test]
-fn requirements_managed_hooks_warn_when_managed_dir_is_missing() {
+fn requirements_managed_hooks_load_when_managed_dir_is_missing() {
     let temp = tempdir().expect("create temp dir");
     let missing_dir = temp.path().join("missing-managed-hooks");
     let managed_hooks = managed_hooks_for_current_platform(
@@ -1002,7 +1006,7 @@ fn requirements_managed_hooks_warn_when_managed_dir_is_missing() {
             pre_tool_use: vec![MatcherGroup {
                 matcher: Some("^Bash$".to_string()),
                 hooks: vec![HookHandlerConfig::Command {
-                    command: format!("python3 {}", missing_dir.join("pre.py").display()),
+                    command: "echo hi".to_string(),
                     command_windows: None,
                     timeout_sec: Some(10),
                     r#async: false,
@@ -1041,27 +1045,26 @@ fn requirements_managed_hooks_warn_when_managed_dir_is_missing() {
         /*settings_file*/ None,
     );
 
-    assert!(engine.warnings().iter().any(|warning| {
-        warning.contains("managed hook directory")
-            && warning.contains("does not exist")
-            && warning.contains(&missing_dir.display().to_string())
-    }));
+    assert!(engine.warnings().is_empty());
     let cwd = cwd();
-    assert!(
-        engine
-            .preview_pre_tool_use(&PreToolUseRequest {
-                session_id: ThreadId::new(),
-                turn_id: "turn-1".to_string(),
-                cwd,
-                transcript_path: None,
-                model: "gpt-test".to_string(),
-                permission_mode: "default".to_string(),
-                tool_name: "Bash".to_string(),
-                matcher_aliases: Vec::new(),
-                tool_use_id: "tool-1".to_string(),
-                tool_input: serde_json::json!({ "command": "echo hello" }),
-            })
-            .is_empty()
+    let preview = engine.preview_pre_tool_use(&PreToolUseRequest {
+        session_id: ThreadId::new(),
+        turn_id: "turn-1".to_string(),
+        subagent: None,
+        cwd,
+        transcript_path: None,
+        model: "gpt-test".to_string(),
+        permission_mode: "default".to_string(),
+        tool_name: "Bash".to_string(),
+        matcher_aliases: Vec::new(),
+        tool_use_id: "tool-1".to_string(),
+        tool_input: serde_json::json!({ "command": "echo hello" }),
+    });
+    assert_eq!(preview.len(), 1);
+    assert_eq!(engine.handlers[0].command, "echo hi");
+    assert_eq!(
+        engine.handlers[0].source_path,
+        AbsolutePathBuf::try_from(missing_dir).expect("absolute missing dir")
     );
 }
 
@@ -1459,6 +1462,7 @@ fn discovers_hooks_from_json_and_toml_in_the_same_layer() {
     let preview = engine.preview_pre_tool_use(&PreToolUseRequest {
         session_id: ThreadId::new(),
         turn_id: "turn-1".to_string(),
+        subagent: None,
         cwd,
         transcript_path: None,
         model: "gpt-test".to_string(),
@@ -1545,6 +1549,7 @@ print(json.dumps({
     let preview = engine.preview_pre_tool_use(&PreToolUseRequest {
         session_id: ThreadId::new(),
         turn_id: "turn-1".to_string(),
+        subagent: None,
         cwd: cwd(),
         transcript_path: None,
         model: "gpt-test".to_string(),
@@ -1577,6 +1582,7 @@ print(json.dumps({
         .run_pre_tool_use(PreToolUseRequest {
             session_id: ThreadId::new(),
             turn_id: "turn-1".to_string(),
+            subagent: None,
             cwd: cwd(),
             transcript_path: None,
             model: "gpt-test".to_string(),

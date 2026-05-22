@@ -40,6 +40,7 @@ pub fn plugin_skill_root_from_cli_dir(dir: &Path) -> Option<PluginSkillRoot> {
     Some(PluginSkillRoot {
         path: abs_dir.join("skills"),
         plugin_id: name,
+        plugin_root: abs_dir,
     })
 }
 
