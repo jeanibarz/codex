@@ -2976,10 +2976,6 @@ print(json.dumps({{
                 .enable(Feature::Plugins)
                 .expect("test config should allow feature update");
             trust_plugin_hooks(config, plugin_hook_sources);
-            config
-                .features
-                .enable(Feature::PluginHooks)
-                .expect("test config should allow feature update");
         });
     let test = builder.build(&server).await?;
 

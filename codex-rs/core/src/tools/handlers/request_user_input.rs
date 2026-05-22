@@ -13,6 +13,7 @@ use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolExecutor;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::request_user_input::RequestUserInputArgs;
+use codex_tools::ToolExposure;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
 
@@ -27,16 +28,18 @@ impl ToolExecutor<ToolInvocation> for RequestUserInputHandler {
         ToolName::plain(REQUEST_USER_INPUT_TOOL_NAME)
     }
 
-    fn spec(&self) -> Option<ToolSpec> {
+    fn spec(&self) -> ToolSpec {
+        create_request_user_input_tool(request_user_input_tool_description(&self.available_modes))
+    }
+
+    fn exposure(&self) -> ToolExposure {
         if let Some(active_mode) = self.active_mode
             && !self.available_modes.contains(&active_mode)
         {
-            return None;
+            return ToolExposure::Hidden;
         }
 
-        Some(create_request_user_input_tool(
-            request_user_input_tool_description(&self.available_modes),
-        ))
+        ToolExposure::Direct
     }
 
     async fn handle(
