@@ -183,7 +183,10 @@ async fn start_app_server_for_archive_command(
     let loader_overrides = LoaderOverrides::default();
     let strict_config = cli.strict_config;
     let raw_overrides = cli.config_overrides.raw_overrides.clone();
-    let overrides_cli = CliConfigOverrides { raw_overrides };
+    let overrides_cli = CliConfigOverrides {
+        raw_overrides,
+        settings_file: None,
+    };
     let cli_kv_overrides = overrides_cli
         .parse_overrides()
         .map_err(|err| eyre!("failed to parse -c overrides: {err}"))?;
