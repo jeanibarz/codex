@@ -52,6 +52,7 @@ v2_enum_from_core!(
         SupervisorSettings,
         Plugin,
         CloudRequirements,
+        CloudManagedConfig,
         LegacyManagedConfigFile,
         LegacyManagedConfigMdm,
         Unknown,
