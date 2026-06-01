@@ -246,6 +246,7 @@ fn hook_metadata_for_claude_settings_layer_source(
         ConfigLayerSource::Project { .. } => (HookSource::Project, false),
         ConfigLayerSource::System { .. } => (HookSource::System, true),
         ConfigLayerSource::Mdm { .. } => (HookSource::Mdm, true),
+        ConfigLayerSource::EnterpriseManaged { .. } => (HookSource::CloudManagedConfig, true),
         ConfigLayerSource::SessionFlags => (HookSource::SessionFlags, false),
         ConfigLayerSource::LegacyManagedConfigTomlFromFile { .. } => {
             (HookSource::LegacyManagedConfigFile, true)
@@ -280,6 +281,7 @@ fn claude_settings_paths_for_layer(
         }
         ConfigLayerSource::System { .. }
         | ConfigLayerSource::Mdm { .. }
+        | ConfigLayerSource::EnterpriseManaged { .. }
         | ConfigLayerSource::SessionFlags
         | ConfigLayerSource::LegacyManagedConfigTomlFromFile { .. }
         | ConfigLayerSource::LegacyManagedConfigTomlFromMdm => Vec::new(),
