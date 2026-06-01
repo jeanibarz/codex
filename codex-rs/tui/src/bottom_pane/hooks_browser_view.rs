@@ -788,6 +788,7 @@ fn detail_source_value(hook: &HookMetadata) -> String {
         HookSource::System
         | HookSource::Mdm
         | HookSource::CloudRequirements
+        | HookSource::CloudManagedConfig
         | HookSource::LegacyManagedConfigFile
         | HookSource::LegacyManagedConfigMdm => config_source_label(hook.source).to_string(),
         _ => format!(
@@ -808,6 +809,7 @@ fn config_source_label(source: HookSource) -> &'static str {
         HookSource::SupervisorSettings => "Supervisor settings",
         HookSource::Plugin => unreachable!("plugin hooks are handled by summary_source"),
         HookSource::CloudRequirements => "Admin config",
+        HookSource::CloudManagedConfig => "Cloud-managed config",
         HookSource::LegacyManagedConfigFile => "Admin config",
         HookSource::LegacyManagedConfigMdm => "Admin config",
         HookSource::Unknown => "Unknown source",
