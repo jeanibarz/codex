@@ -270,7 +270,6 @@ impl AgentControl {
                     options.parent_thread_id,
                     /*forked_from_thread_id*/ None,
                     /*thread_source*/ Some(ThreadSource::Subagent),
-                    /*persist_extended_history*/ false,
                     /*metrics_service_name*/ None,
                     inherited_shell_snapshot,
                     inherited_exec_policy,
@@ -475,6 +474,7 @@ impl AgentControl {
         }
         if preserve_reference_context_item
             && config.features.enabled(Feature::MultiAgentV2)
+            && config.multi_agent_v2.usage_hint_enabled
             && let Some(subagent_usage_hint_text) =
                 config.multi_agent_v2.subagent_usage_hint_text.clone()
             && let Some(subagent_usage_hint_message) =
@@ -494,7 +494,6 @@ impl AgentControl {
                 /*thread_source*/ Some(ThreadSource::Subagent),
                 /*parent_thread_id*/ Some(parent_thread_id),
                 /*forked_from_thread_id*/ Some(parent_thread_id),
-                /*persist_extended_history*/ false,
                 inherited_shell_snapshot,
                 inherited_exec_policy,
                 options.environments.clone(),

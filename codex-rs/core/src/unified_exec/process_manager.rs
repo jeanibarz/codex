@@ -1016,8 +1016,7 @@ impl UnifiedExecProcessManager {
             &context.session.dependency_env().await,
         );
         let mut orchestrator = ToolOrchestrator::new();
-        let mut runtime =
-            UnifiedExecRuntime::new(self, context.turn.unified_exec_shell_mode.clone());
+        let mut runtime = UnifiedExecRuntime::new(self, request.shell_mode.clone());
         let file_system_sandbox_policy = context.turn.file_system_sandbox_policy();
         let exec_approval_requirement = context
             .session
