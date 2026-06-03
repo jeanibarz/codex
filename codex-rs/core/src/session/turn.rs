@@ -71,6 +71,8 @@ use codex_analytics::InvocationType;
 use codex_analytics::TurnResolvedConfigFact;
 use codex_analytics::build_track_events_context;
 use codex_async_utils::OrCancelExt;
+use codex_extension_api::TurnInputContext;
+use codex_extension_api::TurnInputEnvironment;
 use codex_features::Feature;
 use codex_git_utils::get_git_repo_root;
 use codex_git_utils::get_git_repo_root_with_fs;
@@ -371,7 +373,7 @@ pub(crate) async fn run_turn(
                 // Aborted turn is reported via a different event.
                 break;
             }
-            Err(CodexErr::InvalidImageRequest()) => {
+            Err(codex_error @ CodexErr::InvalidImageRequest()) => {
                 {
                     let mut state = sess.state.lock().await;
                     error_or_panic(
@@ -384,6 +386,7 @@ pub(crate) async fn run_turn(
 
                 let message = "Invalid image in your last message. Please remove it and try again."
                     .to_string();
+                sess.track_turn_codex_error(turn_context.as_ref(), &codex_error);
                 let error = CodexErrorInfo::BadRequest;
                 sess.emit_turn_error_lifecycle(turn_context.as_ref(), error.clone())
                     .await;
@@ -415,6 +418,7 @@ pub(crate) async fn run_turn(
                 {
                     warn!("failed to usage-limit active goal after usage-limit error: {err}");
                 }
+                sess.track_turn_codex_error(turn_context.as_ref(), &e);
                 let error_event = e.to_error_event(/*message_prefix*/ None);
                 let error_message = error_event.message.clone();
                 let event = EventMsg::Error(error_event);
@@ -530,6 +534,9 @@ async fn build_skills_and_plugins(
     };
     let skills_outcome = turn_context.turn_skills.outcome.as_ref();
     let connector_slug_counts = build_connector_slug_counts(&available_connectors);
+    let extension_injection_items =
+        build_extension_turn_input_items(sess, turn_context, &user_input, cancellation_token)
+            .await?;
     let skill_name_counts_lower =
         build_skill_name_counts(&skills_outcome.skills, &skills_outcome.disabled_paths).1;
     let mentioned_skills = collect_explicit_skill_mentions(
@@ -613,7 +620,55 @@ async fn build_skills_and_plugins(
 
     let mut injection_items = skill_items;
     injection_items.extend(plugin_items);
+    injection_items.extend(extension_injection_items);
     Some((injection_items, explicitly_enabled_connectors))
+}
+
+async fn build_extension_turn_input_items(
+    sess: &Arc<Session>,
+    turn_context: &TurnContext,
+    user_input: &[UserInput],
+    cancellation_token: &CancellationToken,
+) -> Option<Vec<ResponseItem>> {
+    let contributors = sess.services.extensions.turn_input_contributors().to_vec();
+    if contributors.is_empty() {
+        return Some(Vec::new());
+    }
+
+    let environments = turn_context
+        .environments
+        .turn_environments
+        .iter()
+        .enumerate()
+        .map(|(index, environment)| TurnInputEnvironment {
+            environment_id: environment.environment_id.clone(),
+            cwd: environment.cwd.as_path().to_path_buf(),
+            is_primary: index == 0,
+        })
+        .collect::<Vec<_>>();
+
+    let input = TurnInputContext {
+        turn_id: turn_context.sub_id.to_string(),
+        user_input: user_input.to_vec(),
+        environments,
+    };
+
+    let mut items = Vec::new();
+    for contributor in contributors {
+        let contributed_items = contributor
+            .contribute(
+                input.clone(),
+                &sess.services.session_extension_data,
+                &sess.services.thread_extension_data,
+                turn_context.extension_data.as_ref(),
+            )
+            .or_cancel(cancellation_token)
+            .await
+            .ok()?;
+        items.extend(contributed_items);
+    }
+
+    Some(items)
 }
 
 async fn track_turn_resolved_config_analytics(
@@ -665,6 +720,7 @@ async fn track_turn_resolved_config_analytics(
             sandbox_network_access: turn_context.network_sandbox_policy().is_enabled(),
             collaboration_mode: turn_context.collaboration_mode.mode,
             personality: turn_context.personality,
+            workspace_kind: turn_context.turn_metadata_state.workspace_kind(),
             is_first_turn,
         });
 }
