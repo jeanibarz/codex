@@ -2478,7 +2478,6 @@ async fn project_layer_is_added_when_claude_settings_exists_without_dot_codex()
         Some(cwd),
         &[] as &[(String, TomlValue)],
         LoaderOverrides::default(),
-        CloudRequirementsLoader::default(),
         &codex_config::NoopThreadConfigLoader,
     )
     .await?;
