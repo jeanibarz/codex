@@ -2510,7 +2510,7 @@ dependencies = [
 
 [[package]]
 name = "codex-context-fragments"
-version = "0.0.0"
+version = "0.125.0-alpha.3"
 dependencies = [
  "codex-protocol",
  "codex-utils-string",
