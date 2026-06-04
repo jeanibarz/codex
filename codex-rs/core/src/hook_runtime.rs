@@ -307,7 +307,7 @@ pub(crate) async fn run_file_changed_hooks(
     changes: HashMap<PathBuf, FileChange>,
 ) {
     let request = FileChangedRequest {
-        session_id: sess.conversation_id,
+        session_id: sess.thread_id,
         turn_id: turn_context.sub_id.clone(),
         cwd: turn_context.cwd.clone(),
         transcript_path: sess.hook_transcript_path().await,
@@ -484,7 +484,7 @@ pub(crate) async fn run_legacy_after_agent_hook(
             triggered_at: chrono::Utc::now(),
             hook_event: codex_hooks::HookEvent::AfterAgent {
                 event: codex_hooks::HookEventAfterAgent {
-                    thread_id: sess.conversation_id,
+                    thread_id: sess.thread_id,
                     turn_id: turn_context.sub_id.clone(),
                     input_messages,
                     last_assistant_message,
@@ -688,7 +688,7 @@ fn track_hook_completed_analytics(
     completed: &HookCompletedEvent,
 ) {
     let (tracking, hook) =
-        hook_run_analytics_payload(sess.conversation_id.to_string(), turn_context, completed);
+        hook_run_analytics_payload(sess.thread_id.to_string(), turn_context, completed);
     sess.services
         .analytics_events_client
         .track_hook_run(tracking, hook);
@@ -815,7 +815,7 @@ pub(crate) async fn run_session_bootstrap_notification_hooks(
     message: String,
 ) {
     let request = NotificationRequest {
-        session_id: sess.conversation_id,
+        session_id: sess.thread_id,
         turn_id: sub_id.clone(),
         cwd,
         transcript_path: sess.hook_transcript_path().await,
@@ -854,7 +854,7 @@ pub(crate) async fn run_notification_hooks(
     message: String,
 ) {
     let request = NotificationRequest {
-        session_id: sess.conversation_id,
+        session_id: sess.thread_id,
         turn_id: turn_context.sub_id.clone(),
         cwd: turn_context.cwd.to_path_buf(),
         transcript_path: sess.hook_transcript_path().await,
@@ -879,7 +879,7 @@ pub(crate) async fn run_session_end_hooks(
 ) {
     let turn_context = sess.new_default_turn_with_sub_id(sub_id.clone()).await;
     let request = SessionEndRequest {
-        session_id: sess.conversation_id,
+        session_id: sess.thread_id,
         cwd: turn_context.cwd.to_path_buf(),
         transcript_path: sess.hook_transcript_path().await,
         model: turn_context.model_info.slug.clone(),
@@ -915,7 +915,7 @@ pub(crate) async fn run_stop_failure_hooks(
     last_assistant_message: Option<String>,
 ) {
     let request = StopFailureRequest {
-        session_id: sess.conversation_id,
+        session_id: sess.thread_id,
         turn_id: turn_context.sub_id.clone(),
         cwd: turn_context.cwd.to_path_buf(),
         transcript_path: sess.hook_transcript_path().await,
