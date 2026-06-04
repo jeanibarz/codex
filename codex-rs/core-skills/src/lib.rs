@@ -8,6 +8,7 @@ mod mention_counts;
 pub mod model;
 pub mod remote;
 pub mod render;
+mod skill_instructions;
 pub mod system;
 
 pub use env_var_dependencies::SkillDependencyInfo;
@@ -32,3 +33,4 @@ pub use render::SkillRenderReport;
 pub use render::build_available_skills;
 pub use render::default_skill_metadata_budget;
 pub use render::render_available_skills_body;
+pub use skill_instructions::SkillInstructions;
