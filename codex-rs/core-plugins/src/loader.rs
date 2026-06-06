@@ -56,6 +56,34 @@ const DEFAULT_APP_CONFIG_FILE: &str = ".app.json";
 const CONFIG_TOML_FILE: &str = "config.toml";
 const CURATED_PLUGIN_CACHE_VERSION_SHA_PREFIX_LEN: usize = 8;
 
+/// Hook declarations and warnings resolved without loading other plugin capabilities.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PluginHookLoadOutcome {
+    pub hook_sources: Vec<PluginHookSource>,
+    pub hook_load_warnings: Vec<String>,
+}
+
+pub(crate) enum PluginLoadScope<'a> {
+    AllCapabilities {
+        restriction_product: Option<Product>,
+        skill_config_rules: &'a SkillConfigRules,
+        plugin_hooks_enabled: bool,
+    },
+    HooksOnly,
+}
+
+impl PluginLoadScope<'_> {
+    fn plugin_hooks_enabled(&self) -> bool {
+        match self {
+            Self::AllCapabilities {
+                plugin_hooks_enabled,
+                ..
+            } => *plugin_hooks_enabled,
+            Self::HooksOnly => true,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum NonCuratedCacheRefreshMode {
     IfVersionChanged,
@@ -121,6 +149,27 @@ pub async fn load_plugins_from_layer_stack(
     prefer_remote_curated_conflicts: bool,
 ) -> PluginLoadOutcome<McpServerConfig> {
     let skill_config_rules = skill_config_rules_from_stack(config_layer_stack);
+    load_plugins_from_layer_stack_with_scope(
+        config_layer_stack,
+        extra_plugins,
+        store,
+        prefer_remote_curated_conflicts,
+        PluginLoadScope::AllCapabilities {
+            restriction_product,
+            skill_config_rules: &skill_config_rules,
+            plugin_hooks_enabled,
+        },
+    )
+    .await
+}
+
+async fn load_plugins_from_layer_stack_with_scope(
+    config_layer_stack: &ConfigLayerStack,
+    extra_plugins: HashMap<String, PluginConfig>,
+    store: &PluginStore,
+    prefer_remote_curated_conflicts: bool,
+    scope: PluginLoadScope<'_>,
+) -> PluginLoadOutcome<McpServerConfig> {
     let configured_plugins = merge_configured_plugins_with_remote_installed(
         configured_plugins_from_stack(config_layer_stack),
         extra_plugins,
@@ -137,34 +186,41 @@ pub async fn load_plugins_from_layer_stack(
     let mut plugins = Vec::with_capacity(configured_plugins.len());
     let mut seen_mcp_server_names = HashMap::<String, String>::new();
     for (configured_name, plugin) in configured_plugins {
-        let loaded_plugin = load_plugin(
-            configured_name.clone(),
-            &plugin,
-            store,
-            restriction_product,
-            &skill_config_rules,
-            plugin_hooks_enabled,
-        )
-        .await;
+        let loaded_plugin = load_plugin(configured_name.clone(), &plugin, store, &scope).await;
         record_mcp_server_names(&loaded_plugin, &mut seen_mcp_server_names);
         plugins.push(loaded_plugin);
     }
 
-    for loaded_plugin in load_enabled_claude_plugins(
-        config_layer_stack,
-        store,
-        restriction_product,
-        &skill_config_rules,
-        &configured_plugin_keys,
-        plugin_hooks_enabled,
-    )
-    .await
+    for loaded_plugin in
+        load_enabled_claude_plugins(config_layer_stack, store, &configured_plugin_keys, &scope)
+            .await
     {
         record_mcp_server_names(&loaded_plugin, &mut seen_mcp_server_names);
         plugins.push(loaded_plugin);
     }
 
     PluginLoadOutcome::from_plugins(plugins)
+}
+
+/// Load hooks from enabled plugins without loading their skills, MCP servers, or apps.
+pub async fn load_plugin_hooks_from_layer_stack(
+    config_layer_stack: &ConfigLayerStack,
+    extra_plugins: HashMap<String, PluginConfig>,
+    store: &PluginStore,
+    prefer_remote_curated_conflicts: bool,
+) -> PluginHookLoadOutcome {
+    let outcome = load_plugins_from_layer_stack_with_scope(
+        config_layer_stack,
+        extra_plugins,
+        store,
+        prefer_remote_curated_conflicts,
+        PluginLoadScope::HooksOnly,
+    )
+    .await;
+    PluginHookLoadOutcome {
+        hook_sources: outcome.effective_plugin_hook_sources(),
+        hook_load_warnings: outcome.effective_plugin_hook_warnings(),
+    }
 }
 
 fn merge_configured_plugins_with_remote_installed(
@@ -584,9 +640,7 @@ async fn load_plugin(
     config_name: String,
     plugin: &PluginConfig,
     store: &PluginStore,
-    restriction_product: Option<Product>,
-    skill_config_rules: &SkillConfigRules,
-    plugin_hooks_enabled: bool,
+    scope: &PluginLoadScope<'_>,
 ) -> LoadedPlugin<McpServerConfig> {
     let plugin_id = PluginId::parse(&config_name);
     let active_plugin_root = plugin_id
@@ -626,10 +680,8 @@ async fn load_plugin(
         plugin.enabled,
         &loaded_plugin_id,
         plugin_data_root,
-        restriction_product,
-        skill_config_rules,
         &plugin.mcp_servers,
-        plugin_hooks_enabled,
+        scope,
     )
     .await
 }
@@ -641,10 +693,8 @@ pub(crate) async fn load_plugin_from_root(
     enabled: bool,
     plugin_id: &PluginId,
     plugin_data_root: AbsolutePathBuf,
-    restriction_product: Option<Product>,
-    skill_config_rules: &SkillConfigRules,
     mcp_server_policies: &HashMap<String, PluginMcpServerConfig>,
-    plugin_hooks_enabled: bool,
+    scope: &PluginLoadScope<'_>,
 ) -> LoadedPlugin<McpServerConfig> {
     let mut loaded_plugin = unloaded_plugin(config_name, plugin_root.clone(), enabled);
 
@@ -663,47 +713,57 @@ pub(crate) async fn load_plugin_from_root(
     };
 
     let manifest_paths = &manifest.paths;
-    loaded_plugin.manifest_name = manifest
-        .interface
-        .as_ref()
-        .and_then(|interface| interface.display_name.as_deref())
-        .map(str::trim)
-        .filter(|display_name| !display_name.is_empty())
-        .map(str::to_string)
-        .or_else(|| Some(manifest.name.clone()));
-    loaded_plugin.manifest_description = manifest.description.clone();
-    loaded_plugin.skill_roots = plugin_skill_roots(&plugin_root, manifest_paths);
-    let resolved_skills = load_plugin_skills(
-        &plugin_root,
-        plugin_id,
-        manifest_paths,
-        restriction_product,
-        skill_config_rules,
-    )
-    .await;
-    let has_enabled_skills = resolved_skills.has_enabled_skills();
-    loaded_plugin.disabled_skill_paths = resolved_skills.disabled_skill_paths;
-    loaded_plugin.has_enabled_skills = has_enabled_skills;
-    let mut mcp_servers = HashMap::new();
-    for mcp_config_path in plugin_mcp_config_paths(plugin_root.as_path(), manifest_paths) {
-        let plugin_mcp = load_mcp_servers_from_file(plugin_root.as_path(), &mcp_config_path).await;
-        for (name, mut config) in plugin_mcp.mcp_servers {
-            if let Some(policy) = mcp_server_policies.get(&name) {
-                apply_plugin_mcp_server_policy(&mut config, policy);
+    match scope {
+        PluginLoadScope::AllCapabilities {
+            restriction_product,
+            skill_config_rules,
+            ..
+        } => {
+            loaded_plugin.manifest_name = manifest
+                .interface
+                .as_ref()
+                .and_then(|interface| interface.display_name.as_deref())
+                .map(str::trim)
+                .filter(|display_name| !display_name.is_empty())
+                .map(str::to_string)
+                .or_else(|| Some(manifest.name.clone()));
+            loaded_plugin.manifest_description = manifest.description.clone();
+            loaded_plugin.skill_roots = plugin_skill_roots(&plugin_root, manifest_paths);
+            let resolved_skills = load_plugin_skills(
+                &plugin_root,
+                plugin_id,
+                manifest_paths,
+                *restriction_product,
+                skill_config_rules,
+            )
+            .await;
+            let has_enabled_skills = resolved_skills.has_enabled_skills();
+            loaded_plugin.disabled_skill_paths = resolved_skills.disabled_skill_paths;
+            loaded_plugin.has_enabled_skills = has_enabled_skills;
+            let mut mcp_servers = HashMap::new();
+            for mcp_config_path in plugin_mcp_config_paths(plugin_root.as_path(), manifest_paths) {
+                let plugin_mcp =
+                    load_mcp_servers_from_file(plugin_root.as_path(), &mcp_config_path).await;
+                for (name, mut config) in plugin_mcp.mcp_servers {
+                    if let Some(policy) = mcp_server_policies.get(&name) {
+                        apply_plugin_mcp_server_policy(&mut config, policy);
+                    }
+                    if mcp_servers.insert(name.clone(), config).is_some() {
+                        warn!(
+                            plugin = %plugin_root.display(),
+                            path = %mcp_config_path.display(),
+                            server = name,
+                            "plugin MCP file overwrote an earlier server definition"
+                        );
+                    }
+                }
             }
-            if mcp_servers.insert(name.clone(), config).is_some() {
-                warn!(
-                    plugin = %plugin_root.display(),
-                    path = %mcp_config_path.display(),
-                    server = name,
-                    "plugin MCP file overwrote an earlier server definition"
-                );
-            }
+            loaded_plugin.mcp_servers = mcp_servers;
+            loaded_plugin.apps = load_plugin_apps(plugin_root.as_path()).await;
         }
+        PluginLoadScope::HooksOnly => {}
     }
-    loaded_plugin.mcp_servers = mcp_servers;
-    loaded_plugin.apps = load_plugin_apps(plugin_root.as_path()).await;
-    if plugin_hooks_enabled {
+    if scope.plugin_hooks_enabled() {
         let (hook_sources, hook_load_warnings) =
             load_plugin_hooks(&plugin_root, plugin_id, &plugin_data_root, manifest_paths);
         loaded_plugin.hook_sources = hook_sources;
