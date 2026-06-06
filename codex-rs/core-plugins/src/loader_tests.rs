@@ -1,5 +1,6 @@
 use super::*;
 use crate::manifest::load_plugin_manifest;
+use crate::test_support::write_file;
 use codex_config::ConfigLayerEntry;
 use codex_config::ConfigLayerSource;
 use codex_config::ConfigRequirements;
@@ -63,6 +64,274 @@ fn configured_plugins_from_stack_merges_user_layers() {
             ),
         ])
     );
+}
+
+#[tokio::test]
+async fn hooks_only_scope_shares_plugin_resolution_without_loading_other_capabilities() {
+    let temp_dir = TempDir::new().expect("tempdir");
+    let plugin_root = temp_dir.path().join("plugins/cache/test/valid/local");
+    write_file(
+        &plugin_root.join(".codex-plugin/plugin.json"),
+        r#"{"name":"valid"}"#,
+    );
+    write_file(
+        &plugin_root.join("skills/example/SKILL.md"),
+        "---\nname: example\ndescription: example skill\n---\n",
+    );
+    write_file(
+        &plugin_root.join(".mcp.json"),
+        r#"{"mcpServers":{"example":{"command":"echo"}}}"#,
+    );
+    write_file(
+        &plugin_root.join(".app.json"),
+        r#"{"apps":{"example":{"id":"connector_example"}}}"#,
+    );
+    write_file(
+        &plugin_root.join("hooks/hooks.json"),
+        r#"{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo startup"
+          }
+        ]
+      }
+    ]
+  }
+}"#,
+    );
+
+    let disabled_root = temp_dir.path().join("plugins/cache/test/disabled/local");
+    write_file(
+        &disabled_root.join(".codex-plugin/plugin.json"),
+        r#"{"name":"disabled"}"#,
+    );
+    write_file(
+        &disabled_root.join("hooks/hooks.json"),
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo disabled"}]}]}}"#,
+    );
+
+    let malformed_root = temp_dir.path().join("plugins/cache/test/malformed/local");
+    write_file(
+        &malformed_root.join(".codex-plugin/plugin.json"),
+        "not valid json",
+    );
+
+    let warning_root = temp_dir.path().join("plugins/cache/test/warning/local");
+    write_file(
+        &warning_root.join(".codex-plugin/plugin.json"),
+        r#"{"name":"warning"}"#,
+    );
+    write_file(&warning_root.join("hooks/hooks.json"), "not valid json");
+
+    let stack = ConfigLayerStack::new(
+        vec![user_layer(
+            user_config_path(&temp_dir, "config.toml"),
+            r#"
+[plugins."valid@test"]
+enabled = true
+
+[plugins."disabled@test"]
+enabled = false
+
+[plugins.invalid]
+enabled = true
+
+[plugins."malformed@test"]
+enabled = true
+
+[plugins."missing@test"]
+enabled = true
+
+[plugins."warning@test"]
+enabled = true
+"#,
+        )],
+        ConfigRequirements::default(),
+        ConfigRequirementsToml::default(),
+    )
+    .expect("valid config layer stack");
+    let store = PluginStore::new(temp_dir.path().to_path_buf());
+
+    let full = load_plugins_from_layer_stack(
+        &stack,
+        HashMap::new(),
+        &store,
+        Some(Product::Codex),
+        /*plugin_hooks_enabled*/ true,
+        /*prefer_remote_curated_conflicts*/ false,
+    )
+    .await;
+    let hooks_only = load_plugins_from_layer_stack_with_scope(
+        &stack,
+        HashMap::new(),
+        &store,
+        /*prefer_remote_curated_conflicts*/ false,
+        PluginLoadScope::HooksOnly,
+    )
+    .await;
+
+    let validation_state = |outcome: &PluginLoadOutcome<McpServerConfig>| {
+        outcome
+            .plugins()
+            .iter()
+            .map(|plugin| {
+                (
+                    plugin.config_name.clone(),
+                    plugin.enabled,
+                    plugin.root.clone(),
+                    plugin.error.clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(validation_state(&hooks_only), validation_state(&full));
+    assert_eq!(
+        hooks_only.effective_plugin_hook_sources(),
+        full.effective_plugin_hook_sources()
+    );
+    assert_eq!(
+        hooks_only.effective_plugin_hook_warnings(),
+        full.effective_plugin_hook_warnings()
+    );
+
+    let full_valid = full
+        .plugins()
+        .iter()
+        .find(|plugin| plugin.config_name == "valid@test")
+        .expect("full load should include valid plugin");
+    assert!(full_valid.manifest_name.is_some());
+    assert!(!full_valid.skill_roots.is_empty());
+    assert!(!full_valid.mcp_servers.is_empty());
+    assert!(!full_valid.apps.is_empty());
+
+    let hooks_only_valid = hooks_only
+        .plugins()
+        .iter()
+        .find(|plugin| plugin.config_name == "valid@test")
+        .expect("hooks-only load should include valid plugin");
+    assert_eq!(hooks_only_valid.manifest_name, None);
+    assert!(hooks_only_valid.skill_roots.is_empty());
+    assert!(hooks_only_valid.mcp_servers.is_empty());
+    assert!(hooks_only_valid.apps.is_empty());
+}
+
+#[tokio::test]
+async fn hooks_only_scope_loads_claude_plugin_hooks_without_other_capabilities() {
+    let home = TempDir::new().expect("tempdir");
+    let codex_home = home.path().join(".codex");
+    let plugin_root = home
+        .path()
+        .join(".claude/plugins/marketplaces/looper/plugin");
+    write_file(
+        &home.path().join(".claude/settings.json"),
+        r#"{
+  "enabledPlugins": {
+    "looper-toolkit@looper": true
+  }
+}"#,
+    );
+    write_file(
+        &home
+            .path()
+            .join(".claude/plugins/marketplaces/looper/.claude-plugin/marketplace.json"),
+        r#"{
+  "name": "looper",
+  "plugins": [
+    {
+      "name": "looper-toolkit",
+      "source": "./plugin"
+    }
+  ]
+}"#,
+    );
+    write_file(
+        &plugin_root.join(".claude-plugin/plugin.json"),
+        r#"{"name":"looper-toolkit"}"#,
+    );
+    write_file(
+        &plugin_root.join("skills/example/SKILL.md"),
+        "---\nname: example\ndescription: example skill\n---\n",
+    );
+    write_file(
+        &plugin_root.join(".mcp.json"),
+        r#"{"mcpServers":{"example":{"command":"echo"}}}"#,
+    );
+    write_file(
+        &plugin_root.join(".app.json"),
+        r#"{"apps":{"example":{"id":"connector_example"}}}"#,
+    );
+    write_file(
+        &plugin_root.join("hooks/hooks.json"),
+        r#"{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo claude"
+          }
+        ]
+      }
+    ]
+  }
+}"#,
+    );
+
+    let stack = ConfigLayerStack::new(
+        vec![user_layer(
+            AbsolutePathBuf::try_from(codex_home.join("config.toml"))
+                .expect("config path should be absolute"),
+            "",
+        )],
+        ConfigRequirements::default(),
+        ConfigRequirementsToml::default(),
+    )
+    .expect("valid config layer stack");
+    let store = PluginStore::new(codex_home);
+
+    let full = load_plugins_from_layer_stack(
+        &stack,
+        HashMap::new(),
+        &store,
+        Some(Product::Codex),
+        /*plugin_hooks_enabled*/ true,
+        /*prefer_remote_curated_conflicts*/ false,
+    )
+    .await;
+    let hooks_only = load_plugins_from_layer_stack_with_scope(
+        &stack,
+        HashMap::new(),
+        &store,
+        /*prefer_remote_curated_conflicts*/ false,
+        PluginLoadScope::HooksOnly,
+    )
+    .await;
+
+    let full_plugin = full
+        .plugins()
+        .iter()
+        .find(|plugin| plugin.config_name == "looper-toolkit@looper")
+        .expect("full load should include Claude plugin");
+    assert!(!full_plugin.skill_roots.is_empty());
+    assert!(!full_plugin.mcp_servers.is_empty());
+    assert!(!full_plugin.apps.is_empty());
+    assert_eq!(full_plugin.hook_sources.len(), 1);
+
+    let hooks_only_plugin = hooks_only
+        .plugins()
+        .iter()
+        .find(|plugin| plugin.config_name == "looper-toolkit@looper")
+        .expect("hooks-only load should include Claude plugin");
+    assert_eq!(hooks_only_plugin.manifest_name, None);
+    assert!(hooks_only_plugin.skill_roots.is_empty());
+    assert!(hooks_only_plugin.mcp_servers.is_empty());
+    assert!(hooks_only_plugin.apps.is_empty());
+    assert_eq!(hooks_only_plugin.hook_sources, full_plugin.hook_sources);
 }
 
 #[test]

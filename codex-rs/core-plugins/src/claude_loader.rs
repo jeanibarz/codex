@@ -1,13 +1,12 @@
 use crate::claude::enabled_claude_plugin_roots;
 use crate::config_layer_compat::base_user_home_dir;
+use crate::loader::PluginLoadScope;
 use crate::loader::load_plugin_from_root;
 use crate::store::PluginStore;
 use codex_config::ConfigLayerStack;
 use codex_config::types::McpServerConfig;
 use codex_config::types::PluginMcpServerConfig;
-use codex_core_skills::config_rules::SkillConfigRules;
 use codex_plugin::LoadedPlugin;
-use codex_protocol::protocol::Product;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -15,10 +14,8 @@ use std::path::PathBuf;
 pub(crate) async fn load_enabled_claude_plugins(
     config_layer_stack: &ConfigLayerStack,
     store: &PluginStore,
-    restriction_product: Option<Product>,
-    skill_config_rules: &SkillConfigRules,
     configured_plugin_keys: &HashSet<String>,
-    plugin_hooks_enabled: bool,
+    scope: &PluginLoadScope<'_>,
 ) -> Vec<LoadedPlugin<McpServerConfig>> {
     let home_dir = claude_plugins_home_dir(config_layer_stack);
     let mcp_server_policies: HashMap<String, PluginMcpServerConfig> = HashMap::new();
@@ -37,10 +34,8 @@ pub(crate) async fn load_enabled_claude_plugins(
                 /*enabled*/ true,
                 &claude_plugin.plugin_id,
                 plugin_data_root,
-                restriction_product,
-                skill_config_rules,
                 &mcp_server_policies,
-                plugin_hooks_enabled,
+                scope,
             )
             .await,
         );
