@@ -1448,6 +1448,7 @@ async fn plugin_cache_ignores_unrelated_session_overrides() {
             stack(session_config),
             /*plugins_enabled*/ true,
             /*remote_plugin_enabled*/ false,
+            /*plugin_hooks_enabled*/ false,
             "https://chatgpt.com".to_string(),
         )
     };
