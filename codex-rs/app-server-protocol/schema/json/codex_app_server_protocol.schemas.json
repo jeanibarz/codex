@@ -11468,6 +11468,12 @@
           },
           "status": {
             "$ref": "#/definitions/v2/McpServerStartupState"
+          },
+          "threadId": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
