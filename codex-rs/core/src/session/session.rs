@@ -1145,7 +1145,7 @@ impl Session {
                 crate::hook_runtime::run_session_bootstrap_notification_hooks(
                     sess.as_ref(),
                     INITIAL_SUBMIT_ID.to_owned(),
-                    session_configuration.cwd.to_path_buf(),
+                    session_configuration.cwd().to_path_buf(),
                     session_configuration.collaboration_mode.model().to_string(),
                     "mcp_startup_starting".to_string(),
                     format!("Starting {enabled_mcp_server_count} MCP server(s)"),
