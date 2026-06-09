@@ -238,6 +238,7 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
         codex_home,
         history: History::default(),
         ephemeral: true,
+        extra_config: None,
         file_opener: UriBasedFileOpener::VsCode,
         cli_plugin_dirs: Vec::new(),
         codex_self_exe: arg0_paths.codex_self_exe,
@@ -298,7 +299,6 @@ async fn run_turn(thread: &CodexThread, thread_id: &str, prompt: String) -> anyh
                 text: prompt,
                 text_elements: Vec::new(),
             }],
-            environments: None,
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
             additional_context: Default::default(),
@@ -329,6 +329,7 @@ async fn run_turn(thread: &CodexThread, thread_id: &str, prompt: String) -> anyh
             | EventMsg::CollabCloseEnd(_)
             | EventMsg::CollabResumeBegin(_)
             | EventMsg::CollabResumeEnd(_)
+            | EventMsg::SubAgentActivity(_)
             | EventMsg::AgentMessageContentDelta(_)
             | EventMsg::PlanDelta(_)
             | EventMsg::ReasoningContentDelta(_)

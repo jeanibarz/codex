@@ -8,6 +8,7 @@ use codex_mcp::ToolInfo;
 use codex_model_provider::create_model_provider;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::openai_models::ApplyPatchToolType;
@@ -433,11 +434,15 @@ fn apply_patch_accepts_environment_id(spec: &ToolSpec) -> bool {
 
 #[tokio::test]
 async fn request_user_input_tool_respects_experimental_config_gate() {
-    let enabled = probe(|_| {}).await;
+    let enabled = probe(|turn| {
+        turn.collaboration_mode.mode = ModeKind::Plan;
+    })
+    .await;
     enabled.assert_visible_contains(&["request_user_input"]);
     enabled.assert_registered_contains(&["request_user_input"]);
 
     let disabled = probe(|turn| {
+        turn.collaboration_mode.mode = ModeKind::Plan;
         update_config(turn, |config| {
             config.experimental_request_user_input_enabled = false;
         });
@@ -959,6 +964,7 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
         "resume_agent",
         "wait_agent",
         "close_agent",
+        "interrupt_agent",
         "send_message",
         "followup_task",
         "assign_task",
@@ -1011,10 +1017,10 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
         "send_message",
         "followup_task",
         "wait_agent",
-        "close_agent",
+        "interrupt_agent",
         "list_agents",
     ]);
-    v2.assert_visible_lacks(&["send_input", "resume_agent", "assign_task"]);
+    v2.assert_visible_lacks(&["send_input", "resume_agent", "assign_task", "close_agent"]);
     let spawn_agent_description = match v2.visible_spec("spawn_agent") {
         ToolSpec::Function(tool) => tool.description.as_str(),
         other => panic!("expected spawn_agent function spec, got {other:?}"),
@@ -1096,6 +1102,7 @@ async fn v1_multi_agent_tools_defer_when_tool_search_available() {
         "resume_agent",
         "wait_agent",
         "close_agent",
+        "interrupt_agent",
     ]);
     for tool_name in [
         "spawn_agent",
@@ -1154,7 +1161,7 @@ async fn multi_agent_v2_can_use_configured_tool_namespace() {
         "send_message",
         "followup_task",
         "wait_agent",
-        "close_agent",
+        "interrupt_agent",
         "list_agents",
     ] {
         namespaced.assert_visible_lacks(&[tool_name]);
@@ -1244,7 +1251,7 @@ async fn code_mode_only_can_expose_namespaced_multi_agent_v2_as_normal_tools() {
         "send_message",
         "followup_task",
         "wait_agent",
-        "close_agent",
+        "interrupt_agent",
         "list_agents",
     ] {
         assert!(
@@ -1317,7 +1324,7 @@ async fn hosted_tools_follow_provider_auth_model_and_config_gates() {
             "send_message",
             "followup_task",
             "wait_agent",
-            "close_agent",
+            "interrupt_agent",
             "list_agents",
             // Hosted Responses tools.
             "web_search",
