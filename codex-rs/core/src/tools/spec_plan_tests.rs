@@ -8,6 +8,7 @@ use codex_mcp::ToolInfo;
 use codex_model_provider::create_model_provider;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::openai_models::ApplyPatchToolType;
@@ -433,11 +434,15 @@ fn apply_patch_accepts_environment_id(spec: &ToolSpec) -> bool {
 
 #[tokio::test]
 async fn request_user_input_tool_respects_experimental_config_gate() {
-    let enabled = probe(|_| {}).await;
+    let enabled = probe(|turn| {
+        turn.collaboration_mode.mode = ModeKind::Plan;
+    })
+    .await;
     enabled.assert_visible_contains(&["request_user_input"]);
     enabled.assert_registered_contains(&["request_user_input"]);
 
     let disabled = probe(|turn| {
+        turn.collaboration_mode.mode = ModeKind::Plan;
         update_config(turn, |config| {
             config.experimental_request_user_input_enabled = false;
         });
