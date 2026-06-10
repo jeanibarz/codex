@@ -1,6 +1,8 @@
 use super::*;
 use crate::error_code::method_not_found;
 use crate::process_config_overrides::apply_thread_runtime_overrides;
+use codex_app_server_protocol::SelectedCapabilityRoot;
+use codex_extension_api::ExtensionDataInit;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
 
@@ -834,6 +836,7 @@ impl ThreadRequestProcessor {
             base_instructions,
             developer_instructions,
             dynamic_tools,
+            selected_capability_roots,
             mock_experimental_field: _mock_experimental_field,
             experimental_raw_events,
             personality,
@@ -890,6 +893,7 @@ impl ThreadRequestProcessor {
                 config,
                 typesafe_overrides,
                 dynamic_tools,
+                selected_capability_roots.unwrap_or_default(),
                 session_start_source,
                 thread_source.map(Into::into),
                 environment_selections,
@@ -962,6 +966,7 @@ impl ThreadRequestProcessor {
         config_overrides: Option<HashMap<String, serde_json::Value>>,
         typesafe_overrides: ConfigOverrides,
         dynamic_tools: Option<Vec<ApiDynamicToolSpec>>,
+        selected_capability_roots: Vec<SelectedCapabilityRoot>,
         session_start_source: Option<codex_app_server_protocol::ThreadStartSource>,
         thread_source: Option<codex_protocol::protocol::ThreadSource>,
         environments: Option<Vec<TurnEnvironmentSelection>>,
@@ -1063,6 +1068,10 @@ impl ThreadRequestProcessor {
                 .collect()
         };
         let core_dynamic_tool_count = core_dynamic_tools.len();
+        let mut thread_extension_init = ExtensionDataInit::new();
+        if !selected_capability_roots.is_empty() {
+            thread_extension_init.insert(selected_capability_roots);
+        }
         let create_thread_started_at = std::time::Instant::now();
         let NewThread {
             thread_id,
@@ -1085,6 +1094,7 @@ impl ThreadRequestProcessor {
                 metrics_service_name: service_name,
                 parent_trace: request_trace,
                 environments,
+                thread_extension_init,
             })
             .instrument(tracing::info_span!(
                 "app_server.thread_start.create_thread",
@@ -4153,7 +4163,7 @@ fn summary_from_thread_metadata(metadata: &ThreadMetadata) -> ConversationSummar
         metadata.cwd.clone(),
         metadata.cli_version.clone(),
         metadata.source.clone(),
-        metadata.thread_source,
+        metadata.thread_source.clone(),
         metadata.agent_nickname.clone(),
         metadata.agent_role.clone(),
         metadata.git_sha.clone(),
@@ -4242,7 +4252,7 @@ fn build_thread_from_snapshot(
         agent_nickname: config_snapshot.session_source.get_nickname(),
         agent_role: config_snapshot.session_source.get_agent_role(),
         source: config_snapshot.session_source.clone().into(),
-        thread_source: config_snapshot.thread_source.map(Into::into),
+        thread_source: config_snapshot.thread_source.clone().map(Into::into),
         git_info: None,
         name: None,
         turns: Vec::new(),
