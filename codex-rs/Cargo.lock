@@ -3254,7 +3254,7 @@ dependencies = [
 
 [[package]]
 name = "codex-mcp-extension"
-version = "0.0.0"
+version = "0.125.0-alpha.3"
 dependencies = [
  "async-trait",
  "codex-config",
