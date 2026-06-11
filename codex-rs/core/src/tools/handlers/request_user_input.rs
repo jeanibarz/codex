@@ -22,7 +22,6 @@ pub struct RequestUserInputHandler {
     pub active_mode: Option<ModeKind>,
 }
 
-#[async_trait::async_trait]
 impl ToolExecutor<ToolInvocation> for RequestUserInputHandler {
     fn tool_name(&self) -> ToolName {
         ToolName::plain(REQUEST_USER_INPUT_TOOL_NAME)
@@ -42,7 +41,13 @@ impl ToolExecutor<ToolInvocation> for RequestUserInputHandler {
         ToolExposure::Direct
     }
 
-    async fn handle(
+    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+        Box::pin(self.handle_call(invocation))
+    }
+}
+
+impl RequestUserInputHandler {
+    async fn handle_call(
         &self,
         invocation: ToolInvocation,
     ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
