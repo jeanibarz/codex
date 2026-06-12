@@ -13,6 +13,7 @@
 
 use codex_exec_server::ExecutorFileSystem;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathUri;
 use std::io;
 use tracing::warn;
 
@@ -50,14 +51,15 @@ pub(crate) async fn discover_rule_paths(
     let mut rule_paths: Vec<AbsolutePathBuf> = Vec::new();
     for dirname in [CODEX_RULES_DIRNAME, CLAUDE_RULES_DIRNAME] {
         let dir = cwd.join(dirname);
-        match fs.get_metadata(&dir, /*sandbox*/ None).await {
+        let dir_uri = PathUri::from_abs_path(&dir)?;
+        match fs.get_metadata(&dir_uri, /*sandbox*/ None).await {
             Ok(md) if md.is_directory => {}
             Ok(_) => continue,
             Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
             Err(err) => return Err(err),
         }
 
-        let mut entries = match fs.read_directory(&dir, /*sandbox*/ None).await {
+        let mut entries = match fs.read_directory(&dir_uri, /*sandbox*/ None).await {
             Ok(entries) => entries,
             Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
             Err(err) => return Err(err),
@@ -101,7 +103,8 @@ pub(crate) async fn discover_rules(
         if remaining == 0 {
             break;
         }
-        let mut data = match fs.read_file(&path, /*sandbox*/ None).await {
+        let path_uri = PathUri::from_abs_path(&path)?;
+        let mut data = match fs.read_file(&path_uri, /*sandbox*/ None).await {
             Ok(data) => data,
             Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
             Err(err) => return Err(err),

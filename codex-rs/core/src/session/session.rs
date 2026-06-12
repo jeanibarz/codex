@@ -1098,7 +1098,6 @@ impl Session {
 
             let enabled_mcp_server_count =
                 mcp_servers.values().filter(|server| server.enabled()).count();
-            let tool_plugin_provenance = mcp_manager.tool_plugin_provenance(config.as_ref()).await;
             let host_owned_codex_apps_enabled = config
                 .features
                 .apps_enabled_for_auth(auth.as_ref().is_some_and(|auth| auth.uses_codex_backend()));

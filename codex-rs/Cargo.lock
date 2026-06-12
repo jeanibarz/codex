@@ -2492,11 +2492,11 @@ dependencies = [
 
 [[package]]
 name = "codex-code-mode-host"
-version = "0.0.0"
+version = "0.125.0-alpha.3"
 
 [[package]]
 name = "codex-code-mode-protocol"
-version = "0.0.0"
+version = "0.125.0-alpha.3"
 dependencies = [
  "codex-protocol",
  "pretty_assertions",
@@ -3093,7 +3093,7 @@ dependencies = [
 
 [[package]]
 name = "codex-home"
-version = "0.0.0"
+version = "0.125.0-alpha.3"
 dependencies = [
  "codex-extension-api",
  "codex-utils-absolute-path",
