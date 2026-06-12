@@ -1551,6 +1551,7 @@ fn profile_user_layers_load_shared_hooks_json_once() {
             program: String::new(),
             args: Vec::new(),
         },
+        /*settings_file*/ None,
     );
 
     assert!(engine.warnings().is_empty());
@@ -1625,6 +1626,7 @@ fn malformed_hooks_json_is_reported_as_startup_warning() {
             program: String::new(),
             args: Vec::new(),
         },
+        /*settings_file*/ None,
     );
 
     assert!(engine.handlers.is_empty());
