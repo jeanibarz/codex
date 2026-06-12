@@ -507,6 +507,23 @@ fn load_hooks_json(
     (!parsed.hooks.is_empty()).then_some((source_path, parsed.hooks))
 }
 
+/// Tolerant parse target for Claude-style settings files (`.claude/settings.json`
+/// layers and the `--settings` flag). Claude settings legitimately carry
+/// non-hook top-level keys such as `permissions`, `env`, or `model`; only the
+/// `hooks` member is consumed here and everything else is ignored. The strict
+/// [`HooksFile`] (`deny_unknown_fields`) stays reserved for codex-native
+/// `hooks.json`, where an unknown key is a real authoring error.
+///
+/// Regression note: parsing these files with the strict `HooksFile` rejected
+/// the entire file on the first foreign key (`unknown field "permissions"`),
+/// silently disabling every supervisor-provided hook (Kookr lost all hook
+/// coverage for sessions launched with `--settings`).
+#[derive(Debug, Default, Deserialize)]
+struct ClaudeSettingsHooks {
+    #[serde(default)]
+    hooks: HookEventsToml,
+}
+
 fn load_claude_settings_hooks(
     settings_path: &Path,
     warnings: &mut Vec<String>,
@@ -543,7 +560,7 @@ fn load_claude_settings_hooks(
 
     let claude_conditions =
         filter_unsupported_claude_hook_if_expressions(settings_path, &mut value, warnings);
-    let parsed = match serde_json::from_value::<HooksFile>(value) {
+    let parsed = match serde_json::from_value::<ClaudeSettingsHooks>(value) {
         Ok(parsed) => parsed,
         Err(err) => {
             warnings.push(format!(
@@ -760,7 +777,7 @@ pub(crate) fn append_settings_file_handlers(result: &mut DiscoveryResult, settin
         &mut value,
         &mut result.warnings,
     );
-    let parsed: HooksFile = match serde_json::from_value(value) {
+    let parsed: ClaudeSettingsHooks = match serde_json::from_value(value) {
         Ok(parsed) => parsed,
         Err(err) => {
             result.warnings.push(format!(
@@ -1211,6 +1228,35 @@ mod tests {
             plugin_id: None,
             claude_conditions: Vec::new(),
         }
+    }
+
+    #[test]
+    fn claude_settings_with_top_level_permissions_still_load_hooks() {
+        // `.claude/settings.json` carries non-hook keys (`permissions`, `env`,
+        // `model`, ...). Parsing it with the strict `HooksFile` rejected the
+        // whole file and dropped every hook it defined.
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let settings_path = temp.path().join("settings.json");
+        std::fs::write(
+            &settings_path,
+            serde_json::json!({
+                "permissions": { "defaultMode": "acceptEdits" },
+                "hooks": {
+                    "PreToolUse": [{
+                        "matcher": "^Bash$",
+                        "hooks": [{ "type": "command", "command": "echo hi" }]
+                    }]
+                }
+            })
+            .to_string(),
+        )
+        .expect("write settings");
+
+        let mut warnings = Vec::new();
+        let parsed = super::load_claude_settings_hooks(&settings_path, &mut warnings);
+        assert_eq!(warnings, Vec::<String>::new());
+        let (_, hooks, _) = parsed.expect("hooks should parse despite foreign top-level keys");
+        assert_eq!(hooks.pre_tool_use.len(), 1);
     }
 
     #[test]

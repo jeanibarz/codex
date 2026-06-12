@@ -625,6 +625,49 @@ fn settings_file_hooks_are_managed_and_runnable() {
 }
 
 #[test]
+fn settings_file_with_claude_top_level_keys_still_loads_hooks() {
+    // Claude-style settings files (what supervisors like Kookr pass via
+    // `--settings`) legitimately carry non-hook top-level keys such as
+    // `permissions` or `env`. The strict `HooksFile` parser used to reject
+    // the entire file on the first foreign key, silently disabling every
+    // supervisor hook for the session.
+    let temp = tempdir().expect("create temp dir");
+    let settings_path =
+        AbsolutePathBuf::try_from(temp.path().join("settings.json")).expect("absolute path");
+    fs::write(
+        settings_path.as_path(),
+        serde_json::json!({
+            "hooks": {
+                "SessionStart": [{
+                    "matcher": "*",
+                    "hooks": [{ "type": "command", "command": "python3 /tmp/settings-hook.py" }]
+                }]
+            },
+            "permissions": { "allow": ["Bash(ls:*)"], "defaultMode": "acceptEdits" },
+            "env": { "FOO": "bar" }
+        })
+        .to_string(),
+    )
+    .expect("write settings file");
+
+    let listed = crate::list_hooks(crate::HooksConfig {
+        legacy_notify_argv: None,
+        feature_enabled: true,
+        config_layer_stack: None,
+        plugin_hook_sources: Vec::new(),
+        plugin_hook_load_warnings: Vec::new(),
+        shell_program: None,
+        shell_args: Vec::new(),
+        bypass_hook_trust: false,
+        settings_file: Some(settings_path.as_path().to_path_buf()),
+    });
+    assert_eq!(listed.warnings, Vec::<String>::new());
+    assert_eq!(listed.hooks.len(), 1);
+    assert_eq!(listed.hooks[0].source, HookSource::SupervisorSettings);
+    assert_eq!(listed.hooks[0].trust_status, HookTrustStatus::Managed);
+}
+
+#[test]
 fn session_flags_hooks_without_trusted_hash_remain_untrusted() {
     let config_layer_stack = ConfigLayerStack::new(
         vec![ConfigLayerEntry::new(
