@@ -19,6 +19,7 @@ use codex_protocol::protocol::Product;
 use codex_protocol::protocol::SkillScope;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::AbsolutePathBufGuard;
+use codex_utils_path_uri::PathUri;
 use codex_utils_plugins::PluginSkillRoot;
 use codex_utils_plugins::plugin_namespace_for_skill_path;
 use dirs::home_dir;
@@ -388,7 +389,17 @@ async fn repo_agents_skill_roots(
     for dir in dirs {
         for relative in [AGENTS_DIR_NAME, CLAUDE_DIR_NAME] {
             let skills_root = dir.join(relative).join(SKILLS_DIR_NAME);
-            match fs.get_metadata(&skills_root, /*sandbox*/ None).await {
+            let skills_root_uri = match PathUri::from_abs_path(&skills_root) {
+                Ok(path) => path,
+                Err(err) => {
+                    tracing::warn!(
+                        "failed to convert repo skills root {} to URI: {err:#}",
+                        skills_root.display()
+                    );
+                    continue;
+                }
+            };
+            match fs.get_metadata(&skills_root_uri, /*sandbox*/ None).await {
                 Ok(metadata) if metadata.is_directory => roots.push(SkillRoot {
                     path: skills_root,
                     scope: SkillScope::Repo,
@@ -444,7 +455,17 @@ async fn find_project_root(
     for ancestor in cwd.ancestors() {
         for marker in project_root_markers {
             let marker_path = ancestor.join(marker);
-            match fs.get_metadata(&marker_path, /*sandbox*/ None).await {
+            let marker_path_uri = match PathUri::from_abs_path(&marker_path) {
+                Ok(path) => path,
+                Err(err) => {
+                    tracing::warn!(
+                        "failed to convert project root marker {} to URI: {err:#}",
+                        marker_path.display()
+                    );
+                    continue;
+                }
+            };
+            match fs.get_metadata(&marker_path_uri, /*sandbox*/ None).await {
                 Ok(_) => return ancestor,
                 Err(err) if err.kind() == io::ErrorKind::NotFound => {}
                 Err(err) => {
@@ -490,8 +511,12 @@ async fn canonicalize_for_skill_identity(
     fs: &dyn ExecutorFileSystem,
     path: &AbsolutePathBuf,
 ) -> AbsolutePathBuf {
-    fs.canonicalize(path, /*sandbox*/ None)
+    let Ok(path_uri) = PathUri::from_abs_path(path) else {
+        return path.clone();
+    };
+    fs.canonicalize(&path_uri, /*sandbox*/ None)
         .await
+        .and_then(|path| path.to_abs_path())
         .unwrap_or_else(|_| path.clone())
 }
 
@@ -509,7 +534,17 @@ async fn discover_skills_under_root(
         None => None,
     };
 
-    match fs.get_metadata(&root, /*sandbox*/ None).await {
+    let root_uri = match PathUri::from_abs_path(&root) {
+        Ok(path) => path,
+        Err(err) => {
+            tracing::warn!(
+                "failed to convert skills root {} to URI: {err:#}",
+                root.display()
+            );
+            return;
+        }
+    };
+    match fs.get_metadata(&root_uri, /*sandbox*/ None).await {
         Ok(metadata) if metadata.is_directory => {}
         Ok(_) => return,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return,
@@ -551,7 +586,17 @@ async fn discover_skills_under_root(
     let mut truncated_by_dir_limit = false;
 
     while let Some((dir, depth)) = queue.pop_front() {
-        let entries = match fs.read_directory(&dir, /*sandbox*/ None).await {
+        let dir_uri = match PathUri::from_abs_path(&dir) {
+            Ok(path) => path,
+            Err(e) => {
+                tracing::warn!(
+                    "failed to convert skills dir {} to URI: {e:#}",
+                    dir.display()
+                );
+                continue;
+            }
+        };
+        let entries = match fs.read_directory(&dir_uri, /*sandbox*/ None).await {
             Ok(entries) => entries,
             Err(e) => {
                 error!("failed to read skills dir {}: {e:#}", dir.display());
@@ -566,7 +611,17 @@ async fn discover_skills_under_root(
             }
 
             let path = dir.join(&file_name);
-            let metadata = match fs.get_metadata(&path, /*sandbox*/ None).await {
+            let path_uri = match PathUri::from_abs_path(&path) {
+                Ok(path) => path,
+                Err(e) => {
+                    tracing::warn!(
+                        "failed to convert skills path {} to URI: {e:#}",
+                        path.display()
+                    );
+                    continue;
+                }
+            };
+            let metadata = match fs.get_metadata(&path_uri, /*sandbox*/ None).await {
                 Ok(metadata) => metadata,
                 Err(e) => {
                     error!("failed to stat skills path {}: {e:#}", path.display());
@@ -578,7 +633,7 @@ async fn discover_skills_under_root(
                 if !follow_symlinks {
                     continue;
                 }
-                match fs.read_directory(&path, /*sandbox*/ None).await {
+                match fs.read_directory(&path_uri, /*sandbox*/ None).await {
                     Ok(_) => {
                         let resolved_dir = canonicalize_for_skill_identity(fs, &path).await;
                         enqueue_dir(
@@ -650,8 +705,9 @@ async fn parse_skill_file(
     plugin_id: Option<&str>,
     plugin_root: Option<&AbsolutePathBuf>,
 ) -> Result<SkillMetadata, SkillParseError> {
+    let path_uri = PathUri::from_abs_path(path).map_err(SkillParseError::Read)?;
     let contents = fs
-        .read_file_text(path, /*sandbox*/ None)
+        .read_file_text(&path_uri, /*sandbox*/ None)
         .await
         .map_err(SkillParseError::Read)?;
 
@@ -868,7 +924,18 @@ async fn load_skill_metadata(
     let metadata_path = skill_dir
         .join(SKILLS_METADATA_DIR)
         .join(SKILLS_METADATA_FILENAME);
-    match fs.get_metadata(&metadata_path, /*sandbox*/ None).await {
+    let metadata_path_uri = match PathUri::from_abs_path(&metadata_path) {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!(
+                "ignoring {path}: failed to convert {label} path to URI: {error}",
+                path = metadata_path.display(),
+                label = SKILLS_METADATA_FILENAME
+            );
+            return LoadedSkillMetadata::default();
+        }
+    };
+    match fs.get_metadata(&metadata_path_uri, /*sandbox*/ None).await {
         Ok(metadata) if metadata.is_file => {}
         Ok(_) => return LoadedSkillMetadata::default(),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -884,7 +951,10 @@ async fn load_skill_metadata(
         }
     }
 
-    let contents = match fs.read_file_text(&metadata_path, /*sandbox*/ None).await {
+    let contents = match fs
+        .read_file_text(&metadata_path_uri, /*sandbox*/ None)
+        .await
+    {
         Ok(contents) => contents,
         Err(error) => {
             tracing::warn!(

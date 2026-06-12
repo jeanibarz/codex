@@ -502,6 +502,7 @@ async fn code_mode_only_restricts_prompt_tools() -> Result<()> {
         vec![
             "exec".to_string(),
             "wait".to_string(),
+            "request_user_input".to_string(),
             "web_search".to_string()
         ]
     );
@@ -588,6 +589,7 @@ if (!tool) {
         vec![
             "exec".to_string(),
             "wait".to_string(),
+            "request_user_input".to_string(),
             "web_search".to_string(),
             "image_generation".to_string()
         ]
@@ -797,6 +799,47 @@ text(JSON.stringify(result));
 
     let parsed: Value = serde_json::from_str(&output)?;
     assert_eq!(parsed, serde_json::json!({}));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_mode_get_context_remaining_returns_structured_result() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let (_test, second_mock) = run_code_mode_turn_with_config(
+        &server,
+        "use exec to get remaining context",
+        r#"
+const result = await tools.get_context_remaining({});
+text(JSON.stringify(result));
+"#,
+        |config| {
+            config.model_context_window = Some(10_000);
+            config
+                .features
+                .enable(Feature::TokenBudget)
+                .expect("test config should allow token budget");
+        },
+    )
+    .await?;
+
+    let req = second_mock.single_request();
+    let (output, success) = custom_tool_output_body_and_success(&req, "call-1");
+    assert_ne!(
+        success,
+        Some(false),
+        "exec get_context_remaining call failed unexpectedly: {output}"
+    );
+
+    let parsed: Value = serde_json::from_str(&output)?;
+    assert_eq!(
+        parsed,
+        serde_json::json!({
+            "tokens_left": 9500,
+        })
+    );
 
     Ok(())
 }

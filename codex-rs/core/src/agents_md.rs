@@ -27,9 +27,11 @@ use codex_config::project_root_markers_from_config;
 use codex_exec_server::Environment;
 use codex_exec_server::ExecutorFileSystem;
 use codex_exec_server::LOCAL_FS;
+use codex_extension_api::UserInstructions;
 use codex_features::Feature;
 use codex_prompts::HIERARCHICAL_AGENTS_MESSAGE;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathUri;
 use dunce::canonicalize as normalize_path;
 use std::io;
 use toml::Value as TomlValue;
@@ -50,6 +52,21 @@ pub struct AgentsMdManager<'a> {
     config: &'a Config,
 }
 
+/// Loads project AGENTS.md content and combines it with host-provided user
+/// instructions.
+pub(crate) async fn load_project_instructions(
+    config: &mut Config,
+    user_instructions: Option<UserInstructions>,
+    fs: Option<&dyn ExecutorFileSystem>,
+) -> Option<LoadedAgentsMd> {
+    let mut startup_warnings = Vec::new();
+    let loaded = AgentsMdManager::new(config)
+        .user_instructions_with_optional_fs(fs, user_instructions, &mut startup_warnings)
+        .await;
+    config.startup_warnings.extend(startup_warnings);
+    loaded
+}
+
 impl<'a> AgentsMdManager<'a> {
     pub fn new(config: &'a Config) -> Self {
         Self { config }
@@ -63,7 +80,17 @@ impl<'a> AgentsMdManager<'a> {
         let base = codex_dir?;
         for candidate in [LOCAL_AGENTS_MD_FILENAME, DEFAULT_AGENTS_MD_FILENAME] {
             let path = base.join(candidate);
-            let data = match fs.read_file(&path, /*sandbox*/ None).await {
+            let path_uri = match PathUri::from_abs_path(&path) {
+                Ok(path_uri) => path_uri,
+                Err(err) => {
+                    startup_warnings.push(format!(
+                        "Failed to convert global AGENTS.md instructions path `{}` to URI: {err}",
+                        path.display()
+                    ));
+                    continue;
+                }
+            };
+            let data = match fs.read_file(&path_uri, /*sandbox*/ None).await {
                 Ok(data) => data,
                 Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
                 Err(err) if err.kind() == io::ErrorKind::IsADirectory => continue,
@@ -93,55 +120,56 @@ impl<'a> AgentsMdManager<'a> {
         startup_warnings: &mut Vec<String>,
     ) -> Option<LoadedAgentsMd> {
         let fs = environment.get_filesystem();
-        self.user_instructions_with_fs(fs.as_ref(), startup_warnings)
+        self.user_instructions_with_optional_fs(Some(fs.as_ref()), None, startup_warnings)
             .await
     }
 
-    async fn user_instructions_with_fs(
+    async fn user_instructions_with_optional_fs(
         &self,
-        fs: &dyn ExecutorFileSystem,
+        fs: Option<&dyn ExecutorFileSystem>,
+        user_instructions: Option<UserInstructions>,
         startup_warnings: &mut Vec<String>,
     ) -> Option<LoadedAgentsMd> {
-        let agents_md_docs = self.read_agents_md(fs, startup_warnings).await;
-
-        let mut loaded = self.config.user_instructions.clone().unwrap_or_default();
+        let mut loaded = LoadedAgentsMd::from_user_instructions(user_instructions);
 
         let mut project_doc_bytes_used: usize = 0;
-        match agents_md_docs {
-            Ok(Some(docs)) => {
-                project_doc_bytes_used =
-                    docs.entries.iter().map(|entry| entry.contents.len()).sum();
-                loaded.entries.extend(docs.entries);
+        if let Some(fs) = fs {
+            match self.read_agents_md(fs, startup_warnings).await {
+                Ok(Some(docs)) => {
+                    project_doc_bytes_used =
+                        docs.entries.iter().map(|entry| entry.contents.len()).sum();
+                    loaded.entries.extend(docs.entries);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    error!("error trying to find AGENTS.md docs: {e:#}");
+                }
             }
-            Ok(None) => {}
-            Err(e) => {
-                error!("error trying to find AGENTS.md docs: {e:#}");
+
+            match self
+                .read_conditional_rules(fs, project_doc_bytes_used)
+                .await
+            {
+                Ok(Some(rules_block)) => {
+                    if !rules_block.trim().is_empty() {
+                        loaded.entries.push(InstructionEntry {
+                            contents: rules_block,
+                            provenance: InstructionProvenance::Internal,
+                        });
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    error!("error trying to discover conditional rules: {e:#}");
+                }
             }
-        };
+        }
 
         if self.config.features.enabled(Feature::ChildAgentsMd) {
             loaded.entries.push(InstructionEntry {
                 contents: HIERARCHICAL_AGENTS_MESSAGE.to_string(),
                 provenance: InstructionProvenance::Internal,
             });
-        }
-
-        match self
-            .read_conditional_rules(fs, project_doc_bytes_used)
-            .await
-        {
-            Ok(Some(rules_block)) => {
-                if !rules_block.trim().is_empty() {
-                    loaded.entries.push(InstructionEntry {
-                        contents: rules_block,
-                        provenance: InstructionProvenance::Internal,
-                    });
-                }
-            }
-            Ok(None) => {}
-            Err(e) => {
-                error!("error trying to discover conditional rules: {e:#}");
-            }
         }
 
         (!loaded.is_empty()).then_some(loaded)
@@ -240,14 +268,15 @@ impl<'a> AgentsMdManager<'a> {
                 break;
             }
 
-            match fs.get_metadata(&p, /*sandbox*/ None).await {
+            let path_uri = PathUri::from_abs_path(&p)?;
+            match fs.get_metadata(&path_uri, /*sandbox*/ None).await {
                 Ok(metadata) if !metadata.is_file => continue,
                 Ok(_) => {}
                 Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
                 Err(err) => return Err(err),
             }
 
-            let mut data = match fs.read_file(&p, /*sandbox*/ None).await {
+            let mut data = match fs.read_file(&path_uri, /*sandbox*/ None).await {
                 Ok(data) => data,
                 Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
                 Err(err) => return Err(err),
@@ -322,7 +351,8 @@ impl<'a> AgentsMdManager<'a> {
             for ancestor in dir.ancestors() {
                 for marker in &project_root_markers {
                     let marker_path = ancestor.join(marker);
-                    let marker_exists = match fs.get_metadata(&marker_path, /*sandbox*/ None).await
+                    let marker_path_uri = PathUri::from_abs_path(&marker_path)?;
+                    let marker_exists = match fs.get_metadata(&marker_path_uri, /*sandbox*/ None).await
                     {
                         Ok(_) => true,
                         Err(err) if err.kind() == io::ErrorKind::NotFound => false,
@@ -363,7 +393,8 @@ impl<'a> AgentsMdManager<'a> {
         for d in search_dirs {
             for name in &candidate_filenames {
                 let candidate = d.join(name);
-                match fs.get_metadata(&candidate, /*sandbox*/ None).await {
+                let candidate_uri = PathUri::from_abs_path(&candidate)?;
+                match fs.get_metadata(&candidate_uri, /*sandbox*/ None).await {
                     Ok(md) if md.is_file => {
                         found.push(candidate);
                         break;
@@ -400,6 +431,9 @@ impl<'a> AgentsMdManager<'a> {
 /// guidance.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LoadedAgentsMd {
+    /// Host-provided user instructions.
+    user_instructions: Option<UserInstructions>,
+
     /// Ordered instructions and their provenance.
     entries: Vec<InstructionEntry>,
 }
@@ -411,10 +445,19 @@ impl LoadedAgentsMd {
             return Self::default();
         }
         Self {
-            entries: vec![InstructionEntry {
-                contents,
-                provenance: InstructionProvenance::User(path),
-            }],
+            user_instructions: Some(UserInstructions {
+                text: contents,
+                source: path,
+            }),
+            entries: Vec::new(),
+        }
+    }
+
+    fn from_user_instructions(user_instructions: Option<UserInstructions>) -> Self {
+        Self {
+            user_instructions: user_instructions
+                .filter(|instructions| !instructions.text.trim().is_empty()),
+            entries: Vec::new(),
         }
     }
 
@@ -428,6 +471,7 @@ impl LoadedAgentsMd {
             return Self::default();
         }
         Self {
+            user_instructions: None,
             entries: vec![InstructionEntry {
                 contents,
                 provenance: InstructionProvenance::Internal,
@@ -436,40 +480,57 @@ impl LoadedAgentsMd {
     }
 
     fn is_empty(&self) -> bool {
-        self.entries
-            .iter()
-            .all(|entry| entry.contents.trim().is_empty())
+        self.user_instructions.is_none()
+            && self
+                .entries
+                .iter()
+                .all(|entry| entry.contents.trim().is_empty())
     }
 
     /// Returns the concatenated model-visible instruction text.
     pub fn text(&self) -> String {
         let mut output = String::new();
-        let mut previous_provenance: Option<&InstructionProvenance> = None;
+        let mut has_previous = false;
+        let mut previous_was_project = false;
+        if let Some(instructions) = &self.user_instructions {
+            output.push_str(&instructions.text);
+            has_previous = true;
+        }
         for entry in &self.entries {
-            if let Some(previous_provenance) = previous_provenance {
+            let is_project = matches!(&entry.provenance, InstructionProvenance::Project(_));
+            if has_previous {
                 // The project-doc marker tells the model where workspace-scoped
                 // instructions begin, so it is only needed on the transition
                 // from user or internal instructions to project instructions.
-                let separator = match (previous_provenance, &entry.provenance) {
-                    (
-                        InstructionProvenance::User(_) | InstructionProvenance::Internal,
-                        InstructionProvenance::Project(_),
-                    ) => AGENTS_MD_SEPARATOR,
-                    _ => "\n\n",
+                let separator = if is_project && !previous_was_project {
+                    AGENTS_MD_SEPARATOR
+                } else {
+                    "\n\n"
                 };
                 output.push_str(separator);
             }
             output.push_str(&entry.contents);
-            previous_provenance = Some(&entry.provenance);
+            has_previous = true;
+            previous_was_project = is_project;
         }
         output
     }
 
+    /// Returns the host-provided user instructions.
+    pub(crate) fn user_instructions(&self) -> Option<&UserInstructions> {
+        self.user_instructions.as_ref()
+    }
+
     /// Returns the AGENTS.md files that supplied instruction entries.
     pub fn sources(&self) -> impl Iterator<Item = &AbsolutePathBuf> {
-        self.entries
+        self.user_instructions
             .iter()
-            .filter_map(|entry| entry.provenance.path())
+            .map(|instructions| &instructions.source)
+            .chain(
+                self.entries
+                    .iter()
+                    .filter_map(|entry| entry.provenance.path()),
+            )
     }
 }
 
@@ -485,9 +546,6 @@ struct InstructionEntry {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum InstructionProvenance {
-    /// User-level instructions, normally loaded from CODEX_HOME.
-    User(AbsolutePathBuf),
-
     /// Workspace instructions discovered from project AGENTS.md files.
     Project(AbsolutePathBuf),
 
@@ -498,7 +556,7 @@ enum InstructionProvenance {
 impl InstructionProvenance {
     fn path(&self) -> Option<&AbsolutePathBuf> {
         match self {
-            Self::User(path) | Self::Project(path) => Some(path),
+            Self::Project(path) => Some(path),
             Self::Internal => None,
         }
     }
