@@ -68,12 +68,6 @@ pub struct PluginHookLoadOutcome {
     pub hook_load_warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PluginAppMetadata {
-    pub id: AppConnectorId,
-    pub category: Option<String>,
-}
-
 pub(crate) enum PluginLoadScope<'a> {
     AllCapabilities {
         restriction_product: Option<Product>,
