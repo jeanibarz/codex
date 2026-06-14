@@ -5,6 +5,7 @@ use codex_app_server_protocol::SelectedCapabilityRoot;
 use codex_extension_api::ExtensionDataInit;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
+use codex_utils_path_uri::PathUri;
 
 const THREAD_LIST_DEFAULT_LIMIT: usize = 25;
 const THREAD_LIST_MAX_LIMIT: usize = 100;
@@ -1298,7 +1299,7 @@ impl ThreadRequestProcessor {
                 .into_iter()
                 .map(|environment| TurnEnvironmentSelection {
                     environment_id: environment.environment_id,
-                    cwd: environment.cwd,
+                    cwd: PathUri::from_abs_path(&environment.cwd),
                 })
                 .collect::<Vec<_>>()
         });
@@ -2816,6 +2817,7 @@ impl ThreadRequestProcessor {
         Some(persisted_metadata)
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     async fn resume_running_thread(
         &self,
         request_id: &ConnectionRequestId,
@@ -3002,6 +3004,7 @@ impl ThreadRequestProcessor {
         Ok(RunningThreadResumeResult::NotRunning(None))
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     async fn resume_thread_from_history(
         &self,
         history: &[ResponseItem],
@@ -3018,6 +3021,7 @@ impl ThreadRequestProcessor {
         ))
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     async fn resume_thread_from_rollout(
         &self,
         thread_id: &str,
@@ -3072,6 +3076,7 @@ impl ThreadRequestProcessor {
         Ok(stored_thread)
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     async fn stored_thread_to_initial_history(
         &self,
         stored_thread: &StoredThread,
