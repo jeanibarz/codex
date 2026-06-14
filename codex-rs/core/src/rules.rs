@@ -51,7 +51,7 @@ pub(crate) async fn discover_rule_paths(
     let mut rule_paths: Vec<AbsolutePathBuf> = Vec::new();
     for dirname in [CODEX_RULES_DIRNAME, CLAUDE_RULES_DIRNAME] {
         let dir = cwd.join(dirname);
-        let dir_uri = PathUri::from_abs_path(&dir)?;
+        let dir_uri = PathUri::from_abs_path(&dir);
         match fs.get_metadata(&dir_uri, /*sandbox*/ None).await {
             Ok(md) if md.is_directory => {}
             Ok(_) => continue,
@@ -103,7 +103,7 @@ pub(crate) async fn discover_rules(
         if remaining == 0 {
             break;
         }
-        let path_uri = PathUri::from_abs_path(&path)?;
+        let path_uri = PathUri::from_abs_path(&path);
         let mut data = match fs.read_file(&path_uri, /*sandbox*/ None).await {
             Ok(data) => data,
             Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
