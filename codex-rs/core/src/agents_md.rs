@@ -18,7 +18,7 @@
 use crate::config::Config;
 use crate::context::ContextualUserFragment;
 use crate::context::UserInstructions as ContextUserInstructions;
-use crate::environment_selection::ResolvedTurnEnvironments;
+use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::rules::discover_rule_paths;
 use crate::rules::discover_rules;
 use crate::rules::render_rules;
@@ -55,9 +55,9 @@ pub struct AgentsMdManager<'a> {
 /// Loads project AGENTS.md content and combines it with host-provided user
 /// instructions.
 pub(crate) async fn load_project_instructions(
-    config: &mut Config,
+    config: &Config,
     user_instructions: Option<UserInstructions>,
-    environments: &ResolvedTurnEnvironments,
+    environments: &TurnEnvironmentSnapshot,
 ) -> Option<LoadedAgentsMd> {
     let mut loaded = LoadedAgentsMd::from_user_instructions(user_instructions);
     for turn_environment in &environments.turn_environments {
@@ -191,7 +191,7 @@ impl<'a> AgentsMdManager<'a> {
 /// `Ok(None)`. Unexpected I/O failures bubble up as `Err` so callers can
 /// decide how to handle them.
 async fn read_agents_md(
-    config: &mut Config,
+    config: &Config,
     fs: &dyn ExecutorFileSystem,
     environment_id: &str,
     cwd: &AbsolutePathBuf,
@@ -228,8 +228,6 @@ async fn read_agents_md(
             Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
             Err(err) => return Err(err),
         };
-        warn_invalid_utf8(&p, &data, "Project", &mut config.startup_warnings);
-
         let size = data.len() as u64;
         if size > remaining {
             data.truncate(remaining as usize);
