@@ -209,7 +209,6 @@ fn spawn_agent_tool_v1_description_authorizes_skill_workflow_spawns() {
         hide_agent_type_model_reasoning: false,
         include_usage_hint: true,
         usage_hint_text: None,
-        max_concurrent_threads_per_session: None,
     });
 
     let ToolSpec::Function(ResponsesApiTool { description, .. }) = tool else {
