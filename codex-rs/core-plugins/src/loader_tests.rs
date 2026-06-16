@@ -1,4 +1,5 @@
 use super::*;
+use crate::OPENAI_CURATED_MARKETPLACE_NAME;
 use crate::manifest::load_plugin_manifest;
 use crate::test_support::write_file;
 use codex_config::ConfigLayerEntry;
@@ -385,9 +386,12 @@ fn refresh_curated_plugin_cache_loads_claude_layout_marketplace() {
     )
     .expect("valid plugin id");
 
-    let refreshed =
-        refresh_curated_plugin_cache(codex_home.path(), "2026-04-26", &[plugin_id.clone()])
-            .expect("refresh curated plugin cache");
+    let refreshed = refresh_curated_plugin_cache(
+        codex_home.path(),
+        "2026-04-26",
+        std::slice::from_ref(&plugin_id),
+    )
+    .expect("refresh curated plugin cache");
 
     assert!(refreshed);
     let store = PluginStore::try_new(codex_home.path().to_path_buf()).expect("plugin store");
