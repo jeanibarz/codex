@@ -62,12 +62,17 @@ pub(crate) async fn load_project_instructions(
     let mut loaded = LoadedAgentsMd::from_user_instructions(user_instructions);
     for turn_environment in &environments.turn_environments {
         let filesystem = turn_environment.environment.get_filesystem();
+        // TODO(anp): Migrate AGENTS.md discovery to PathUri so instructions can be loaded from
+        // environment-native foreign working directories.
+        let Ok(cwd) = turn_environment.cwd().to_abs_path() else {
+            continue;
+        };
         let mut project_doc_bytes_used = 0;
         match read_agents_md(
             config,
             filesystem.as_ref(),
             &turn_environment.environment_id,
-            turn_environment.cwd(),
+            &cwd,
         )
         .await
         {
@@ -85,13 +90,8 @@ pub(crate) async fn load_project_instructions(
             }
         }
 
-        match read_conditional_rules(
-            config,
-            filesystem.as_ref(),
-            turn_environment.cwd(),
-            project_doc_bytes_used,
-        )
-        .await
+        match read_conditional_rules(config, filesystem.as_ref(), &cwd, project_doc_bytes_used)
+            .await
         {
             Ok(Some(rules_block)) => {
                 if !rules_block.trim().is_empty() {
