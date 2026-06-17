@@ -1045,7 +1045,13 @@ impl UnifiedExecProcessManager {
             ),
             local_policy_env,
         };
-        let mut explicit_env_overrides = context.turn.shell_environment_policy.r#set.clone();
+        let mut explicit_env_overrides = context
+            .turn
+            .config
+            .permissions
+            .shell_environment_policy
+            .r#set
+            .clone();
         crate::exec_env::apply_dependency_env(
             &mut env,
             &mut explicit_env_overrides,

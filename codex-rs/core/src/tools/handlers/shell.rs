@@ -81,7 +81,12 @@ async fn run_exec_like(args: RunExecLikeArgs) -> Result<FunctionToolOutput, Func
     };
     let fs = turn_environment.environment.get_filesystem();
 
-    let mut explicit_env_overrides = turn.shell_environment_policy.r#set.clone();
+    let mut explicit_env_overrides = turn
+        .config
+        .permissions
+        .shell_environment_policy
+        .r#set
+        .clone();
     crate::exec_env::apply_dependency_env(
         &mut exec_params.env,
         &mut explicit_env_overrides,
