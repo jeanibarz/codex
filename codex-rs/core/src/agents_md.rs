@@ -90,13 +90,8 @@ pub(crate) async fn load_project_instructions(
             }
         }
 
-        match read_conditional_rules(
-            config,
-            filesystem.as_ref(),
-            &cwd,
-            project_doc_bytes_used,
-        )
-        .await
+        match read_conditional_rules(config, filesystem.as_ref(), &cwd, project_doc_bytes_used)
+            .await
         {
             Ok(Some(rules_block)) => {
                 if !rules_block.trim().is_empty() {
