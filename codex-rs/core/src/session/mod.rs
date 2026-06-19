@@ -540,10 +540,13 @@ impl Codex {
         let plugin_outcome = plugins_manager.plugins_for_config(&plugins_input).await;
         let effective_skill_roots =
             include_cli_plugin_skill_roots(&config, plugin_outcome.effective_plugin_skill_roots());
-        let skills_input = skills_load_input_from_config(&config, effective_skill_roots);
-        let loaded_skills = skills_manager.skills_for_config(&skills_input, fs).await;
+        let plugin_skill_snapshots =
+            plugins_manager.plugin_skill_snapshots_for_config(&plugins_input);
+        let skills_input = skills_load_input_from_config(&config, effective_skill_roots)
+            .with_plugin_skill_snapshots(plugin_skill_snapshots);
+        let skills_snapshot = skills_service.snapshot_for_config(&skills_input, fs).await;
 
-        for err in &loaded_skills.errors {
+        for err in &skills_snapshot.outcome().errors {
             error!(
                 "failed to load skill {}: {}",
                 err.path.display(),
@@ -3267,7 +3270,10 @@ impl Session {
             &turn_context.config.multi_agent_v2,
             &session_source,
             turn_context.multi_agent_mode,
-            turn_context.features.enabled(Feature::MultiAgentMode),
+            turn_context
+                .config
+                .features
+                .enabled(Feature::MultiAgentMode),
         ) {
             items.push(ContextualUserFragment::into(
                 MultiAgentModeInstructions::new(multi_agent_mode),

@@ -157,9 +157,15 @@ impl<'a> AgentsMdManager<'a> {
             &mut global_instruction_warnings,
         )
         .await
-        .map(|loaded| loaded.sources().cloned().collect())
+        .map(|loaded| {
+            loaded
+                .sources()
+                .filter_map(|source| source.to_abs_path().ok())
+                .collect()
+        })
         .unwrap_or_default();
-        match agents_md_paths(self.config, &self.config.cwd, fs).await {
+        let cwd = PathUri::from_abs_path(&self.config.cwd);
+        match agents_md_paths(self.config, &cwd, fs).await {
             Ok(agents_md_paths) => paths.extend(agents_md_paths),
             Err(err) => {
                 tracing::warn!(error = %err, "failed to discover AGENTS.md docs for instruction sources");
