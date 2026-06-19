@@ -7,6 +7,7 @@ use crate::tools::effective_tool_mode;
 use crate::tools::handlers::ApplyPatchHandler;
 use crate::tools::handlers::CodeModeExecuteHandler;
 use crate::tools::handlers::CodeModeWaitHandler;
+use crate::tools::handlers::CurrentTimeHandler;
 use crate::tools::handlers::DynamicToolHandler;
 use crate::tools::handlers::ExecCommandHandler;
 use crate::tools::handlers::ExecCommandHandlerOptions;
@@ -192,9 +193,39 @@ fn build_tool_specs_and_registry(
     };
     let mut planned_tools = PlannedTools::default();
     add_tool_sources(&context, &mut planned_tools);
+    apply_direct_model_only_namespace_overrides(turn_context, &mut planned_tools);
     append_tool_search_executor(&context, &mut planned_tools);
     prepend_code_mode_executors(&context, &mut planned_tools);
     build_model_visible_specs_and_registry(turn_context, planned_tools)
+}
+
+fn apply_direct_model_only_namespace_overrides(
+    turn_context: &TurnContext,
+    planned_tools: &mut PlannedTools,
+) {
+    for runtime in &mut planned_tools.runtimes {
+        let configured = runtime
+            .tool_name()
+            .namespace
+            .as_ref()
+            .is_some_and(|namespace| {
+                turn_context
+                    .config
+                    .code_mode
+                    .direct_only_tool_namespaces
+                    .contains(namespace)
+            });
+        match runtime.exposure() {
+            ToolExposure::Direct | ToolExposure::Deferred if configured => {
+                *runtime =
+                    override_tool_exposure(Arc::clone(runtime), ToolExposure::DirectModelOnly);
+            }
+            ToolExposure::Direct
+            | ToolExposure::Deferred
+            | ToolExposure::DirectModelOnly
+            | ToolExposure::Hidden => {}
+        }
+    }
 }
 
 #[instrument(level = "trace", skip_all)]
@@ -256,6 +287,7 @@ fn spec_for_model_request(
     }
 }
 
+#[instrument(level = "trace", skip_all)]
 fn hosted_model_tool_specs(context: &CoreToolPlanContext<'_>) -> Vec<ToolSpec> {
     let turn_context = context.turn_context;
     // Responses Lite accepts schemas for client-executed tools, not hosted Responses tools.
@@ -500,6 +532,7 @@ fn build_code_mode_executors(
     ]
 }
 
+#[instrument(level = "trace", skip_all, fields(tool_spec_count = specs.len()))]
 fn merge_into_namespaces(specs: Vec<ToolSpec>) -> Vec<ToolSpec> {
     let mut merged_specs = Vec::with_capacity(specs.len());
     let mut namespace_indices = BTreeMap::<String, usize>::new();
@@ -592,6 +625,7 @@ fn standalone_web_search_enabled(turn_context: &TurnContext) -> bool {
                 .enabled(Feature::StandaloneWebSearch))
 }
 
+#[instrument(level = "trace", skip_all)]
 fn add_shell_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut PlannedTools) {
     let turn_context = context.turn_context;
     let features = turn_context.config.features.get();
@@ -643,6 +677,7 @@ fn unified_exec_should_include_shell_parameter(turn_context: &TurnContext) -> bo
         .any(|environment| environment.environment.is_remote())
 }
 
+#[instrument(level = "trace", skip_all)]
 fn add_mcp_resource_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut PlannedTools) {
     if context.mcp_tools.is_some() {
         planned_tools.add(ListMcpResourcesHandler);
@@ -651,6 +686,7 @@ fn add_mcp_resource_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut
     }
 }
 
+#[instrument(level = "trace", skip_all)]
 fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut PlannedTools) {
     let turn_context = context.turn_context;
     let features = turn_context.config.features.get();
@@ -675,6 +711,10 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut
     if features.enabled(Feature::TokenBudget) {
         planned_tools.add_with_exposure(NewContextWindowHandler, ToolExposure::DirectModelOnly);
         planned_tools.add(GetContextRemainingHandler);
+    }
+
+    if features.enabled(Feature::CurrentTimeReminder) {
+        planned_tools.add(CurrentTimeHandler);
     }
 
     if features.enabled(Feature::SleepTool) {
@@ -723,6 +763,7 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut
     }
 }
 
+#[instrument(level = "trace", skip_all)]
 fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut PlannedTools) {
     let turn_context = context.turn_context;
     if collab_tools_enabled(turn_context) {
@@ -811,6 +852,14 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
     }
 }
 
+#[instrument(
+    level = "trace",
+    skip_all,
+    fields(
+        direct_mcp_tool_count = context.mcp_tools.map_or(0, <[ToolInfo]>::len),
+        deferred_mcp_tool_count = context.deferred_mcp_tools.map_or(0, <[ToolInfo]>::len)
+    )
+)]
 fn add_mcp_runtime_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut PlannedTools) {
     if let Some(mcp_tools) = context.mcp_tools {
         for tool in mcp_tools {
@@ -837,6 +886,11 @@ fn add_mcp_runtime_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut 
     }
 }
 
+#[instrument(
+    level = "trace",
+    skip_all,
+    fields(dynamic_tool_count = context.dynamic_tools.len())
+)]
 fn add_dynamic_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut PlannedTools) {
     for spec in context.dynamic_tools {
         match spec {
@@ -869,6 +923,11 @@ fn add_dynamic_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut Plan
     }
 }
 
+#[instrument(
+    level = "trace",
+    skip_all,
+    fields(extension_tool_executor_count = context.extension_tool_executors.len())
+)]
 fn add_extension_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut PlannedTools) {
     // Extension ToolContributor implementations are resolved into executors
     // before planning. Core only adapts those executors into its runtime set.

@@ -161,6 +161,7 @@ enabled = true
         &stack,
         HashMap::new(),
         &store,
+        /*plugin_skill_snapshots*/ None,
         Some(Product::Codex),
         /*plugin_hooks_enabled*/ true,
         /*prefer_remote_curated_conflicts*/ false,
@@ -290,6 +291,7 @@ async fn hooks_only_scope_loads_claude_plugin_hooks_without_other_capabilities()
         &stack,
         HashMap::new(),
         &store,
+        /*plugin_skill_snapshots*/ None,
         Some(Product::Codex),
         /*plugin_hooks_enabled*/ true,
         /*prefer_remote_curated_conflicts*/ false,
@@ -305,7 +307,6 @@ async fn hooks_only_scope_loads_claude_plugin_hooks_without_other_capabilities()
     .await;
 
     let full_plugin = full
-        .plugins()
         .iter()
         .find(|plugin| plugin.config_name == "looper-toolkit@looper")
         .expect("full load should include Claude plugin");
@@ -315,7 +316,6 @@ async fn hooks_only_scope_loads_claude_plugin_hooks_without_other_capabilities()
     assert_eq!(full_plugin.hook_sources.len(), 1);
 
     let hooks_only_plugin = hooks_only
-        .plugins()
         .iter()
         .find(|plugin| plugin.config_name == "looper-toolkit@looper")
         .expect("hooks-only load should include Claude plugin");

@@ -188,7 +188,7 @@ pub(crate) async fn execute_user_shell_command(
                 turn_id: turn_context.sub_id.clone(),
                 started_at_ms: now_unix_timestamp_ms(),
                 command: display_command.clone(),
-                cwd: cwd.clone(),
+                cwd: cwd.clone().into(),
                 parsed_cmd: parsed_cmd.clone(),
                 source: ExecCommandSource::UserShell,
                 interaction_input: None,
@@ -199,18 +199,19 @@ pub(crate) async fn execute_user_shell_command(
     let permission_profile = PermissionProfile::Disabled;
     let exec_env = ExecRequest {
         command: exec_command.clone(),
-        cwd: cwd.clone(),
+        cwd: cwd.clone().into(),
         env: exec_env_map,
         exec_server_env_config: None,
         // `/shell` is the explicit full-access escape hatch, so it must not
         // inherit a managed proxy from the surrounding session or turn.
         network: None,
+        network_environment_id: None,
         // TODO(zhao-oai): Now that we have ExecExpiration::Cancellation, we
         // should use that instead of an "arbitrarily large" timeout here.
         expiration: USER_SHELL_TIMEOUT_MS.into(),
         capture_policy: ExecCapturePolicy::ShellTool,
         sandbox: SandboxType::None,
-        windows_sandbox_policy_cwd: cwd.clone(),
+        windows_sandbox_policy_cwd: cwd.clone().into(),
         windows_sandbox_workspace_roots: turn_context.config.effective_workspace_roots(),
         windows_sandbox_level: turn_context.windows_sandbox_level,
         windows_sandbox_private_desktop: turn_context
@@ -262,7 +263,7 @@ pub(crate) async fn execute_user_shell_command(
                         turn_id: turn_context.sub_id.clone(),
                         completed_at_ms: now_unix_timestamp_ms(),
                         command: display_command.clone(),
-                        cwd: cwd.clone(),
+                        cwd: cwd.clone().into(),
                         parsed_cmd: parsed_cmd.clone(),
                         source: ExecCommandSource::UserShell,
                         interaction_input: None,
@@ -287,7 +288,7 @@ pub(crate) async fn execute_user_shell_command(
                         turn_id: turn_context.sub_id.clone(),
                         completed_at_ms: now_unix_timestamp_ms(),
                         command: display_command.clone(),
-                        cwd: cwd.clone(),
+                        cwd: cwd.clone().into(),
                         parsed_cmd: parsed_cmd.clone(),
                         source: ExecCommandSource::UserShell,
                         interaction_input: None,
@@ -332,7 +333,7 @@ pub(crate) async fn execute_user_shell_command(
                         turn_id: turn_context.sub_id.clone(),
                         completed_at_ms: now_unix_timestamp_ms(),
                         command: display_command,
-                        cwd,
+                        cwd: cwd.into(),
                         parsed_cmd,
                         source: ExecCommandSource::UserShell,
                         interaction_input: None,
