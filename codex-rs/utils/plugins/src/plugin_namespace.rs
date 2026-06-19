@@ -41,7 +41,8 @@ pub fn plugin_skill_root_from_cli_dir(dir: &Path) -> Option<PluginSkillRoot> {
     let abs_dir = AbsolutePathBuf::from_absolute_path_checked(canonical).ok()?;
     Some(PluginSkillRoot {
         path: abs_dir.join("skills"),
-        plugin_id: name,
+        plugin_id: name.clone(),
+        plugin_namespace: name,
         plugin_root: abs_dir,
     })
 }

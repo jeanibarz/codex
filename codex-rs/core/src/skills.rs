@@ -353,6 +353,7 @@ mod tests {
             vec![PluginSkillRoot {
                 path: expected_skill_root,
                 plugin_id: "kookr-toolkit".to_string(),
+                plugin_namespace: "kookr-toolkit".to_string(),
                 plugin_root: expected_plugin_root,
             }]
         );
