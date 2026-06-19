@@ -1195,6 +1195,11 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
                         && communication.other_recipients.is_empty()
                         && communication.content.is_empty()
                         && communication.encrypted_content.as_deref() == Some("encrypted-spawn-message")
+                        && communication
+                            .metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.source_call_id.as_deref())
+                            == Some("call-1")
                         && communication.trigger_turn
             )
     }));
@@ -1222,6 +1227,11 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
                         && communication.other_recipients.is_empty()
                         && communication.content.is_empty()
                         && communication.encrypted_content.as_deref() == Some("encrypted-send-message")
+                        && communication
+                            .metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.source_call_id.as_deref())
+                            == Some("call-1")
                         && !communication.trigger_turn
             )
     }));
@@ -2027,6 +2037,23 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
         .await
         .expect("followup_task should succeed");
 
+    assert!(manager.captured_ops().iter().any(|(id, op)| {
+        *id == agent_id
+            && matches!(
+                op,
+                Op::InterAgentCommunication { communication }
+                    if communication.author == AgentPath::root()
+                        && communication.recipient == worker_path
+                        && communication.encrypted_content.as_deref() == Some("continue")
+                        && communication
+                            .metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.source_call_id.as_deref())
+                            == Some("call-1")
+                        && communication.trigger_turn
+            )
+    }));
+
     let second_turn = thread.codex.session.new_default_turn().await;
     thread
         .codex
@@ -2805,6 +2832,7 @@ async fn resume_agent_restores_closed_agent_and_accepts_send_input() {
             })]),
             AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy")),
             /*parent_trace*/ None,
+            /*supports_openai_form_elicitation*/ false,
         )
         .await
         .expect("start thread");
@@ -4251,6 +4279,7 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
         state_db.clone(),
         "11111111-1111-4111-8111-111111111111".to_string(),
         /*attestation_provider*/ None,
+        /*external_time_provider*/ None,
     );
 
     let parent = manager

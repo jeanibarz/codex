@@ -2418,6 +2418,7 @@ version = "0.125.0-alpha.3"
 dependencies = [
  "base64 0.22.1",
  "chrono",
+ "codex-agent-identity",
  "codex-backend-client",
  "codex-config",
  "codex-core",
@@ -3290,6 +3291,7 @@ dependencies = [
  "codex-plugin",
  "codex-protocol",
  "codex-rmcp-client",
+ "codex-utils-path-uri",
  "codex-utils-plugins",
  "futures",
  "pretty_assertions",
@@ -3793,7 +3795,9 @@ dependencies = [
  "codex-network-proxy",
  "codex-protocol",
  "codex-utils-absolute-path",
+ "codex-utils-home-dir",
  "codex-utils-path-uri",
+ "codex-windows-sandbox",
  "dunce",
  "libc",
  "pretty_assertions",
@@ -4269,7 +4273,6 @@ name = "codex-utils-plugins"
 version = "0.125.0-alpha.3"
 dependencies = [
  "codex-exec-server",
- "codex-login",
  "codex-utils-absolute-path",
  "codex-utils-path-uri",
  "serde",

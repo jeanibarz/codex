@@ -161,6 +161,7 @@ enabled = true
         &stack,
         HashMap::new(),
         &store,
+        /*plugin_skill_snapshots*/ None,
         Some(Product::Codex),
         /*plugin_hooks_enabled*/ true,
         /*prefer_remote_curated_conflicts*/ false,
