@@ -166,7 +166,13 @@ impl<'a> AgentsMdManager<'a> {
         .unwrap_or_default();
         let cwd = PathUri::from_abs_path(&self.config.cwd);
         match agents_md_paths(self.config, &cwd, fs).await {
-            Ok(agents_md_paths) => paths.extend(agents_md_paths),
+            Ok(agents_md_paths) => {
+                paths.extend(
+                    agents_md_paths
+                        .into_iter()
+                        .filter_map(|source| source.to_abs_path().ok()),
+                );
+            }
             Err(err) => {
                 tracing::warn!(error = %err, "failed to discover AGENTS.md docs for instruction sources");
             }
