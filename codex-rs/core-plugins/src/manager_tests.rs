@@ -39,7 +39,6 @@ use codex_config::McpServerToolConfig;
 use codex_config::types::McpServerTransportConfig;
 use codex_core_skills::PluginSkillSnapshots;
 use codex_core_skills::SkillsLoadInput;
-use codex_core_skills::SkillsManager;
 use codex_core_skills::SkillsService;
 use codex_core_skills::config_rules::SkillConfigRules;
 use codex_login::CodexAuth;
@@ -925,14 +924,15 @@ enabled = false
         config.config_layer_stack.clone(),
         /*bundled_skills_enabled*/ false,
     );
-    let skills_manager =
-        SkillsManager::new(codex_home.abs(), /*bundled_skills_enabled*/ false);
-    let skills = skills_manager
-        .skills_for_config(&skills_input, /*fs*/ None)
+    let skills_service =
+        SkillsService::new(codex_home.abs(), /*bundled_skills_enabled*/ false);
+    let skills = skills_service
+        .snapshot_for_config(&skills_input, /*fs*/ None)
         .await;
 
     assert!(
         skills
+            .outcome()
             .skills
             .iter()
             .any(|skill| skill.name == "looper-toolkit:typescript-type-safety")
