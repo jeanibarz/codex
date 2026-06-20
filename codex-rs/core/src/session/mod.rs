@@ -446,6 +446,7 @@ pub(crate) struct CodexSpawnArgs {
     pub(crate) attestation_provider: Option<Arc<dyn AttestationProvider>>,
     pub(crate) external_time_provider: Option<Arc<dyn TimeProvider>>,
     pub(crate) inherited_multi_agent_version: Option<MultiAgentVersion>,
+    pub(crate) initial_multi_agent_mode: Option<MultiAgentMode>,
 }
 
 pub(crate) fn resolve_multi_agent_version(
@@ -530,6 +531,7 @@ impl Codex {
             attestation_provider,
             external_time_provider,
             inherited_multi_agent_version,
+            initial_multi_agent_mode,
         } = args;
         let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
         let (tx_event, rx_event) = async_channel::unbounded();
@@ -604,7 +606,7 @@ impl Codex {
             .await;
         let multi_agent_version =
             resolve_multi_agent_version(&conversation_history, inherited_multi_agent_version);
-        let multi_agent_mode = conversation_history.get_multi_agent_mode();
+        let multi_agent_mode = initial_multi_agent_mode;
         config
             .validate_multi_agent_v2_config()
             .map_err(|err| CodexErr::InvalidRequest(err.to_string()))?;
@@ -1252,6 +1254,11 @@ impl Session {
     }
 
     // Merges connector IDs into the session-level explicit connector selection.
+    #[tracing::instrument(
+        level = "trace",
+        skip_all,
+        fields(connector_count = connector_ids.len())
+    )]
     pub(crate) async fn merge_connector_selection(
         &self,
         connector_ids: HashSet<String>,
@@ -1445,6 +1452,7 @@ impl Session {
         state.previous_turn_settings()
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     pub(crate) async fn set_previous_turn_settings(
         &self,
         previous_turn_settings: Option<PreviousTurnSettings>,
@@ -2755,6 +2763,7 @@ impl Session {
         ))
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(item_count = items.len()))]
     pub(crate) async fn record_conversation_items(
         &self,
         turn_context: &TurnContext,
@@ -2948,6 +2957,7 @@ impl Session {
         self.set_multi_agent_version_if_unset(selected)
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(item_count = items.len()))]
     async fn send_raw_response_items(&self, turn_context: &TurnContext, items: &[ResponseItem]) {
         for item in items {
             self.send_event(
@@ -3299,6 +3309,7 @@ impl Session {
         items
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(item_count = items.len()))]
     pub(crate) async fn persist_rollout_items(&self, items: &[RolloutItem]) {
         if let Some(live_thread) = self.live_thread()
             && let Err(e) = live_thread.append_items(items).await
@@ -3429,17 +3440,19 @@ impl Session {
         &self,
         turn_context: &TurnContext,
         token_usage: Option<&TokenUsage>,
-    ) {
-        self.record_token_usage_info(turn_context, token_usage)
+    ) -> CodexResult<()> {
+        let result = self
+            .record_token_usage_info(turn_context, token_usage)
             .await;
         self.send_token_count_event(turn_context).await;
+        result
     }
 
     pub(crate) async fn record_token_usage_info(
         &self,
         turn_context: &TurnContext,
         token_usage: Option<&TokenUsage>,
-    ) {
+    ) -> CodexResult<()> {
         if let Some(token_usage) = token_usage {
             let token_info = {
                 let mut state = self.state.lock().await;
@@ -3453,7 +3466,7 @@ impl Session {
                 }
                 state.token_info()
             };
-            self.record_rollout_budget_usage(token_usage);
+            let budget_result = self.record_rollout_budget_usage(token_usage);
             if let Some(token_info) = token_info.as_ref() {
                 for contributor in self.services.extensions.token_usage_contributors() {
                     contributor
@@ -3466,7 +3479,9 @@ impl Session {
                         .await;
                 }
             }
+            budget_result?;
         }
+        Ok(())
     }
 
     pub(crate) async fn recompute_token_usage(&self, turn_context: &TurnContext) {
