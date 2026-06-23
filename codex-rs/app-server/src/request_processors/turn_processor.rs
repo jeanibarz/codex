@@ -47,6 +47,7 @@ fn validate_response_item_image_urls(items: &[ResponseItem]) -> Result<(), JSONR
             })
         }
         ResponseItem::Reasoning { .. }
+        | ResponseItem::AdditionalTools { .. }
         | ResponseItem::AgentMessage { .. }
         | ResponseItem::LocalShellCall { .. }
         | ResponseItem::FunctionCall { .. }
