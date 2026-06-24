@@ -25,7 +25,7 @@ use crate::codex_apps::load_startup_cached_codex_apps_tools_snapshot;
 use crate::codex_apps::normalize_codex_apps_callable_name;
 use crate::codex_apps::normalize_codex_apps_callable_namespace;
 use crate::codex_apps::normalize_codex_apps_tool_title;
-use crate::codex_apps::write_cached_codex_apps_tools_if_needed;
+use crate::codex_apps::write_codex_apps_tools_cache;
 use crate::elicitation::ElicitationRequestManager;
 use crate::mcp::CODEX_APPS_MCP_SERVER_NAME;
 use crate::mcp::ToolPluginProvenance;
@@ -67,6 +67,8 @@ use rmcp::model::JsonObject;
 use rmcp::model::ProtocolVersion;
 use rmcp::model::Tool as RmcpTool;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
+use tracing::instrument;
 use tracing::warn;
 
 /// MCP server capability indicating that Codex should include [`SandboxState`]
@@ -141,6 +143,7 @@ pub(crate) struct AsyncManagedClient {
 impl AsyncManagedClient {
     // Keep this constructor flat so the startup inputs remain readable at the
     // single call site instead of introducing a one-off params wrapper.
+    #[instrument(level = "trace", skip_all, fields(server_name = %server_name))]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         server_name: String,
@@ -228,7 +231,7 @@ impl AsyncManagedClient {
             startup_complete_for_fut.store(true, Ordering::Release);
             outcome
         };
-        let client = fut.boxed().shared();
+        let client = fut.in_current_span().boxed().shared();
         if cached_tool_info_snapshot.is_some() {
             let startup_task = client.clone();
             tokio::spawn(async move {
@@ -306,6 +309,7 @@ impl From<anyhow::Error> for StartupOutcomeError {
     }
 }
 
+#[instrument(level = "trace", skip_all, fields(server_name = %server_name))]
 pub(crate) async fn list_tools_for_client_uncached(
     server_name: &str,
     is_codex_apps_mcp_server: bool,
@@ -529,6 +533,7 @@ fn validate_mcp_server_name(server_name: &str) -> Result<()> {
     Ok(())
 }
 
+#[instrument(level = "trace", skip_all, fields(server_name = %server_name))]
 async fn start_server_task(
     server_name: String,
     client: Arc<RmcpClient>,
@@ -581,8 +586,7 @@ async fn start_server_task(
     );
     let server_info = mcp_server_info_from_implementation(initialize_result.server_info);
     let codex_apps_tools_cache_context = if is_codex_apps_mcp_server {
-        write_cached_codex_apps_tools_if_needed(
-            &server_name,
+        write_codex_apps_tools_cache(
             codex_apps_tools_cache_context.as_ref(),
             &server_info,
             &tools,
@@ -659,6 +663,7 @@ struct StartServerTaskParams {
     supports_openai_form_elicitation: bool,
 }
 
+#[instrument(level = "trace", skip_all, fields(server_name = %server_name))]
 async fn make_rmcp_client(
     server_name: &str,
     server: EffectiveMcpServer,

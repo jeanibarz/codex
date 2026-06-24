@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! Extension crate for the `/goal` feature.
 
 mod accounting;
