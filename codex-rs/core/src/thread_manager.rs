@@ -29,6 +29,8 @@ use codex_extension_api::empty_extension_registry;
 use codex_features::Feature;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
+use codex_login::default_client::CODEX_INTERNAL_ORIGINATOR_OVERRIDE_ENV_VAR;
+use codex_login::default_client::originator;
 use codex_model_provider::create_model_provider;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
@@ -190,6 +192,28 @@ pub struct StartThreadOptions {
     pub environments: Vec<TurnEnvironmentSelection>,
     pub thread_extension_init: ExtensionDataInit,
     pub supports_openai_form_elicitation: bool,
+}
+
+fn originator_from_service_name(service_name: Option<&str>) -> Option<String> {
+    let service_name = service_name?.trim();
+    if service_name.eq_ignore_ascii_case("codex_work_desktop") {
+        return Some("codex_work_desktop".to_string());
+    }
+    None
+}
+
+fn effective_originator_value(
+    metrics_service_name: Option<&str>,
+    env_originator: Option<String>,
+    persisted_originator: Option<String>,
+    inherited_originator: Option<String>,
+    default_originator: String,
+) -> String {
+    originator_from_service_name(metrics_service_name)
+        .or(persisted_originator)
+        .or(inherited_originator)
+        .or(env_originator)
+        .unwrap_or(default_originator)
 }
 
 pub(crate) struct ResumeThreadWithHistoryOptions {
@@ -1220,6 +1244,64 @@ impl ThreadManagerState {
         }
     }
 
+    async fn inherited_originator_for_parent_thread(
+        &self,
+        session_source: &SessionSource,
+        parent_thread_id: Option<ThreadId>,
+        forked_from_thread_id: Option<ThreadId>,
+    ) -> Option<String> {
+        let inherited_thread_id = match session_source {
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id, ..
+            }) => Some(*parent_thread_id),
+            _ => parent_thread_id.or(forked_from_thread_id),
+        };
+        let thread = self.get_thread(inherited_thread_id?).await.ok()?;
+        let originator = thread.config_snapshot().await.originator;
+        (!originator.is_empty()).then_some(originator)
+    }
+
+    async fn effective_originator(
+        &self,
+        initial_history: &InitialHistory,
+        metrics_service_name: Option<&str>,
+        session_source: &SessionSource,
+        parent_thread_id: Option<ThreadId>,
+        forked_from_thread_id: Option<ThreadId>,
+    ) -> String {
+        let persisted_originator = initial_history.get_session_originator();
+        let inherited_originator = match initial_history {
+            InitialHistory::New | InitialHistory::Cleared => {
+                self.inherited_originator_for_parent_thread(
+                    session_source,
+                    parent_thread_id,
+                    forked_from_thread_id,
+                )
+                .await
+            }
+            InitialHistory::Forked(_) if persisted_originator.is_none() => {
+                self.inherited_originator_for_parent_thread(
+                    session_source,
+                    parent_thread_id,
+                    forked_from_thread_id,
+                )
+                .await
+            }
+            InitialHistory::Resumed(_) | InitialHistory::Forked(_) => None,
+        };
+
+        let env_originator = std::env::var(CODEX_INTERNAL_ORIGINATOR_OVERRIDE_ENV_VAR)
+            .is_ok()
+            .then(|| originator().value);
+        effective_originator_value(
+            metrics_service_name,
+            env_originator,
+            persisted_originator,
+            inherited_originator,
+            originator().value,
+        )
+    }
+
     /// Spawn a new thread with no history using a provided config.
     pub(crate) async fn spawn_new_thread(
         &self,
@@ -1466,6 +1548,15 @@ impl ThreadManagerState {
                 forked_from_thread_id,
             )
             .await;
+        let originator = self
+            .effective_originator(
+                &initial_history,
+                metrics_service_name.as_deref(),
+                &session_source,
+                parent_thread_id,
+                forked_from_thread_id,
+            )
+            .await;
         let CodexSpawnOk {
             codex, thread_id, ..
         } = Box::pin(Codex::spawn(CodexSpawnArgs {
@@ -1484,6 +1575,7 @@ impl ThreadManagerState {
             forked_from_thread_id,
             parent_thread_id,
             thread_source,
+            originator,
             agent_control,
             dynamic_tools,
             metrics_service_name,
@@ -1602,7 +1694,7 @@ fn stored_thread_to_initial_history(
     })?;
     Ok(InitialHistory::Resumed(ResumedHistory {
         conversation_id: thread_id,
-        history: history.items,
+        history: Arc::new(history.items),
         rollout_path: rollout_path.or(stored_thread.rollout_path),
     }))
 }
@@ -1639,7 +1731,7 @@ fn truncate_before_nth_user_message(
     n: usize,
     snapshot_state: &SnapshotTurnState,
 ) -> InitialHistory {
-    let items: Vec<RolloutItem> = history.get_rollout_items();
+    let items = history.get_rollout_items().to_vec();
     let user_positions = truncation::user_message_positions_in_rollout(&items);
     let rolled = if snapshot_state.ends_mid_turn && n >= user_positions.len() {
         if let Some(cut_idx) = snapshot_state
@@ -1671,7 +1763,7 @@ struct SnapshotTurnState {
 fn snapshot_turn_state(history: &InitialHistory) -> SnapshotTurnState {
     let rollout_items = history.get_rollout_items();
     let mut builder = ThreadHistoryBuilder::new();
-    for item in &rollout_items {
+    for item in rollout_items {
         builder.handle_rollout_item(item);
     }
     let active_turn_id = builder.active_turn_id_if_explicit();
@@ -1695,7 +1787,7 @@ fn snapshot_turn_state(history: &InitialHistory) -> SnapshotTurnState {
         };
     }
 
-    let Some(last_user_position) = truncation::user_message_positions_in_rollout(&rollout_items)
+    let Some(last_user_position) = truncation::user_message_positions_in_rollout(rollout_items)
         .last()
         .copied()
     else {
@@ -1736,7 +1828,9 @@ fn fork_history_from_snapshot(
                 InitialHistory::New => InitialHistory::New,
                 InitialHistory::Cleared => InitialHistory::Cleared,
                 InitialHistory::Forked(history) => InitialHistory::Forked(history),
-                InitialHistory::Resumed(resumed) => InitialHistory::Forked(resumed.history),
+                InitialHistory::Resumed(resumed) => {
+                    InitialHistory::Forked(Arc::unwrap_or_clone(resumed.history))
+                }
             };
             if snapshot_state.ends_mid_turn {
                 append_interrupted_boundary(
@@ -1782,12 +1876,13 @@ fn append_interrupted_boundary(
             history.push(aborted_event);
             InitialHistory::Forked(history)
         }
-        InitialHistory::Resumed(mut resumed) => {
+        InitialHistory::Resumed(resumed) => {
+            let mut history = Arc::unwrap_or_clone(resumed.history);
             if let Some(marker) = interrupted_turn_history_marker(interrupted_marker) {
-                resumed.history.push(RolloutItem::ResponseItem(marker));
+                history.push(RolloutItem::ResponseItem(marker));
             }
-            resumed.history.push(aborted_event);
-            InitialHistory::Forked(resumed.history)
+            history.push(aborted_event);
+            InitialHistory::Forked(history)
         }
     }
 }

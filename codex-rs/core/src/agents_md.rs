@@ -22,7 +22,7 @@ use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::rules::discover_rule_paths;
 use crate::rules::discover_rules;
 use crate::rules::render_rules;
-use codex_app_server_protocol::ConfigLayerSource;
+use codex_config::ConfigLayerSource;
 use codex_config::ConfigLayerStackOrdering;
 use codex_config::default_project_root_markers;
 use codex_config::merge_toml_values;
