@@ -388,6 +388,7 @@ struct LoadedPluginsCache {
 struct PluginLoadCacheKey {
     configured_plugins: HashMap<String, PluginConfig>,
     skill_config_rules: SkillConfigRules,
+    plugin_hooks_enabled: bool,
     remote_global_catalog_active: bool,
 }
 
@@ -396,6 +397,7 @@ impl PluginLoadCacheKey {
         Self {
             configured_plugins: configured_plugins_from_stack(&config.config_layer_stack),
             skill_config_rules: skill_config_rules_from_stack(&config.config_layer_stack),
+            plugin_hooks_enabled: config.plugin_hooks_enabled,
             remote_global_catalog_active,
         }
     }

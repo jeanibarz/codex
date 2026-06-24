@@ -2449,6 +2449,7 @@ fn loaded_plugins_cache_invalidation_rejects_stale_load_completion() {
     let cache_key = PluginLoadCacheKey {
         configured_plugins: HashMap::new(),
         skill_config_rules: SkillConfigRules::default(),
+        plugin_hooks_enabled: false,
         remote_global_catalog_active: false,
     };
     let stale_generation = manager.loaded_plugins_cache_generation();
@@ -2462,6 +2463,75 @@ fn loaded_plugins_cache_invalidation_rejects_stale_load_completion() {
     );
 
     assert_eq!(manager.cached_loaded_plugins(&cache_key), None);
+}
+
+#[tokio::test]
+async fn plugin_cache_distinguishes_hook_loading_flag() {
+    let codex_home = TempDir::new().unwrap();
+    let plugin_root = codex_home
+        .path()
+        .join("plugins/cache")
+        .join("test/sample/local");
+    write_plugin(
+        codex_home.path().join("plugins/cache/test").as_path(),
+        "sample/local",
+        "sample",
+    );
+    write_file(
+        &plugin_root.join("hooks/hooks.json"),
+        r#"{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo startup"
+          }
+        ]
+      }
+    ]
+  }
+}"#,
+    );
+
+    let user_config: toml::Value = toml::from_str(&plugin_config_toml(
+        /*enabled*/ true, /*plugins_feature_enabled*/ true,
+    ))
+    .expect("user config should parse");
+    let stack = ConfigLayerStack::new(
+        vec![ConfigLayerEntry::new(
+            ConfigLayerSource::User {
+                file: AbsolutePathBuf::try_from(codex_home.path().join(CONFIG_TOML_FILE))
+                    .expect("config path should be absolute"),
+                profile: None,
+            },
+            user_config,
+        )],
+        ConfigRequirements::default(),
+        ConfigRequirementsToml::default(),
+    )
+    .expect("config layer stack should build");
+    let config = |plugin_hooks_enabled| {
+        PluginsConfigInput::new(
+            stack.clone(),
+            /*plugins_enabled*/ true,
+            /*remote_plugin_enabled*/ false,
+            plugin_hooks_enabled,
+            "https://chatgpt.com".to_string(),
+        )
+    };
+    let manager = PluginsManager::new(codex_home.path().to_path_buf());
+
+    let hooks_disabled = manager.plugins_for_config(&config(false)).await;
+    let hooks_enabled = manager.plugins_for_config(&config(true)).await;
+
+    assert_eq!(hooks_disabled.plugins()[0].hook_sources, Vec::new());
+    assert_eq!(hooks_enabled.plugins()[0].hook_sources.len(), 1);
+    assert_eq!(
+        hooks_enabled.plugins()[0].hook_sources[0].source_relative_path,
+        "hooks/hooks.json"
+    );
 }
 
 #[tokio::test]
