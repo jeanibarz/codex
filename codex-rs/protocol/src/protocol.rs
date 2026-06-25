@@ -114,6 +114,8 @@ pub const REALTIME_CONVERSATION_OPEN_TAG: &str = "<realtime_conversation>";
 pub const REALTIME_CONVERSATION_CLOSE_TAG: &str = "</realtime_conversation>";
 pub const CONTEXT_WINDOW_OPEN_TAG: &str = "<context_window>";
 pub const CONTEXT_WINDOW_CLOSE_TAG: &str = "</context_window>";
+pub const CONTEXT_WINDOW_GUIDANCE_OPEN_TAG: &str = "<context_window_guidance>";
+pub const CONTEXT_WINDOW_GUIDANCE_CLOSE_TAG: &str = "</context_window_guidance>";
 pub const USER_MESSAGE_BEGIN: &str = "## My request for Codex:";
 
 // TODO(anp): Replace `TurnEnvironmentSelection` with `PathUri` once path URIs carry environment
@@ -486,9 +488,6 @@ pub struct ThreadSettingsOverrides {
     /// EXPERIMENTAL - set a pre-set collaboration mode.
     /// Takes precedence over model, effort, and developer instructions if set.
     pub collaboration_mode: Option<CollaborationMode>,
-
-    /// Updated multi-agent mode for this turn and subsequent turns.
-    pub multi_agent_mode: Option<MultiAgentMode>,
 
     /// Updated personality preference.
     pub personality: Option<Personality>,
@@ -2027,8 +2026,6 @@ pub struct ThreadSettingsSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub personality: Option<Personality>,
     pub collaboration_mode: CollaborationMode,
-    #[serde(default)]
-    pub multi_agent_mode: MultiAgentMode,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq, JsonSchema, TS)]
@@ -2605,7 +2602,9 @@ impl InitialHistory {
                 RolloutItem::SessionMeta(_)
                 | RolloutItem::ResponseItem(_)
                 | RolloutItem::InterAgentCommunication(_)
+                | RolloutItem::InterAgentCommunicationMetadata { .. }
                 | RolloutItem::Compacted(_)
+                | RolloutItem::WorldState(_)
                 | RolloutItem::EventMsg(_) => None,
             })
             .and_then(|turn_context| turn_context.multi_agent_mode)
@@ -2939,7 +2938,9 @@ fn multi_agent_version_from_items(
             RolloutItem::SessionMeta(_)
             | RolloutItem::ResponseItem(_)
             | RolloutItem::InterAgentCommunication(_)
+            | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::Compacted(_)
+            | RolloutItem::WorldState(_)
             | RolloutItem::EventMsg(_) => None,
         })
     })
@@ -3086,11 +3087,34 @@ impl<'de> Deserialize<'de> for SessionMetaLine {
 pub enum RolloutItem {
     SessionMeta(SessionMetaLine),
     ResponseItem(ResponseItem),
-    /// Durable delivery metadata reconstructed as a model-visible `agent_message`.
+    /// Legacy delivery item reconstructed as a model-visible `agent_message`.
     InterAgentCommunication(InterAgentCommunication),
+    /// Local delivery metadata that is not part of the Responses API item.
+    InterAgentCommunicationMetadata {
+        trigger_turn: bool,
+    },
     Compacted(CompactedItem),
     TurnContext(TurnContextItem),
+    WorldState(WorldStateItem),
     EventMsg(EventMsg),
+}
+
+/// Persisted comparison state used to resume model-visible world-state diffing.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema, TS)]
+pub struct WorldStateItem {
+    /// Full snapshots establish a new baseline; patches update the current baseline.
+    pub full: bool,
+    pub state: Value,
+}
+
+impl WorldStateItem {
+    pub fn full(state: Value) -> Self {
+        Self { full: true, state }
+    }
+
+    pub fn patch(state: Value) -> Self {
+        Self { full: false, state }
+    }
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, JsonSchema, TS)]
