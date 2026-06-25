@@ -1,6 +1,7 @@
 use super::*;
-use crate::context::world_state::EnvironmentsState;
+use crate::context::UserInstructions;
 use crate::context::world_state::WorldState;
+use crate::context::world_state::WorldStateSection;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use codex_protocol::AgentPath;
@@ -32,7 +33,6 @@ use image::Luma;
 use image::Rgba;
 use pretty_assertions::assert_eq;
 use regex_lite::Regex;
-use std::sync::Arc;
 
 const EXEC_FORMAT_MAX_BYTES: usize = 10_000;
 const EXEC_FORMAT_MAX_TOKENS: usize = 2_500;
@@ -76,23 +76,51 @@ fn create_history_with_items(items: Vec<ResponseItem>) -> ContextManager {
     h
 }
 
+struct TestWorldStateSection;
+
+impl WorldStateSection for TestWorldStateSection {
+    const ID: &'static str = "test";
+    type Snapshot = bool;
+
+    fn snapshot(&self) -> Self::Snapshot {
+        true
+    }
+
+    fn render_diff(
+        &self,
+        previous: Option<&Self::Snapshot>,
+    ) -> Option<Box<dyn crate::context::ContextualUserFragment>> {
+        (previous != Some(&true)).then(|| {
+            Box::new(UserInstructions {
+                directory: None,
+                text: "test".to_string(),
+            }) as Box<dyn crate::context::ContextualUserFragment>
+        })
+    }
+}
+
 #[test]
 fn world_state_baseline_deduplicates_until_history_is_replaced() {
     let world_state = || {
         let mut state = WorldState::default();
-        state.add_section(EnvironmentsState::from_turn_context_item(
-            &reference_context_item(),
-        ));
-        Arc::new(state)
+        state.add_section(TestWorldStateSection);
+        state
     };
     let mut history = ContextManager::new();
 
-    assert_eq!(1, history.update_world_state(world_state()).len());
-    assert!(history.update_world_state(world_state()).is_empty());
+    let (initial_fragments, initial_item) = history.update_world_state(&world_state());
+    assert_eq!(1, initial_fragments.len());
+    assert!(initial_item.is_some_and(|item| item.full));
+
+    let (unchanged_fragments, unchanged_item) = history.update_world_state(&world_state());
+    assert!(unchanged_fragments.is_empty());
+    assert_eq!(unchanged_item, None);
 
     history.replace(Vec::new());
 
-    assert_eq!(1, history.update_world_state(world_state()).len());
+    let (replacement_fragments, replacement_item) = history.update_world_state(&world_state());
+    assert_eq!(1, replacement_fragments.len());
+    assert!(replacement_item.is_some_and(|item| item.full));
 }
 
 fn user_msg(text: &str) -> ResponseItem {
