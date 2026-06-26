@@ -204,7 +204,6 @@ fn spawn_agent_tool_v1_description_authorizes_skill_workflow_spawns() {
         available_models: vec![model_preset("visible", /*show_in_picker*/ true)],
         agent_type_description: "role help".to_string(),
         hide_agent_type_model_reasoning: false,
-        include_usage_hint: true,
         usage_hint_text: None,
     });
 
