@@ -121,6 +121,13 @@ fn enabled_claude_plugin_root(home_dir: &Path, plugin_key: String) -> Option<Cla
             );
             None
         }
+        MarketplacePluginSource::Npm { .. } => {
+            warn!(
+                plugin = plugin_key,
+                "ignoring Claude enabled plugin because Codex cannot load an npm source directly from Claude settings"
+            );
+            None
+        }
     }
 }
 

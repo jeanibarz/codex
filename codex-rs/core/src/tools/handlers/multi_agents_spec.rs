@@ -675,7 +675,7 @@ This spawn_agent tool provides you access to sub-agents that inherit your curren
 
 Only use `spawn_agent` when one of the following authorizes it:
   (a) the user explicitly asks for sub-agents, delegation, or parallel agent work, OR
-  (b) a skill or workflow you are currently executing explicitly instructs you to spawn sub-agents — for example, a pre-PR review skill that prescribes parallel reviewer-specialist sub-agents, or an agent role definition that names specific sub-agents to invoke.
+  (b) applicable AGENTS.md, skill, or workflow instructions explicitly ask for sub-agents, delegation, or parallel agent work — for example, a pre-PR review skill that prescribes parallel reviewer-specialist sub-agents, or an agent role definition that names specific sub-agents to invoke.
 Requests for depth, thoroughness, research, investigation, or detailed codebase analysis do NOT count as permission to spawn under (a). A loaded skill's "spawn these subagents" instruction DOES count as authorization under (b).
 {agent_role_usage_hint}
 

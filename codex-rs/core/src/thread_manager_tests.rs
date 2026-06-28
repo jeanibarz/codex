@@ -396,6 +396,64 @@ async fn shutdown_all_threads_bounded_submits_shutdown_to_every_thread() {
 }
 
 #[tokio::test]
+async fn code_mode_session_provider_is_shared_across_threads() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config().await;
+    config.codex_home = temp_dir.path().join("codex-home").abs();
+    config.cwd = config.codex_home.abs();
+    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
+
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+    );
+    let first = manager
+        .start_thread(config.clone())
+        .await
+        .expect("start first thread");
+    let second = manager
+        .start_thread(config)
+        .await
+        .expect("start second thread");
+
+    let first_provider = first
+        .thread
+        .codex
+        .session
+        .services
+        .code_mode_service
+        .session_provider();
+    let second_provider = second
+        .thread
+        .codex
+        .session
+        .services
+        .code_mode_service
+        .session_provider();
+    assert!(Arc::ptr_eq(&first_provider, &second_provider));
+    assert!(Arc::ptr_eq(
+        &first_provider,
+        &manager.state.code_mode_session_provider
+    ));
+
+    let mut completed = vec![first.thread_id, second.thread_id];
+    completed.sort_by_key(std::string::ToString::to_string);
+    let report = manager
+        .shutdown_all_threads_bounded(Duration::from_secs(10))
+        .await;
+    assert_eq!(
+        report,
+        ThreadShutdownReport {
+            completed,
+            submit_failed: Vec::new(),
+            timed_out: Vec::new(),
+        }
+    );
+}
+
+#[tokio::test]
 async fn start_thread_keeps_internal_threads_hidden_from_normal_lookups() {
     let temp_dir = tempdir().expect("tempdir");
     let mut config = test_config().await;
@@ -414,6 +472,7 @@ async fn start_thread_keeps_internal_threads_hidden_from_normal_lookups() {
             config,
             allow_provider_model_fallback: false,
             initial_history: InitialHistory::New,
+            history_mode: None,
             session_source: Some(SessionSource::Internal(
                 InternalSessionSource::MemoryConsolidation,
             )),
@@ -557,6 +616,7 @@ async fn start_thread_seeds_extension_data_for_mcp_and_lifecycle_contributors() 
             config: config.clone(),
             allow_provider_model_fallback: false,
             initial_history: InitialHistory::New,
+            history_mode: None,
             session_source: None,
             thread_source: None,
             dynamic_tools: Vec::new(),
@@ -573,6 +633,7 @@ async fn start_thread_seeds_extension_data_for_mcp_and_lifecycle_contributors() 
             config: config.clone(),
             allow_provider_model_fallback: false,
             initial_history: InitialHistory::New,
+            history_mode: None,
             session_source: None,
             thread_source: None,
             dynamic_tools: Vec::new(),
@@ -681,6 +742,7 @@ async fn selected_capability_roots_round_trip_through_fork() {
                     git: None,
                 },
             )]),
+            history_mode: None,
             session_source: None,
             thread_source: None,
             dynamic_tools: Vec::new(),
@@ -752,6 +814,7 @@ async fn resume_and_fork_do_not_restore_thread_environments_from_rollout() {
             config: source_config,
             allow_provider_model_fallback: false,
             initial_history: InitialHistory::New,
+            history_mode: None,
             session_source: None,
             thread_source: None,
             dynamic_tools: Vec::new(),
@@ -1036,6 +1099,7 @@ async fn resume_stopped_thread_from_rollout_preserves_thread_source() {
             config: config.clone(),
             allow_provider_model_fallback: false,
             initial_history: InitialHistory::New,
+            history_mode: None,
             session_source: None,
             thread_source: Some(ThreadSource::User),
             dynamic_tools: Vec::new(),
