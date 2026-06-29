@@ -1062,7 +1062,6 @@ async fn remote_installed_cache_ignores_plugins_missing_local_cache() {
         &codex_home.path().join(CONFIG_TOML_FILE),
         r#"[features]
 plugins = true
-remote_plugin = true
 "#,
     );
 
@@ -1390,7 +1389,6 @@ async fn remote_global_catalog_ignores_local_curated_plugins() {
         &codex_home.path().join(CONFIG_TOML_FILE),
         r#"[features]
 plugins = true
-remote_plugin = true
 
 [plugins."linear@openai-curated"]
 enabled = true
@@ -1441,7 +1439,6 @@ async fn remote_plugin_feature_keeps_local_curated_without_codex_backend() {
         &codex_home.path().join(CONFIG_TOML_FILE),
         r#"[features]
 plugins = true
-remote_plugin = true
 
 [plugins."linear@openai-curated"]
 enabled = true
@@ -5043,7 +5040,6 @@ async fn remote_plugin_caches_refresh_warms_recommended_plugins_cache() {
         &tmp.path().join(CONFIG_TOML_FILE),
         r#"[features]
 plugins = true
-remote_plugin = true
 "#,
     );
 
@@ -5104,7 +5100,6 @@ async fn recommended_plugins_mode_deduplicates_concurrent_cache_misses() {
         &tmp.path().join(CONFIG_TOML_FILE),
         r#"[features]
 plugins = true
-remote_plugin = true
 "#,
     );
 
@@ -5182,7 +5177,6 @@ async fn recommended_plugin_candidates_filter_installed_and_disabled_plugins() {
         &tmp.path().join(CONFIG_TOML_FILE),
         r#"[features]
 plugins = true
-remote_plugin = true
 "#,
     );
     let server = MockServer::start().await;
@@ -5255,7 +5249,6 @@ async fn recommended_plugins_mode_caches_explicit_false() {
         &tmp.path().join(CONFIG_TOML_FILE),
         r#"[features]
 plugins = true
-remote_plugin = true
 "#,
     );
 
@@ -5295,7 +5288,6 @@ async fn recommended_plugins_mode_retries_after_fetch_failure() {
         &tmp.path().join(CONFIG_TOML_FILE),
         r#"[features]
 plugins = true
-remote_plugin = true
 "#,
     );
 

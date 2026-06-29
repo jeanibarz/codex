@@ -149,7 +149,7 @@ pub(crate) async fn load_plugins_config(codex_home: &Path, cwd: &Path) -> Plugin
         feature_enabled(
             &effective_config,
             "remote_plugin",
-            /*default_enabled*/ false,
+            /*default_enabled*/ true,
         ),
         feature_enabled(
             &effective_config,
