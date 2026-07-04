@@ -3078,6 +3078,7 @@ dependencies = [
  "anyhow",
  "codex-login",
  "codex-protocol",
+ "mime_guess",
  "pretty_assertions",
  "sentry",
  "tracing",
