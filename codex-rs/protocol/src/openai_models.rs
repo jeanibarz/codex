@@ -375,7 +375,6 @@ pub struct ModelInfo {
     pub model_messages: Option<ModelMessages>,
     #[serde(default)]
     pub include_skills_usage_instructions: bool,
-    pub supports_reasoning_summaries: bool,
     #[serde(default)]
     pub default_reasoning_summary: ReasoningSummary,
     pub support_verbosity: bool,
@@ -485,6 +484,13 @@ impl ModelInfo {
 pub struct ModelMessages {
     pub instructions_template: Option<String>,
     pub instructions_variables: Option<ModelInstructionsVariables>,
+    pub approvals: Option<ApprovalMessages>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, TS, JsonSchema)]
+pub struct ApprovalMessages {
+    pub on_request: Option<String>,
+    pub on_request_auto_review: Option<String>,
 }
 
 impl ModelMessages {
@@ -671,7 +677,6 @@ mod tests {
             base_instructions: "base".to_string(),
             model_messages: spec,
             include_skills_usage_instructions: false,
-            supports_reasoning_summaries: false,
             default_reasoning_summary: ReasoningSummary::Auto,
             support_verbosity: false,
             default_verbosity: None,
@@ -702,6 +707,37 @@ mod tests {
             personality_friendly: Some("friendly".to_string()),
             personality_pragmatic: Some("pragmatic".to_string()),
         }
+    }
+
+    #[test]
+    fn model_messages_deserialize_without_approvals() {
+        let messages: ModelMessages =
+            from_str(r#"{"instructions_template":null,"instructions_variables":null}"#)
+                .expect("model messages should deserialize");
+
+        assert_eq!(messages.approvals, None);
+    }
+
+    #[test]
+    fn approval_messages_preserve_missing_and_empty_values() {
+        let messages: ModelMessages = from_str(
+            r#"{
+                "instructions_template": null,
+                "instructions_variables": null,
+                "approvals": {
+                    "on_request": ""
+                }
+            }"#,
+        )
+        .expect("approval messages should deserialize");
+
+        assert_eq!(
+            messages.approvals,
+            Some(ApprovalMessages {
+                on_request: Some(String::new()),
+                on_request_auto_review: None,
+            })
+        );
     }
 
     #[test]
@@ -775,6 +811,7 @@ mod tests {
         let model = test_model(Some(ModelMessages {
             instructions_template: Some("Hello {{ personality }}".to_string()),
             instructions_variables: Some(personality_variables()),
+            approvals: None,
         }));
 
         let instructions = model.get_model_instructions(Some(Personality::Friendly));
@@ -791,6 +828,7 @@ mod tests {
                 personality_friendly: Some("friendly".to_string()),
                 personality_pragmatic: None,
             }),
+            approvals: None,
         }));
         assert_eq!(
             model.get_model_instructions(Some(Personality::Friendly)),
@@ -816,6 +854,7 @@ mod tests {
                 personality_friendly: None,
                 personality_pragmatic: None,
             }),
+            approvals: None,
         }));
         assert_eq!(
             model_no_personality.get_model_instructions(Some(Personality::Friendly)),
@@ -844,6 +883,7 @@ mod tests {
                 personality_friendly: None,
                 personality_pragmatic: None,
             }),
+            approvals: None,
         }));
 
         let instructions = model.get_model_instructions(Some(Personality::Friendly));
@@ -939,7 +979,6 @@ mod tests {
             "upgrade": null,
             "base_instructions": "base",
             "model_messages": null,
-            "supports_reasoning_summaries": false,
             "default_reasoning_summary": "auto",
             "support_verbosity": false,
             "default_verbosity": null,

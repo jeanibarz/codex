@@ -21,11 +21,6 @@ const LOCAL_PRAGMATIC_TEMPLATE: &str = "You are a deeply pragmatic, effective so
 const PERSONALITY_PLACEHOLDER: &str = "{{ personality }}";
 
 pub fn with_config_overrides(mut model: ModelInfo, config: &ModelsManagerConfig) -> ModelInfo {
-    if let Some(supports_reasoning_summaries) = config.model_supports_reasoning_summaries
-        && supports_reasoning_summaries
-    {
-        model.supports_reasoning_summaries = true;
-    }
     if let Some(context_window) = config.model_context_window {
         model.context_window = Some(
             model
@@ -54,12 +49,22 @@ pub fn with_config_overrides(mut model: ModelInfo, config: &ModelsManagerConfig)
 
     if let Some(base_instructions) = &config.base_instructions {
         model.base_instructions = base_instructions.clone();
-        model.model_messages = None;
+        clear_instruction_messages(&mut model);
     } else if !config.personality_enabled {
-        model.model_messages = None;
+        clear_instruction_messages(&mut model);
     }
 
     model
+}
+
+fn clear_instruction_messages(model: &mut ModelInfo) {
+    if let Some(model_messages) = &mut model.model_messages {
+        model_messages.instructions_template = None;
+        model_messages.instructions_variables = None;
+        if model_messages.approvals.is_none() {
+            model.model_messages = None;
+        }
+    }
 }
 
 /// Build a minimal fallback model descriptor for missing/unknown slugs.
@@ -83,7 +88,6 @@ pub fn model_info_from_slug(slug: &str) -> ModelInfo {
         base_instructions: BASE_INSTRUCTIONS.to_string(),
         model_messages: local_personality_messages_for_slug(slug),
         include_skills_usage_instructions: false,
-        supports_reasoning_summaries: false,
         default_reasoning_summary: ReasoningSummary::Auto,
         support_verbosity: false,
         default_verbosity: None,
@@ -119,6 +123,7 @@ fn local_personality_messages_for_slug(slug: &str) -> Option<ModelMessages> {
                 personality_friendly: Some(LOCAL_FRIENDLY_TEMPLATE.to_string()),
                 personality_pragmatic: Some(LOCAL_PRAGMATIC_TEMPLATE.to_string()),
             }),
+            approvals: None,
         }),
         _ => None,
     }

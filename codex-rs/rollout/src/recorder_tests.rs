@@ -71,6 +71,18 @@ fn write_session_file(root: &Path, ts: &str, uuid: Uuid) -> std::io::Result<Path
     Ok(path)
 }
 
+#[test]
+fn append_repair_terminates_nonempty_rollout_tail() -> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let rollout_path = home.path().join("rollout.jsonl");
+    fs::write(&rollout_path, b"{\"type\":\"event_msg\"}")?;
+    drop(open_log_file(&rollout_path)?);
+    drop(open_log_file(&rollout_path)?);
+
+    assert_eq!(fs::read(&rollout_path)?, b"{\"type\":\"event_msg\"}\n");
+    Ok(())
+}
+
 #[tokio::test]
 async fn state_db_init_backfills_before_returning() -> anyhow::Result<()> {
     let home = TempDir::new().expect("temp dir");
@@ -1212,6 +1224,7 @@ async fn resume_candidate_matches_cwd_reads_latest_turn_context() -> std::io::Re
             current_date: None,
             timezone: None,
             approval_policy: AskForApproval::Never,
+            approvals_reviewer: None,
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
             permission_profile: None,
             network: None,

@@ -51,9 +51,13 @@ use tokio::time::timeout;
 use toml::Value as TomlValue;
 
 async fn test_config_with_cli_overrides(
-    cli_overrides: Vec<(String, TomlValue)>,
+    mut cli_overrides: Vec<(String, TomlValue)>,
 ) -> (TempDir, Config) {
     let home = TempDir::new().expect("create temp dir");
+    cli_overrides.push((
+        "model".to_string(),
+        TomlValue::String("gpt-5.5".to_string()),
+    ));
     let config = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(home.path().to_path_buf())
         .cli_overrides(cli_overrides)
@@ -345,6 +349,7 @@ async fn on_event_updates_status_from_task_started() {
 async fn on_event_updates_status_from_task_complete() {
     let status = agent_status_from_event(&EventMsg::TurnComplete(TurnCompleteEvent {
         turn_id: "turn-1".to_string(),
+        started_at: None,
         last_agent_message: Some("done".to_string()),
         completed_at: None,
         duration_ms: None,
@@ -369,6 +374,7 @@ async fn on_event_updates_status_from_error() {
 async fn on_event_updates_status_from_turn_aborted() {
     let status = agent_status_from_event(&EventMsg::TurnAborted(TurnAbortedEvent {
         turn_id: Some("turn-1".to_string()),
+        started_at: None,
         reason: TurnAbortReason::Interrupted,
         completed_at: None,
         duration_ms: None,
@@ -2021,6 +2027,7 @@ async fn multi_agent_v2_completion_ignores_dead_direct_parent() {
             tester_turn.as_ref(),
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: tester_turn.sub_id.clone(),
+                started_at: None,
                 last_agent_message: Some("done".to_string()),
                 completed_at: None,
                 duration_ms: None,
@@ -2108,6 +2115,7 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
             tester_turn.as_ref(),
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: tester_turn.sub_id.clone(),
+                started_at: None,
                 last_agent_message: Some("done".to_string()),
                 completed_at: None,
                 duration_ms: None,
