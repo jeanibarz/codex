@@ -350,11 +350,16 @@ pub(crate) fn hook_event_name_label(event_name: HookEventName) -> &'static str {
         HookEventName::PostToolUse => "PostToolUse",
         HookEventName::PreCompact => "PreCompact",
         HookEventName::PostCompact => "PostCompact",
+        HookEventName::PostToolUseFailure => "PostToolUseFailure",
+        HookEventName::Notification => "Notification",
         HookEventName::SessionStart => "SessionStart",
+        HookEventName::SessionEnd => "SessionEnd",
         HookEventName::UserPromptSubmit => "UserPromptSubmit",
         HookEventName::SubagentStart => "SubagentStart",
         HookEventName::SubagentStop => "SubagentStop",
         HookEventName::Stop => "Stop",
+        HookEventName::StopFailure => "StopFailure",
+        HookEventName::FileChanged => "FileChanged",
     }
 }
 
@@ -387,6 +392,7 @@ pub(crate) fn hook_source_label(source: codex_protocol::protocol::HookSource) ->
         codex_protocol::protocol::HookSource::Project => "project",
         codex_protocol::protocol::HookSource::Mdm => "mdm",
         codex_protocol::protocol::HookSource::SessionFlags => "session_flags",
+        codex_protocol::protocol::HookSource::SupervisorSettings => "supervisor_settings",
         codex_protocol::protocol::HookSource::Plugin => "plugin",
         codex_protocol::protocol::HookSource::CloudRequirements => "cloud_requirements",
         codex_protocol::protocol::HookSource::CloudManagedConfig => "cloud_managed_config",
