@@ -537,26 +537,6 @@ impl Codex {
         } = args;
         let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
         let (tx_event, rx_event) = async_channel::unbounded();
-        let fs = inherited_environments
-            .as_ref()
-            .and_then(TurnEnvironmentSnapshot::primary_filesystem);
-        let plugins_input = config.plugins_config_input();
-        let plugin_outcome = plugins_manager.plugins_for_config(&plugins_input).await;
-        let effective_skill_roots =
-            include_cli_plugin_skill_roots(&config, plugin_outcome.effective_plugin_skill_roots());
-        let plugin_skill_snapshots =
-            plugins_manager.plugin_skill_snapshots_for_config(&plugins_input);
-        let skills_input = skills_load_input_from_config(&config, effective_skill_roots)
-            .with_plugin_skill_snapshots(plugin_skill_snapshots);
-        let skills_snapshot = skills_service.snapshot_for_config(&skills_input, fs).await;
-
-        for err in &skills_snapshot.outcome().errors {
-            error!(
-                "failed to load skill {}: {}",
-                err.path.display(),
-                err.message
-            );
-        }
 
         let LoadedUserInstructions {
             instructions: user_instructions,
@@ -3817,6 +3797,16 @@ impl Session {
     pub(crate) async fn set_dependency_env(&self, values: HashMap<String, String>) {
         let mut state = self.state.lock().await;
         state.set_dependency_env(values);
+    }
+
+    pub(crate) async fn session_end_hook_fields(&self) -> (PathBuf, String, AskForApproval) {
+        let state = self.state.lock().await;
+        let session_configuration = &state.session_configuration;
+        (
+            session_configuration.cwd().to_path_buf(),
+            session_configuration.collaboration_mode.model().to_string(),
+            session_configuration.approval_policy.value(),
+        )
     }
 
     pub(crate) async fn set_server_reasoning_included(&self, included: bool) {

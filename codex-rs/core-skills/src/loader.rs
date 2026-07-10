@@ -405,12 +405,14 @@ async fn repo_agents_skill_roots(
     let dirs = dirs_between_project_root_and_cwd(cwd, &project_root);
     let mut roots = Vec::new();
     let skills_roots = dirs
-        .iter()
-        .map(|dir| dir.join(AGENTS_DIR_NAME).join(SKILLS_DIR_NAME))
-        .chain(
-            dirs.iter()
-                .map(|dir| dir.join(CLAUDE_DIR_NAME).join(SKILLS_DIR_NAME)),
-        );
+        .into_iter()
+        .flat_map(|dir| {
+            [
+                dir.join(AGENTS_DIR_NAME).join(SKILLS_DIR_NAME),
+                dir.join(CLAUDE_DIR_NAME).join(SKILLS_DIR_NAME),
+            ]
+        })
+        .collect::<Vec<_>>();
     let mut results = futures::stream::iter(skills_roots)
         .map(|skills_root| {
             let fs = Arc::clone(&fs);
