@@ -16,8 +16,13 @@ use std::path::Path;
 use std::path::PathBuf;
 use toml::Value as TomlValue;
 
-const GPT_5_4_MODEL: &str = "gpt-5.4";
-const GPT_5_4_MINI_MODEL: &str = "gpt-5.4-mini";
+const GPT_5_6_SOL_MODEL: &str = "gpt-5.6-sol";
+const GPT_5_6_TERRA_MODEL: &str = "gpt-5.6-terra";
+const GPT_5_6_LUNA_MODEL: &str = "gpt-5.6-luna";
+
+#[cfg(test)]
+#[path = "agent_roles_tests.rs"]
+mod tests;
 
 #[derive(Debug, Default, Deserialize)]
 struct ClaudeAgentFrontmatter {
@@ -731,10 +736,12 @@ fn extract_claude_agent_frontmatter(
 fn normalize_claude_agent_model_name(model: &str) -> String {
     let trimmed = model.trim();
     let lower = trimmed.to_ascii_lowercase();
-    if lower.contains("haiku") {
-        GPT_5_4_MINI_MODEL.to_string()
-    } else if lower.contains("sonnet") || lower.contains("opus") {
-        GPT_5_4_MODEL.to_string()
+    if lower.contains("opus") {
+        GPT_5_6_SOL_MODEL.to_string()
+    } else if lower.contains("sonnet") {
+        GPT_5_6_TERRA_MODEL.to_string()
+    } else if lower.contains("haiku") {
+        GPT_5_6_LUNA_MODEL.to_string()
     } else {
         trimmed.to_string()
     }
