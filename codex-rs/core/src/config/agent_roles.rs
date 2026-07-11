@@ -1,9 +1,9 @@
 use super::AgentRoleConfig;
-use codex_config::ConfigLayerStack;
-use codex_config::ConfigLayerStackOrdering;
 use codex_config::config_toml::AgentRoleToml;
 use codex_config::config_toml::AgentsToml;
 use codex_config::config_toml::ConfigToml;
+use codex_config::ConfigLayerStack;
+use codex_config::ConfigLayerStackOrdering;
 use codex_exec_server::ExecutorFileSystem;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::AbsolutePathBufGuard;
@@ -16,9 +16,13 @@ use std::path::Path;
 use std::path::PathBuf;
 use toml::Value as TomlValue;
 
-const GPT_5_6_SOL_MODEL: &str = "gpt-5.6-sol";
-const GPT_5_6_TERRA_MODEL: &str = "gpt-5.6-terra";
 const GPT_5_6_LUNA_MODEL: &str = "gpt-5.6-luna";
+
+#[derive(Clone, Copy)]
+struct ClaudeAgentModelMapping {
+    model: &'static str,
+    reasoning_effort: &'static str,
+}
 
 #[cfg(test)]
 #[path = "agent_roles_tests.rs"]
@@ -666,13 +670,20 @@ fn parse_claude_agent_role_file_contents(
         "developer_instructions".to_string(),
         TomlValue::String(developer_instructions.to_string()),
     );
-    if let Some(model) = parsed
+    if let Some(raw_model) = parsed
         .model
         .as_deref()
-        .map(normalize_claude_agent_model_name)
-        .filter(|model: &String| !model.is_empty())
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
     {
+        let model = normalize_claude_agent_model_name(raw_model);
         config.insert("model".to_string(), TomlValue::String(model));
+        if let Some(reasoning_effort) = claude_agent_model_reasoning_effort(raw_model) {
+            config.insert(
+                "model_reasoning_effort".to_string(),
+                TomlValue::String(reasoning_effort.to_string()),
+            );
+        }
     }
 
     Ok(ResolvedAgentRoleFile {
@@ -735,14 +746,33 @@ fn extract_claude_agent_frontmatter(
 
 fn normalize_claude_agent_model_name(model: &str) -> String {
     let trimmed = model.trim();
-    let lower = trimmed.to_ascii_lowercase();
+    claude_agent_model_mapping(trimmed)
+        .map(|mapping| mapping.model.to_string())
+        .unwrap_or_else(|| trimmed.to_string())
+}
+
+fn claude_agent_model_reasoning_effort(model: &str) -> Option<&'static str> {
+    claude_agent_model_mapping(model).map(|mapping| mapping.reasoning_effort)
+}
+
+fn claude_agent_model_mapping(model: &str) -> Option<ClaudeAgentModelMapping> {
+    let lower = model.to_ascii_lowercase();
     if lower.contains("opus") {
-        GPT_5_6_SOL_MODEL.to_string()
+        Some(ClaudeAgentModelMapping {
+            model: GPT_5_6_LUNA_MODEL,
+            reasoning_effort: "max",
+        })
     } else if lower.contains("sonnet") {
-        GPT_5_6_TERRA_MODEL.to_string()
+        Some(ClaudeAgentModelMapping {
+            model: GPT_5_6_LUNA_MODEL,
+            reasoning_effort: "high",
+        })
     } else if lower.contains("haiku") {
-        GPT_5_6_LUNA_MODEL.to_string()
+        Some(ClaudeAgentModelMapping {
+            model: GPT_5_6_LUNA_MODEL,
+            reasoning_effort: "medium",
+        })
     } else {
-        trimmed.to_string()
+        None
     }
 }
