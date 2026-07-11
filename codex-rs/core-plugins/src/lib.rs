@@ -46,6 +46,7 @@ pub use loader::PluginHookLoadOutcome;
 pub use manager::ConfiguredMarketplace;
 pub use manager::ConfiguredMarketplaceListOutcome;
 pub use manager::ConfiguredMarketplacePlugin;
+pub use manager::EffectivePluginsChange;
 pub use manager::PluginDetail;
 pub use manager::PluginDetailsUnavailableReason;
 pub use manager::PluginInstallError;
