@@ -364,6 +364,16 @@ impl ThreadManager {
         }
     }
 
+    pub(crate) fn with_code_mode_host_program_for_tests(mut self, host_program: PathBuf) -> Self {
+        let Some(state) = Arc::get_mut(&mut self.state) else {
+            unreachable!("new thread manager state should not be shared");
+        };
+        state.code_mode_session_provider = Arc::new(
+            ProcessOwnedCodeModeSessionProvider::with_host_program(host_program),
+        );
+        self
+    }
+
     /// Construct with a dummy AuthManager containing the provided CodexAuth.
     /// Used for integration tests: should not be used by ordinary business logic.
     pub(crate) fn with_models_provider_for_tests(
@@ -532,10 +542,14 @@ impl ThreadManager {
         self.state.models_manager.clone()
     }
 
-    pub async fn list_models(&self, refresh_strategy: RefreshStrategy) -> Vec<ModelPreset> {
+    pub async fn list_models(
+        &self,
+        refresh_strategy: RefreshStrategy,
+        http_client_factory: codex_http_client::HttpClientFactory,
+    ) -> Vec<ModelPreset> {
         self.state
             .models_manager
-            .list_models(refresh_strategy)
+            .list_models(refresh_strategy, http_client_factory)
             .await
     }
 
@@ -1772,6 +1786,7 @@ fn truncate_before_nth_user_message(
 struct SnapshotTurnState {
     ends_mid_turn: bool,
     active_turn_id: Option<String>,
+    active_turn_started_at: Option<i64>,
     active_turn_start_index: Option<usize>,
 }
 
@@ -1791,6 +1806,7 @@ fn snapshot_turn_state(history: &InitialHistory) -> SnapshotTurnState {
             return SnapshotTurnState {
                 ends_mid_turn: false,
                 active_turn_id: None,
+                active_turn_started_at: None,
                 active_turn_start_index: None,
             };
         }
@@ -1798,6 +1814,7 @@ fn snapshot_turn_state(history: &InitialHistory) -> SnapshotTurnState {
         return SnapshotTurnState {
             ends_mid_turn: true,
             active_turn_id,
+            active_turn_started_at: active_turn_snapshot.and_then(|turn| turn.started_at),
             active_turn_start_index: builder.active_turn_start_index(),
         };
     }
@@ -1809,6 +1826,7 @@ fn snapshot_turn_state(history: &InitialHistory) -> SnapshotTurnState {
         return SnapshotTurnState {
             ends_mid_turn: false,
             active_turn_id: None,
+            active_turn_started_at: None,
             active_turn_start_index: None,
         };
     };
@@ -1824,6 +1842,7 @@ fn snapshot_turn_state(history: &InitialHistory) -> SnapshotTurnState {
             )
         }),
         active_turn_id: None,
+        active_turn_started_at: None,
         active_turn_start_index: None,
     }
 }
@@ -1851,6 +1870,7 @@ fn fork_history_from_snapshot(
                 append_interrupted_boundary(
                     history,
                     snapshot_state.active_turn_id,
+                    snapshot_state.active_turn_started_at,
                     interrupted_marker,
                 )
             } else {
@@ -1866,11 +1886,13 @@ fn fork_history_from_snapshot(
 fn append_interrupted_boundary(
     history: InitialHistory,
     turn_id: Option<String>,
+    started_at: Option<i64>,
     interrupted_marker: InterruptedTurnHistoryMarker,
 ) -> InitialHistory {
     let aborted_event = RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
         turn_id,
         reason: TurnAbortReason::Interrupted,
+        started_at,
         completed_at: None,
         duration_ms: None,
     }));

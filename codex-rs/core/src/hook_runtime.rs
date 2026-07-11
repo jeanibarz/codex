@@ -776,7 +776,11 @@ fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str); 
 }
 
 fn hook_permission_mode(turn_context: &TurnContext) -> String {
-    match turn_context.approval_policy.value() {
+    hook_permission_mode_for_approval(turn_context.approval_policy.value())
+}
+
+fn hook_permission_mode_for_approval(approval_policy: AskForApproval) -> String {
+    match approval_policy {
         AskForApproval::Never => "bypassPermissions",
         AskForApproval::UnlessTrusted | AskForApproval::OnRequest | AskForApproval::Granular(_) => {
             "default"
@@ -888,13 +892,13 @@ pub(crate) async fn run_session_end_hooks(
     sub_id: String,
     reason: SessionEndReason,
 ) {
-    let turn_context = sess.new_default_turn_with_sub_id(sub_id.clone()).await;
+    let (cwd, model, approval_policy) = sess.session_end_hook_fields().await;
     let request = SessionEndRequest {
         session_id: sess.thread_id,
-        cwd: turn_context.cwd.to_path_buf(),
+        cwd,
         transcript_path: sess.hook_transcript_path().await,
-        model: turn_context.model_info.slug.clone(),
-        permission_mode: hook_permission_mode(&turn_context),
+        model,
+        permission_mode: hook_permission_mode_for_approval(approval_policy),
         reason,
     };
 

@@ -6728,6 +6728,7 @@
         "enum": [
           "auto",
           "prompt",
+          "writes",
           "approve"
         ],
         "type": "string"
@@ -6947,6 +6948,13 @@
             "description": "[UNSTABLE] FOR OPENAI INTERNAL USE ONLY - DO NOT USE.\n\nChatGPT auth tokens are supplied by an external host app and are only stored in memory. Token refresh must be handled by the external host app.",
             "enum": [
               "chatgptAuthTokens"
+            ],
+            "type": "string"
+          },
+          {
+            "description": "Backend auth supplied as request headers.",
+            "enum": [
+              "headers"
             ],
             "type": "string"
           },
@@ -8688,6 +8696,13 @@
       "ConsumeAccountRateLimitResetCreditParams": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
+          "creditId": {
+            "description": "Opaque reset-credit identifier to redeem. When omitted, the backend selects the next available credit.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "idempotencyKey": {
             "description": "Identifies one logical reset attempt. A UUID is recommended; reuse the same value when retrying that attempt.",
             "type": "string"
@@ -11502,6 +11517,17 @@
           },
           {
             "properties": {
+              "appBrand": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/v2/LoginAppBrand"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
               "codexStreamlinedLogin": {
                 "type": "boolean"
               },
@@ -11511,6 +11537,9 @@
                 ],
                 "title": "Chatgptv2::LoginAccountParamsType",
                 "type": "string"
+              },
+              "useHostedLoginSuccessPage": {
+                "type": "boolean"
               }
             },
             "required": [
@@ -11567,6 +11596,31 @@
               "type"
             ],
             "title": "ChatgptAuthTokensv2::LoginAccountParams",
+            "type": "object"
+          },
+          {
+            "description": "[UNSTABLE] Managed Amazon Bedrock login is experimental.",
+            "properties": {
+              "apiKey": {
+                "type": "string"
+              },
+              "region": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "amazonBedrock"
+                ],
+                "title": "AmazonBedrockv2::LoginAccountParamsType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "apiKey",
+              "region",
+              "type"
+            ],
+            "title": "AmazonBedrockv2::LoginAccountParams",
             "type": "object"
           }
         ],
@@ -11661,9 +11715,32 @@
             ],
             "title": "ChatgptAuthTokensv2::LoginAccountResponse",
             "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "enum": [
+                  "amazonBedrock"
+                ],
+                "title": "AmazonBedrockv2::LoginAccountResponseType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "AmazonBedrockv2::LoginAccountResponse",
+            "type": "object"
           }
         ],
         "title": "LoginAccountResponse"
+      },
+      "LoginAppBrand": {
+        "enum": [
+          "codex",
+          "chatgpt"
+        ],
+        "type": "string"
       },
       "LogoutAccountResponse": {
         "$schema": "http://json-schema.org/draft-07/schema#",
@@ -13343,6 +13420,15 @@
             },
             "type": "array"
           },
+          "scheduledTasks": {
+            "items": {
+              "$ref": "#/definitions/v2/ScheduledTaskSummary"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "shareUrl": {
             "type": [
               "string",
@@ -13419,6 +13505,13 @@
           "NOT_AVAILABLE",
           "AVAILABLE",
           "INSTALLED_BY_DEFAULT"
+        ],
+        "type": "string"
+      },
+      "PluginInstallPolicySource": {
+        "enum": [
+          "WORKSPACE_SETTING",
+          "IMPLICIT_CANONICAL_APP"
         ],
         "type": "string"
       },
@@ -14305,6 +14398,16 @@
           "installPolicy": {
             "$ref": "#/definitions/v2/PluginInstallPolicy"
           },
+          "installPolicySource": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/PluginInstallPolicySource"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "installed": {
             "type": "boolean"
           },
@@ -14539,17 +14642,91 @@
         ],
         "type": "string"
       },
+      "RateLimitResetCredit": {
+        "properties": {
+          "description": {
+            "description": "Backend-provided display description for this credit, or `null` when unavailable.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expiresAt": {
+            "description": "Unix timestamp in seconds when the credit expires, or `null` if it does not expire.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "grantedAt": {
+            "description": "Unix timestamp in seconds when the credit was granted.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "description": "Opaque backend identifier for this reset credit.",
+            "type": "string"
+          },
+          "resetType": {
+            "$ref": "#/definitions/v2/RateLimitResetType"
+          },
+          "status": {
+            "$ref": "#/definitions/v2/RateLimitResetCreditStatus"
+          },
+          "title": {
+            "description": "Backend-provided display title for this credit, or `null` when unavailable.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "grantedAt",
+          "id",
+          "resetType",
+          "status"
+        ],
+        "type": "object"
+      },
+      "RateLimitResetCreditStatus": {
+        "enum": [
+          "available",
+          "redeeming",
+          "redeemed",
+          "unknown"
+        ],
+        "type": "string"
+      },
       "RateLimitResetCreditsSummary": {
         "properties": {
           "availableCount": {
             "format": "int64",
             "type": "integer"
+          },
+          "credits": {
+            "description": "Detail rows for available reset credits, when the backend provides them.\n\n`null` means only `availableCount` is known, while an empty array means details were fetched and no available credits were returned. The backend may cap this list, so its length can be less than `availableCount`.",
+            "items": {
+              "$ref": "#/definitions/v2/RateLimitResetCredit"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
           }
         },
         "required": [
           "availableCount"
         ],
         "type": "object"
+      },
+      "RateLimitResetType": {
+        "enum": [
+          "codexRateLimits",
+          "unknown"
+        ],
+        "type": "string"
       },
       "RateLimitSnapshot": {
         "properties": {
@@ -16244,6 +16421,143 @@
           }
         },
         "type": "object"
+      },
+      "ScheduledTaskSchedule": {
+        "oneOf": [
+          {
+            "properties": {
+              "days": {
+                "items": {
+                  "$ref": "#/definitions/v2/ScheduledTaskWeekday"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
+              "intervalHours": {
+                "format": "uint32",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "type": {
+                "enum": [
+                  "hourly"
+                ],
+                "title": "HourlyScheduledTaskScheduleType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "intervalHours",
+              "type"
+            ],
+            "title": "HourlyScheduledTaskSchedule",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "time": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "daily"
+                ],
+                "title": "DailyScheduledTaskScheduleType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "time",
+              "type"
+            ],
+            "title": "DailyScheduledTaskSchedule",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "time": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "weekdays"
+                ],
+                "title": "WeekdaysScheduledTaskScheduleType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "time",
+              "type"
+            ],
+            "title": "WeekdaysScheduledTaskSchedule",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "days": {
+                "items": {
+                  "$ref": "#/definitions/v2/ScheduledTaskWeekday"
+                },
+                "type": "array"
+              },
+              "time": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "weekly"
+                ],
+                "title": "WeeklyScheduledTaskScheduleType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "days",
+              "time",
+              "type"
+            ],
+            "title": "WeeklyScheduledTaskSchedule",
+            "type": "object"
+          }
+        ]
+      },
+      "ScheduledTaskSummary": {
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "schedule": {
+            "$ref": "#/definitions/v2/ScheduledTaskSchedule"
+          }
+        },
+        "required": [
+          "key",
+          "name",
+          "prompt",
+          "schedule"
+        ],
+        "type": "object"
+      },
+      "ScheduledTaskWeekday": {
+        "enum": [
+          "MO",
+          "TU",
+          "WE",
+          "TH",
+          "FR",
+          "SA",
+          "SU"
+        ],
+        "type": "string"
       },
       "SelectedCapabilityRoot": {
         "description": "A user-selected root that can expose one or more runtime capabilities.",

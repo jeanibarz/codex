@@ -11,6 +11,8 @@ use codex_analytics::SkillInvocation;
 use codex_analytics::build_track_events_context;
 use codex_core_plugins::loader::load_plugin_hooks;
 use codex_core_plugins::manifest::load_plugin_manifest;
+use codex_extension_api::SkillInvocationInput;
+use codex_extension_api::SkillInvocationKind;
 use codex_plugin::PluginHookSource;
 use codex_plugin::PluginId;
 use codex_protocol::protocol::SkillScope;
@@ -297,6 +299,19 @@ pub(crate) async fn maybe_emit_implicit_skill_invocation(
     };
     if !inserted {
         return;
+    }
+
+    for contributor in sess.services.extensions.skill_invocation_contributors() {
+        contributor
+            .on_skill_invocation(SkillInvocationInput {
+                session_store: &sess.services.session_extension_data,
+                thread_store: &sess.services.thread_extension_data,
+                turn_store: turn_context.extension_data.as_ref(),
+                turn_id: turn_context.sub_id.as_str(),
+                skill_resource: skill_path.as_ref(),
+                kind: SkillInvocationKind::Implicit,
+            })
+            .await;
     }
 
     turn_context.session_telemetry.counter(
