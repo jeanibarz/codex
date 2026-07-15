@@ -1319,7 +1319,7 @@ impl PluginsManager {
                 self.track_plugin_install_failed(
                     &plugin_id,
                     plugin_install_error_type(&err),
-                    plugin_install_sub_error_type(&err),
+                    err.sub_error_type(),
                     err.to_string(),
                 );
                 Err(err)
@@ -1382,7 +1382,7 @@ impl PluginsManager {
             self.track_plugin_install_failed(
                 &resolved.plugin_id,
                 plugin_install_error_type(&err),
-                plugin_install_sub_error_type(&err),
+                err.sub_error_type(),
                 err.to_string(),
             );
             return Err(err);
@@ -1394,7 +1394,7 @@ impl PluginsManager {
                 self.track_plugin_install_failed(
                     &plugin_id,
                     plugin_install_error_type(&err),
-                    plugin_install_sub_error_type(&err),
+                    err.sub_error_type(),
                     err.to_string(),
                 );
                 Err(err)
@@ -1457,6 +1457,7 @@ impl PluginsManager {
                 self.telemetry_metadata_for_plugin_id(plugin_id),
                 self.plugin_install_source,
                 error_type.to_string(),
+                sub_error_type,
             );
         }
     }
@@ -2735,6 +2736,13 @@ impl PluginInstallError {
             ) | Self::Store(PluginStoreError::Invalid(_))
         )
     }
+
+    pub fn sub_error_type(&self) -> Option<String> {
+        match self {
+            Self::Store(err) => err.sub_error_type(),
+            Self::Marketplace(_) | Self::Remote(_) | Self::Config(_) | Self::Join(_) => None,
+        }
+    }
 }
 
 fn plugin_install_error_type(err: &PluginInstallError) -> &'static str {
@@ -2744,16 +2752,6 @@ fn plugin_install_error_type(err: &PluginInstallError) -> &'static str {
         PluginInstallError::Store(err) => plugin_store_error_type(err),
         PluginInstallError::Config(_) => "config",
         PluginInstallError::Join(_) => "join",
-    }
-}
-
-fn plugin_install_sub_error_type(err: &PluginInstallError) -> Option<String> {
-    match err {
-        PluginInstallError::Store(err) => err.sub_error_type(),
-        PluginInstallError::Marketplace(_)
-        | PluginInstallError::Remote(_)
-        | PluginInstallError::Config(_)
-        | PluginInstallError::Join(_) => None,
     }
 }
 

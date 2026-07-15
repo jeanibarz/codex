@@ -135,6 +135,7 @@ pub fn strip_user_message_prefix(text: &str) -> &str {
 pub struct TurnEnvironmentSelection {
     pub environment_id: String,
     pub cwd: PathUri,
+    pub workspace_roots: Vec<PathUri>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -210,9 +211,9 @@ pub struct ConversationStartParams {
     pub codex_responses_as_items: bool,
     /// Optional prefix added to automatic Codex response items when `codex_responses_as_items` is set.
     pub codex_response_item_prefix: Option<String>,
-    /// Optional prefix added to automatic V1 Codex commentary sent with
-    /// `conversation.handoff.append` when `codex_responses_as_items` is not set. Final answers are
-    /// sent without the prefix.
+    /// Optional prefix added to automatic V1 or V3 Codex commentary sent through the selected
+    /// Bidi handoff wire event when `codex_responses_as_items` is not set. Final answers are sent
+    /// without the prefix.
     pub codex_response_handoff_prefix: Option<String>,
     /// Overrides the configured realtime model for this session only.
     pub model: Option<String>,
@@ -453,10 +454,6 @@ pub struct ConversationSpeechParams {
 pub struct ThreadSettingsOverrides {
     /// Updated fallback `cwd` and environments supplied together as a complete pair.
     pub environments: Option<TurnEnvironmentSelections>,
-
-    /// Updated runtime workspace roots used to materialize symbolic
-    /// `:workspace_roots` filesystem permissions.
-    pub workspace_roots: Option<Vec<AbsolutePathBuf>>,
 
     /// Updated profile-defined workspace roots for status summaries and
     /// per-turn config reconstruction.
@@ -1271,6 +1268,11 @@ pub struct Event {
     pub msg: EventMsg,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct EnvironmentConnectionEvent {
+    pub environment_id: String,
+}
+
 /// Response event from the agent
 /// NOTE: Make sure none of these values have optional types, as it will mess up the extension code-gen.
 #[derive(Debug, Clone, Deserialize, Serialize, Display, JsonSchema, TS)]
@@ -1353,6 +1355,12 @@ pub enum EventMsg {
 
     /// Ack the client's configure message.
     SessionConfigured(SessionConfiguredEvent),
+
+    /// A selected environment completed its connection handshake.
+    EnvironmentConnected(EnvironmentConnectionEvent),
+
+    /// A selected environment lost its established connection.
+    EnvironmentDisconnected(EnvironmentConnectionEvent),
 
     /// Updated long-running goal metadata for the thread.
     ThreadGoalUpdated(ThreadGoalUpdatedEvent),
@@ -1443,6 +1451,7 @@ pub enum EventMsg {
     ExitedReviewMode(ExitedReviewModeEvent),
 
     RawResponseItem(RawResponseItemEvent),
+    RawResponseCompleted(RawResponseCompletedEvent),
 
     ItemStarted(ItemStartedEvent),
     ItemCompleted(ItemCompletedEvent),
@@ -1618,6 +1627,7 @@ pub enum RealtimeConversationVersion {
     V1,
     #[default]
     V2,
+    V3,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
@@ -1803,6 +1813,15 @@ impl CodexErrorInfo {
 #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
 pub struct RawResponseItemEvent {
     pub item: ResponseItem,
+}
+
+/// Exact usage reported by one upstream Responses API completion.
+///
+/// Unlike TokenCountEvent, this is not accumulated, estimated, or replayed.
+#[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
+pub struct RawResponseCompletedEvent {
+    pub response_id: String,
+    pub token_usage: Option<TokenUsage>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
@@ -2123,6 +2142,8 @@ pub struct RateLimitSnapshot {
     pub secondary: Option<RateLimitWindow>,
     pub credits: Option<CreditsSnapshot>,
     pub individual_limit: Option<SpendControlLimitSnapshot>,
+    /// Backend-reported spend-control state. `None` is unavailable, not a sparse-update recovery.
+    pub spend_control_reached: Option<bool>,
     pub plan_type: Option<crate::account::PlanType>,
     pub rate_limit_reached_type: Option<RateLimitReachedType>,
 }
@@ -2468,6 +2489,10 @@ pub struct WebSearchEndEvent {
     pub call_id: String,
     pub query: String,
     pub action: WebSearchAction,
+    /// Structured search results returned out-of-band by standalone web search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub results: Option<Vec<Value>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
@@ -5108,6 +5133,7 @@ mod tests {
                     query: Some("find docs".into()),
                     queries: None,
                 },
+                results: None,
             }),
             started_at_ms: 0,
         };

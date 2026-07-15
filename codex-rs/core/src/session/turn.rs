@@ -29,7 +29,7 @@ use crate::injection::ToolMentionKind;
 use crate::injection::app_id_from_path;
 use crate::injection::tool_kind_for_path;
 use crate::mcp_skill_dependencies::maybe_prompt_and_install_mcp_dependencies;
-use crate::mcp_tool_exposure::build_mcp_tool_exposure;
+use crate::mcp_tool_exposure::build_mcp_tool_runtimes;
 use crate::mentions::build_connector_slug_counts;
 use crate::mentions::build_skill_name_counts;
 use crate::mentions::collect_explicit_app_ids;
@@ -102,6 +102,7 @@ use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::PlanDeltaEvent;
+use codex_protocol::protocol::RawResponseCompletedEvent;
 use codex_protocol::protocol::ReasoningContentDeltaEvent;
 use codex_protocol::protocol::ReasoningRawContentDeltaEvent;
 use codex_protocol::protocol::SafetyBufferingEvent;
@@ -338,17 +339,19 @@ pub(crate) async fn run_turn(
                     "post sampling token usage"
                 );
 
+                let should_roll_over = needs_follow_up
+                    && (sess.take_new_context_window_request().await || token_limit_reached);
+                let allow_auto_compact_fallback = !should_roll_over && !token_limit_reached;
                 super::token_budget::maybe_record(
                     sess.as_ref(),
                     turn_context.as_ref(),
-                    token_status.tokens_until_compaction,
+                    token_status.base_window_tokens_remaining,
+                    allow_auto_compact_fallback,
                 )
                 .await;
 
                 // as long as compaction works well in getting us way below the token limit, we shouldn't worry about being in an infinite loop.
-                if needs_follow_up
-                    && (sess.take_new_context_window_request().await || token_limit_reached)
-                {
+                if should_roll_over {
                     if let Err(err) = run_auto_compact(
                         &sess,
                         Arc::clone(&step_context),
@@ -815,7 +818,7 @@ async fn track_turn_resolved_config_analytics(
             approval_policy: turn_context.approval_policy.value(),
             approvals_reviewer: turn_context.config.approvals_reviewer,
             sandbox_network_access: turn_context.network_sandbox_policy().is_enabled(),
-            collaboration_mode: turn_context.collaboration_mode.mode,
+            collaboration_mode: turn_context.mode,
             personality: turn_context.personality,
             workspace_kind: turn_context.turn_metadata_state.workspace_kind(),
             is_first_turn,
@@ -1248,8 +1251,6 @@ pub(crate) async fn built_tools(
     cancellation_token: &CancellationToken,
 ) -> CodexResult<Arc<ToolRouter>> {
     let turn_context = step_context.turn.as_ref();
-    let mcp_connection_manager = step_context.mcp.manager();
-    let has_mcp_servers = mcp_connection_manager.has_servers();
     let all_mcp_tools = step_context
         .mcp_tools()
         .or_cancel(cancellation_token)
@@ -1356,19 +1357,16 @@ pub(crate) async fn built_tools(
             .instrument(trace_span!("built_tools.load_discoverable_tools"))
             .await
         };
-    let mcp_tool_exposure = build_mcp_tool_exposure(
+    let mcp_tool_runtimes = build_mcp_tool_runtimes(
         all_mcp_tools,
         connectors.as_deref(),
         &turn_context.config,
         search_tool_enabled(turn_context),
     );
-    let mcp_tools = has_mcp_servers.then_some(mcp_tool_exposure.direct_tools);
-    let deferred_mcp_tools = mcp_tool_exposure.deferred_tools;
     Ok(Arc::new(ToolRouter::from_context(
         step_context,
         ToolRouterParams {
-            mcp_tools,
-            deferred_mcp_tools,
+            tool_runtimes: mcp_tool_runtimes,
             tool_suggest_candidates,
             extension_tool_executors: extension_tool_executors(sess),
             dynamic_tools: turn_context.dynamic_tools.as_slice(),
@@ -1583,6 +1581,8 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<(String, Option<
         | EventMsg::AgentReasoningRawContent(_)
         | EventMsg::AgentReasoningSectionBreak(_)
         | EventMsg::SessionConfigured(_)
+        | EventMsg::EnvironmentConnected(_)
+        | EventMsg::EnvironmentDisconnected(_)
         | EventMsg::ThreadGoalUpdated(_)
         | EventMsg::McpStartupUpdate(_)
         | EventMsg::McpStartupComplete(_)
@@ -1618,6 +1618,7 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<(String, Option<
         | EventMsg::EnteredReviewMode(_)
         | EventMsg::ExitedReviewMode(_)
         | EventMsg::RawResponseItem(_)
+        | EventMsg::RawResponseCompleted(_)
         | EventMsg::ItemStarted(_)
         | EventMsg::HookStarted(_)
         | EventMsg::HookCompleted(_)
@@ -2020,7 +2021,7 @@ async fn try_run_sampling_request(
     let mut should_emit_turn_diff = false;
     let mut should_emit_token_count = false;
     let reasoning_effort = turn_context.effective_reasoning_effort_for_tracing();
-    let plan_mode = turn_context.collaboration_mode.mode == ModeKind::Plan;
+    let plan_mode = turn_context.mode == ModeKind::Plan;
     let mut assistant_message_stream_parsers = AssistantMessageStreamParsers::new(plan_mode);
     let mut plan_mode_state = plan_mode.then(|| PlanModeStreamState::new(&turn_context.sub_id));
     let defer_streamed_turn_items_for_contributors =
@@ -2303,15 +2304,23 @@ async fn try_run_sampling_request(
                     .await;
             }
             ResponseEvent::Completed {
+                response_id,
                 token_usage,
                 end_turn,
-                ..
             } => {
                 flush_assistant_text_segments_all(
                     &sess,
                     &turn_context,
                     plan_mode_state.as_mut(),
                     &mut assistant_message_stream_parsers,
+                )
+                .await;
+                sess.send_event(
+                    &turn_context,
+                    EventMsg::RawResponseCompleted(RawResponseCompletedEvent {
+                        response_id,
+                        token_usage: token_usage.clone(),
+                    }),
                 )
                 .await;
                 let budget_result = sess

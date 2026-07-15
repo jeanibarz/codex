@@ -956,6 +956,13 @@ client_request_definitions! {
         serialization: global_shared_read("environment"),
         response: v2::EnvironmentInfoResponse,
     },
+    #[experimental("environment/status")]
+    /// Reads the current status of a configured execution environment.
+    EnvironmentStatus => "environment/status" {
+        params: v2::EnvironmentStatusParams,
+        serialization: global_shared_read("environment"),
+        response: v2::EnvironmentStatusResponse,
+    },
 
     McpServerOauthLogin => "mcpServer/oauth/login" {
         params: v2::McpServerOauthLoginParams,
@@ -1623,6 +1630,10 @@ server_notification_definitions! {
     ThreadNameUpdated => "thread/name/updated" (v2::ThreadNameUpdatedNotification),
     ThreadGoalUpdated => "thread/goal/updated" (v2::ThreadGoalUpdatedNotification),
     ThreadGoalCleared => "thread/goal/cleared" (v2::ThreadGoalClearedNotification),
+    #[experimental("thread/environment/connected")]
+    EnvironmentConnected => "thread/environment/connected" (v2::EnvironmentConnectionNotification),
+    #[experimental("thread/environment/disconnected")]
+    EnvironmentDisconnected => "thread/environment/disconnected" (v2::EnvironmentConnectionNotification),
     #[experimental("thread/settings/updated")]
     ThreadSettingsUpdated => "thread/settings/updated" (v2::ThreadSettingsUpdatedNotification),
     ThreadTokenUsageUpdated => "thread/tokenUsage/updated" (v2::ThreadTokenUsageUpdatedNotification),
@@ -1638,6 +1649,8 @@ server_notification_definitions! {
     ItemCompleted => "item/completed" (v2::ItemCompletedNotification),
     /// This event is internal-only. Used by Codex Cloud.
     RawResponseItemCompleted => "rawResponseItem/completed" (v2::RawResponseItemCompletedNotification),
+    /// This event is internal-only. Used by clients that need exact upstream usage.
+    RawResponseCompleted => "rawResponse/completed" (v2::RawResponseCompletedNotification),
     AgentMessageDelta => "item/agentMessage/delta" (v2::AgentMessageDeltaNotification),
     /// EXPERIMENTAL - proposed plan streaming deltas for plan items.
     PlanDelta => "item/plan/delta" (v2::PlanDeltaNotification),
@@ -1707,6 +1720,25 @@ server_notification_definitions! {
     #[strum(serialize = "account/login/completed")]
     AccountLoginCompleted(v2::AccountLoginCompletedNotification),
 
+}
+
+/// Server notification envelope sent over app-server transports.
+///
+/// `emitted_at_ms` records when app-server emitted the notification, before it
+/// is fanned out to individual connections.
+#[derive(Serialize, Deserialize, Debug, Clone, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerNotificationEnvelope {
+    #[serde(flatten)]
+    pub notification: ServerNotification,
+    /// Unix timestamp (in milliseconds) when app-server emitted this notification.
+    ///
+    /// Optional so clients can decode notifications from older app-server
+    /// versions. Current app-server versions always populate it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    #[ts(type = "number")]
+    pub emitted_at_ms: Option<i64>,
 }
 
 client_notification_definitions! {
@@ -3272,7 +3304,7 @@ mod tests {
                 prompt: Some(Some("You are on a call".to_string())),
                 realtime_session_id: Some("sess_456".to_string()),
                 transport: None,
-                version: Some(RealtimeConversationVersion::V1),
+                version: Some(RealtimeConversationVersion::V3),
                 voice: Some(RealtimeVoice::Marin),
             },
         };
@@ -3293,7 +3325,7 @@ mod tests {
                     "prompt": "You are on a call",
                     "realtimeSessionId": "sess_456",
                     "transport": null,
-                    "version": "v1",
+                    "version": "v3",
                     "voice": "marin"
                 }
             }),
