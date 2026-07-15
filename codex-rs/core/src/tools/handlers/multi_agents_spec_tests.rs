@@ -196,8 +196,13 @@ fn spawn_agent_tool_caps_visible_model_summaries() {
         usage_hint_text: None,
     });
 
-    let ToolSpec::Function(ResponsesApiTool { description, .. }) = tool else {
-        panic!("spawn_agent should be a function tool");
+    let ToolSpec::Namespace(namespace) = tool else {
+        panic!("spawn_agent v1 should be a namespace tool");
+    };
+    let Some(ResponsesApiNamespaceTool::Function(ResponsesApiTool { description, .. })) =
+        namespace.tools.first()
+    else {
+        panic!("spawn_agent should be a namespace function tool");
     };
 
     for model in ["first", "second", "third", "fourth", "fifth"] {
@@ -221,6 +226,8 @@ fn spawn_agent_tool_v1_description_authorizes_skill_workflow_spawns() {
         available_models: vec![model_preset("visible", /*show_in_picker*/ true)],
         agent_type_description: "role help".to_string(),
         hide_agent_type_model_reasoning: false,
+        expose_spawn_agent_model_overrides: true,
+        multi_agent_version: MultiAgentVersion::V1,
         usage_hint_text: None,
     });
 

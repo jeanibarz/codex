@@ -442,7 +442,7 @@ fn apply_patch_accepts_environment_id(spec: &ToolSpec) -> bool {
 #[tokio::test]
 async fn request_user_input_tool_respects_experimental_config_gate() {
     let enabled = probe(|turn| {
-        turn.collaboration_mode.mode = ModeKind::Plan;
+        turn.mode = ModeKind::Plan;
     })
     .await;
     enabled.assert_visible_contains(&["request_user_input"]);
@@ -453,7 +453,7 @@ async fn request_user_input_tool_respects_experimental_config_gate() {
     );
 
     let disabled = probe(|turn| {
-        turn.collaboration_mode.mode = ModeKind::Plan;
+        turn.mode = ModeKind::Plan;
         update_config(turn, |config| {
             config.experimental_request_user_input_enabled = false;
         });
