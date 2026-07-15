@@ -715,7 +715,7 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut
         planned_tools.add_with_exposure(
             RequestUserInputHandler {
                 available_modes: request_user_input_available_modes(features),
-                active_mode: Some(turn_context.collaboration_mode.mode),
+                active_mode: Some(turn_context.collaboration_mode().mode),
             },
             ToolExposure::DirectModelOnly,
         );
