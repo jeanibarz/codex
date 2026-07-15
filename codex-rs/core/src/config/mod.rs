@@ -249,6 +249,7 @@ Payload:
 ```
 You may also see them addressed as to=/root/..., which indicates your identity is /root/...
 "#;
+const DEFAULT_MULTI_AGENT_V2_MODEL_OVERRIDE_USAGE_HINT_TEXT: &str = "Full-history forks (`fork_turns` omitted or `\"all\"`) inherit the parent model and reasoning effort and do not accept overrides. Only set `model` or `reasoning_effort` when explicitly requested by the user, applicable `AGENTS.md` instructions, or skill instructions; when doing so, set `fork_turns` to `\"none\"` or a positive integer string.";
 const DEFAULT_MULTI_AGENT_V2_TOOL_NAMESPACE: &str = "collaboration";
 const DEFAULT_MULTI_AGENT_V2_SHARED_USAGE_HINT_TEXT: &str = r#"Note that collaboration tools cannot be called from inside `functions.exec`. Call `spawn_agent`, `send_message`, `followup_task`, `wait_agent`, `interrupt_agent`, and `list_agents` only as direct tool calls using the recipient shown in their tool definitions, such as `to=functions.collaboration.spawn_agent`, since they are intentionally absent from the `functions.exec` `tools.*` namespace. Available tools in `functions.exec` are explicitly described with a `tools` namespace in the developer message.
 
@@ -599,6 +600,56 @@ fn build_network_proxy_spec(
     } else {
         network.enabled().then_some(network)
     })
+}
+
+pub fn validate_windows_sandbox_network_proxy_compatibility(
+    windows_sandbox_level: WindowsSandboxLevel,
+    network_proxy_configured: bool,
+) -> std::io::Result<()> {
+    validate_windows_sandbox_network_proxy_compatibility_for_platform(
+        cfg!(target_os = "windows"),
+        windows_sandbox_level,
+        network_proxy_configured,
+    )
+}
+
+fn validate_windows_sandbox_network_proxy_compatibility_for_platform(
+    is_windows: bool,
+    windows_sandbox_level: WindowsSandboxLevel,
+    network_proxy_configured: bool,
+) -> std::io::Result<()> {
+    if is_windows
+        && network_proxy_configured
+        && windows_sandbox_level != WindowsSandboxLevel::Elevated
+    {
+        return Err(ConstraintError::NetworkProxyIncompatibleWithUnelevatedWindowsSandbox.into());
+    }
+    Ok(())
+}
+
+fn validate_windows_network_proxy_requirements(
+    requirements: &ConfigRequirementsToml,
+    network_proxy_configured: bool,
+) -> std::io::Result<()> {
+    validate_windows_network_proxy_requirements_for_platform(
+        cfg!(target_os = "windows"),
+        requirements,
+        network_proxy_configured,
+    )
+}
+
+fn validate_windows_network_proxy_requirements_for_platform(
+    is_windows: bool,
+    requirements: &ConfigRequirementsToml,
+    network_proxy_configured: bool,
+) -> std::io::Result<()> {
+    if is_windows
+        && network_proxy_configured
+        && !requirements.allows_only_elevated_windows_sandbox()
+    {
+        return Err(ConstraintError::NetworkProxyRequiresElevatedWindowsSandboxRequirement.into());
+    }
+    Ok(())
 }
 
 /// Configured thread persistence backend.
@@ -1103,12 +1154,25 @@ pub(crate) const DEFAULT_TOKEN_BUDGET_REMINDER_MESSAGE_TEMPLATE: &str = concat!(
 );
 const TOKEN_BUDGET_REMINDER_MESSAGE_TEMPLATE_MAX_BYTES: usize = 2000;
 const TOKEN_BUDGET_GUIDANCE_MESSAGE_MAX_BYTES: usize = 2000;
+const AUTO_COMPACT_FALLBACK_PROMPT_MAX_BYTES: usize = 2000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TokenBudgetConfig {
     pub reminder_threshold_tokens: Option<i64>,
     pub reminder_message_template: String,
     pub guidance_message: Option<String>,
+    pub auto_compact_fallback_prompt: Option<String>,
+    pub auto_compact_fallback_buffer_tokens: Option<i64>,
+}
+
+impl TokenBudgetConfig {
+    pub(crate) fn fallback_buffer_tokens(&self) -> i64 {
+        if self.auto_compact_fallback_prompt.is_some() {
+            self.auto_compact_fallback_buffer_tokens.unwrap_or(0)
+        } else {
+            0
+        }
+    }
 }
 
 impl Default for TokenBudgetConfig {
@@ -1117,6 +1181,8 @@ impl Default for TokenBudgetConfig {
             reminder_threshold_tokens: None,
             reminder_message_template: DEFAULT_TOKEN_BUDGET_REMINDER_MESSAGE_TEMPLATE.to_string(),
             guidance_message: None,
+            auto_compact_fallback_prompt: None,
+            auto_compact_fallback_buffer_tokens: None,
         }
     }
 }
@@ -1161,6 +1227,7 @@ pub struct MultiAgentV2Config {
     pub multi_agent_mode_hint_text: Option<String>,
     pub tool_namespace: Option<String>,
     pub hide_spawn_agent_metadata: bool,
+    pub expose_spawn_agent_model_overrides: bool,
     pub non_code_mode_only: bool,
 }
 
@@ -1183,6 +1250,7 @@ impl MultiAgentV2Config {
             multi_agent_mode_hint_text: None,
             tool_namespace: Some(DEFAULT_MULTI_AGENT_V2_TOOL_NAMESPACE.to_string()),
             hide_spawn_agent_metadata: true,
+            expose_spawn_agent_model_overrides: true,
             non_code_mode_only: true,
         }
     }
@@ -1236,6 +1304,12 @@ impl AuthManagerConfig for Config {
     fn auth_route_config(&self) -> Option<AuthRouteConfig> {
         Config::auth_route_config(self)
     }
+}
+
+#[derive(Clone, Copy)]
+enum ConfigBuildPhase {
+    CloudConfigBootstrap,
+    Authoritative,
 }
 
 #[derive(Clone, Default)]
@@ -1296,10 +1370,15 @@ impl ConfigBuilder {
 
     pub async fn build(self) -> std::io::Result<Config> {
         // Keep the large config-loading future off small runtime thread stacks.
-        Box::pin(self.build_inner()).await
+        Box::pin(self.build_inner(ConfigBuildPhase::Authoritative)).await
     }
 
-    async fn build_inner(self) -> std::io::Result<Config> {
+    /// Builds the preliminary config needed to initialize cloud config loading.
+    pub async fn build_for_cloud_config_bootstrap(self) -> std::io::Result<Config> {
+        Box::pin(self.build_inner(ConfigBuildPhase::CloudConfigBootstrap)).await
+    }
+
+    async fn build_inner(self, build_phase: ConfigBuildPhase) -> std::io::Result<Config> {
         let Self {
             codex_home,
             cli_overrides,
@@ -1384,12 +1463,13 @@ impl ConfigBuilder {
                 config_layer_stack.requirements().clone(),
                 config_layer_stack.requirements_toml().clone(),
             )?;
-            let mut config = Config::load_config_with_layer_stack(
+            let mut config = Config::load_config_with_layer_stack_and_options(
                 LOCAL_FS.as_ref(),
                 lock_config_toml,
                 harness_overrides,
                 codex_home,
                 lock_config_layer_stack,
+                build_phase,
             )
             .await?;
             config.config_lock_toml = Some(Arc::new(expected_lock_config));
@@ -1398,12 +1478,13 @@ impl ConfigBuilder {
                 save_fields_resolved_from_model_catalog;
             return Ok(config);
         }
-        Config::load_config_with_layer_stack(
+        Config::load_config_with_layer_stack_and_options(
             LOCAL_FS.as_ref(),
             config_toml,
             harness_overrides,
             codex_home,
             config_layer_stack,
+            build_phase,
         )
         .await
     }
@@ -2544,13 +2625,31 @@ fn resolve_multi_agent_v2_config(config_toml: &ConfigToml) -> MultiAgentV2Config
         .and_then(|config| config.usage_hint_text.as_ref())
         .cloned()
         .or(default.usage_hint_text);
+    let hide_spawn_agent_metadata = base
+        .and_then(|config| config.hide_spawn_agent_metadata)
+        .unwrap_or(default.hide_spawn_agent_metadata);
+    let expose_spawn_agent_model_overrides = base
+        .and_then(|config| config.expose_spawn_agent_model_overrides)
+        .unwrap_or(default.expose_spawn_agent_model_overrides);
+    let mut default_root_agent_usage_hint_text = default.root_agent_usage_hint_text;
+    let mut default_subagent_usage_hint_text = default.subagent_usage_hint_text;
+    if expose_spawn_agent_model_overrides {
+        default_root_agent_usage_hint_text = Some(append_usage_hint_text(
+            default_root_agent_usage_hint_text.as_deref(),
+            DEFAULT_MULTI_AGENT_V2_MODEL_OVERRIDE_USAGE_HINT_TEXT,
+        ));
+        default_subagent_usage_hint_text = Some(append_usage_hint_text(
+            default_subagent_usage_hint_text.as_deref(),
+            DEFAULT_MULTI_AGENT_V2_MODEL_OVERRIDE_USAGE_HINT_TEXT,
+        ));
+    }
     let root_agent_usage_hint_text = resolve_optional_prompt_text(
         base.map(|config| &config.root_agent_usage_hint_text),
-        default.root_agent_usage_hint_text,
+        default_root_agent_usage_hint_text,
     );
     let subagent_usage_hint_text = resolve_optional_prompt_text(
         base.map(|config| &config.subagent_usage_hint_text),
-        default.subagent_usage_hint_text,
+        default_subagent_usage_hint_text,
     );
     let multi_agent_mode_hint_text = base
         .and_then(|config| config.multi_agent_mode_hint_text.as_ref())
@@ -2560,9 +2659,6 @@ fn resolve_multi_agent_v2_config(config_toml: &ConfigToml) -> MultiAgentV2Config
         .and_then(|config| config.tool_namespace.as_ref())
         .cloned()
         .or(default.tool_namespace);
-    let hide_spawn_agent_metadata = base
-        .and_then(|config| config.hide_spawn_agent_metadata)
-        .unwrap_or(default.hide_spawn_agent_metadata);
     let non_code_mode_only = base
         .and_then(|config| config.non_code_mode_only)
         .unwrap_or(default.non_code_mode_only);
@@ -2578,6 +2674,7 @@ fn resolve_multi_agent_v2_config(config_toml: &ConfigToml) -> MultiAgentV2Config
         multi_agent_mode_hint_text,
         tool_namespace,
         hide_spawn_agent_metadata,
+        expose_spawn_agent_model_overrides,
         non_code_mode_only,
     }
 }
@@ -2633,10 +2730,44 @@ fn resolve_token_budget_config(
         ));
     }
 
+    let auto_compact_fallback_prompt = token_budget_config
+        .and_then(|config| config.auto_compact_fallback_prompt.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if auto_compact_fallback_prompt
+        .as_ref()
+        .is_some_and(|prompt| prompt.len() > AUTO_COMPACT_FALLBACK_PROMPT_MAX_BYTES)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "features.token_budget.auto_compact_fallback_prompt must not exceed {AUTO_COMPACT_FALLBACK_PROMPT_MAX_BYTES} bytes"
+            ),
+        ));
+    }
+
+    let auto_compact_fallback_buffer_tokens =
+        token_budget_config.and_then(|config| config.auto_compact_fallback_buffer_tokens);
+    if auto_compact_fallback_prompt.is_some() && auto_compact_fallback_buffer_tokens.is_none() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "features.token_budget.auto_compact_fallback_buffer_tokens is required when auto_compact_fallback_prompt is set",
+        ));
+    }
+    if auto_compact_fallback_buffer_tokens.is_some_and(|tokens| tokens <= 0) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "features.token_budget.auto_compact_fallback_buffer_tokens must be positive",
+        ));
+    }
+
     Ok(Some(TokenBudgetConfig {
         reminder_threshold_tokens,
         reminder_message_template,
         guidance_message,
+        auto_compact_fallback_prompt,
+        auto_compact_fallback_buffer_tokens,
     }))
 }
 
@@ -2759,6 +2890,13 @@ fn resolve_optional_prompt_text(
         Some(Some(value)) if value.is_empty() => None,
         Some(Some(value)) => Some(value.clone()),
         Some(None) | None => default,
+    }
+}
+
+fn append_usage_hint_text(usage_hint_text: Option<&str>, additional_text: &str) -> String {
+    match usage_hint_text {
+        Some(usage_hint_text) => format!("{usage_hint_text}\n\n{additional_text}"),
+        None => additional_text.to_string(),
     }
 }
 
@@ -2969,6 +3107,25 @@ impl Config {
         overrides: ConfigOverrides,
         codex_home: AbsolutePathBuf,
         config_layer_stack: ConfigLayerStack,
+    ) -> std::io::Result<Self> {
+        Self::load_config_with_layer_stack_and_options(
+            fs,
+            cfg,
+            overrides,
+            codex_home,
+            config_layer_stack,
+            ConfigBuildPhase::Authoritative,
+        )
+        .await
+    }
+
+    async fn load_config_with_layer_stack_and_options(
+        fs: &dyn ExecutorFileSystem,
+        cfg: ConfigToml,
+        overrides: ConfigOverrides,
+        codex_home: AbsolutePathBuf,
+        config_layer_stack: ConfigLayerStack,
+        build_phase: ConfigBuildPhase,
     ) -> std::io::Result<Self> {
         // Keep the large config-construction future off small test thread stacks.
         Box::pin(async move {
@@ -3768,6 +3925,17 @@ impl Config {
             network_requirements,
             &network_permission_profile,
         )?;
+        if matches!(build_phase, ConfigBuildPhase::Authoritative) {
+            let network_proxy_enabled = network.as_ref().is_some_and(NetworkProxySpec::enabled);
+            validate_windows_network_proxy_requirements(
+                config_layer_stack.requirements_toml(),
+                network_proxy_enabled,
+            )?;
+            validate_windows_sandbox_network_proxy_compatibility(
+                windows_sandbox_level,
+                network_proxy_enabled,
+            )?;
+        }
         let mut helper_readable_roots = get_readable_roots_required_for_codex_runtime(
             &codex_home,
             zsh_path.as_ref(),
@@ -4168,11 +4336,21 @@ impl Config {
             NetworkProxyConfig::default()
         };
 
-        build_network_proxy_spec(
+        let network = build_network_proxy_spec(
             configured_network_proxy_config,
             self.config_layer_stack.requirements().network.clone(),
             permission_profile,
-        )
+        )?;
+        let network_proxy_enabled = network.as_ref().is_some_and(NetworkProxySpec::enabled);
+        validate_windows_network_proxy_requirements(
+            self.config_layer_stack.requirements_toml(),
+            network_proxy_enabled,
+        )?;
+        validate_windows_sandbox_network_proxy_compatibility(
+            WindowsSandboxLevel::from_config(self),
+            network_proxy_enabled,
+        )?;
+        Ok(network)
     }
 
     pub fn bundled_skills_enabled(&self) -> bool {
