@@ -196,13 +196,8 @@ fn spawn_agent_tool_caps_visible_model_summaries() {
         usage_hint_text: None,
     });
 
-    let ToolSpec::Namespace(namespace) = tool else {
-        panic!("spawn_agent v1 should be a namespace tool");
-    };
-    let Some(ResponsesApiNamespaceTool::Function(ResponsesApiTool { description, .. })) =
-        namespace.tools.first()
-    else {
-        panic!("spawn_agent should be a namespace function tool");
+    let ToolSpec::Function(ResponsesApiTool { description, .. }) = tool else {
+        panic!("spawn_agent should be a function tool");
     };
 
     for model in ["first", "second", "third", "fourth", "fifth"] {
@@ -231,8 +226,13 @@ fn spawn_agent_tool_v1_description_authorizes_skill_workflow_spawns() {
         usage_hint_text: None,
     });
 
-    let ToolSpec::Function(ResponsesApiTool { description, .. }) = tool else {
-        panic!("spawn_agent should be a function tool");
+    let ToolSpec::Namespace(namespace) = tool else {
+        panic!("spawn_agent v1 should be a namespace tool");
+    };
+    let Some(ResponsesApiNamespaceTool::Function(ResponsesApiTool { description, .. })) =
+        namespace.tools.first()
+    else {
+        panic!("spawn_agent should be a namespace function tool");
     };
 
     assert!(
