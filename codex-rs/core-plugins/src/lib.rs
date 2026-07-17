@@ -1,8 +1,8 @@
 mod app_mcp_routing;
 pub mod claude;
 mod claude_loader;
-mod config_layer_compat;
 mod command_migration;
+mod config_layer_compat;
 mod discoverable;
 pub mod installed_marketplaces;
 pub mod loader;
