@@ -735,6 +735,11 @@ client_request_definitions! {
         serialization: global("config"),
         response: v2::PluginShareDeleteResponse,
     },
+    AppsRead => "app/read" {
+        params: v2::AppsReadParams,
+        serialization: None,
+        response: v2::AppsReadResponse,
+    },
     AppsList => "app/list" {
         params: v2::AppsListParams,
         serialization: None,
@@ -1750,7 +1755,6 @@ mod tests {
     use super::*;
     use anyhow::Result;
     use codex_protocol::ThreadId;
-    use codex_protocol::account::AmazonBedrockCredentialSource;
     use codex_protocol::account::PlanType;
     use codex_protocol::config_types::MultiAgentMode;
     use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_READ_ONLY;
@@ -2990,35 +2994,35 @@ mod tests {
         );
 
         let codex_managed_bedrock = v2::Account::AmazonBedrock {
-            credential_source: AmazonBedrockCredentialSource::CodexManaged,
+            uses_codex_managed_credentials: true,
         };
         assert_eq!(
             json!({
                 "type": "amazonBedrock",
-                "credentialSource": "codexManaged",
+                "usesCodexManagedCredentials": true,
             }),
             serde_json::to_value(&codex_managed_bedrock)?,
         );
 
-        let aws_managed_bedrock = v2::Account::AmazonBedrock {
-            credential_source: AmazonBedrockCredentialSource::AwsManaged,
+        let externally_managed_bedrock = v2::Account::AmazonBedrock {
+            uses_codex_managed_credentials: false,
         };
         assert_eq!(
             json!({
                 "type": "amazonBedrock",
-                "credentialSource": "awsManaged",
+                "usesCodexManagedCredentials": false,
             }),
-            serde_json::to_value(&aws_managed_bedrock)?,
+            serde_json::to_value(&externally_managed_bedrock)?,
         );
 
         Ok(())
     }
 
     #[test]
-    fn account_defaults_legacy_bedrock_credential_source() -> Result<()> {
+    fn account_defaults_legacy_bedrock_managed_credentials_flag() -> Result<()> {
         assert_eq!(
             v2::Account::AmazonBedrock {
-                credential_source: AmazonBedrockCredentialSource::AwsManaged,
+                uses_codex_managed_credentials: false,
             },
             serde_json::from_value(json!({
                 "type": "amazonBedrock",
@@ -3097,6 +3101,26 @@ mod tests {
                     "limit": null,
                     "threadId": null
                 }
+            }),
+            serde_json::to_value(&request)?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_read_apps() -> Result<()> {
+        let request = ClientRequest::AppsRead {
+            request_id: RequestId::Integer(9),
+            params: v2::AppsReadParams {
+                app_ids: vec!["app-a".to_string(), "app-b".to_string()],
+                include_tools: true,
+            },
+        };
+        assert_eq!(
+            json!({
+                "method": "app/read",
+                "id": 9,
+                "params": { "appIds": ["app-a", "app-b"], "includeTools": true }
             }),
             serde_json::to_value(&request)?,
         );
