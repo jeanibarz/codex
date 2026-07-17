@@ -26,11 +26,6 @@ use tracing::warn;
 
 use crate::process_config_overrides::apply_process_settings_file;
 
-#[derive(Clone, Copy)]
-enum ConfigLoadPhase {
-    CloudConfigBootstrap,
-    Authoritative,
-}
 /// Shared app-server entry point for loading effective Codex configuration.
 #[derive(Clone)]
 pub(crate) struct ConfigManager {
