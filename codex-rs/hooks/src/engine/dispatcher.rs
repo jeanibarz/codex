@@ -119,6 +119,7 @@ fn select_handlers_for_matcher_inputs_and_tool_input(
                 | HookEventName::PostCompact
                 | HookEventName::PostToolUseFailure
                 | HookEventName::SessionStart
+                | HookEventName::SessionEnd
                 | HookEventName::SubagentStart
                 | HookEventName::SubagentStop
                 | HookEventName::FileChanged => {
@@ -131,7 +132,6 @@ fn select_handlers_for_matcher_inputs_and_tool_input(
                     }
                 }
                 HookEventName::Notification
-                | HookEventName::SessionEnd
                 | HookEventName::UserPromptSubmit
                 | HookEventName::Stop
                 | HookEventName::StopFailure => true,

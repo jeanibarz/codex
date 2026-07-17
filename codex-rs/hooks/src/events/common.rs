@@ -116,9 +116,9 @@ pub(crate) fn matcher_pattern_for_event(
         | HookEventName::PreCompact
         | HookEventName::PostCompact
         | HookEventName::PostToolUseFailure
+        | HookEventName::SessionEnd
         | HookEventName::FileChanged => matcher,
         HookEventName::Notification
-        | HookEventName::SessionEnd
         | HookEventName::UserPromptSubmit
         | HookEventName::Stop
         | HookEventName::StopFailure => None,
@@ -287,6 +287,10 @@ mod tests {
         assert_eq!(
             matcher_pattern_for_event(HookEventName::SubagentStart, Some("worker")),
             Some("worker")
+        );
+        assert_eq!(
+            matcher_pattern_for_event(HookEventName::SessionEnd, Some("clear|other")),
+            Some("clear|other")
         );
         assert_eq!(
             matcher_pattern_for_event(HookEventName::PreCompact, Some("^auto$")),

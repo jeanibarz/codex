@@ -745,6 +745,11 @@ client_request_definitions! {
         serialization: None,
         response: v2::AppsListResponse,
     },
+    AppsInstalled => "app/installed" {
+        params: v2::AppsInstalledParams,
+        serialization: None,
+        response: v2::AppsInstalledResponse,
+    },
     // File system requests are intentionally concurrent. Desktop already treats local
     // file system operations as concurrent, and app-server remote fs mirrors that model.
     FsReadFile => "fs/readFile" {
@@ -1759,6 +1764,7 @@ mod tests {
     use codex_protocol::config_types::MultiAgentMode;
     use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_READ_ONLY;
     use codex_protocol::parse_command::ParsedCommand;
+    use codex_protocol::protocol::CodexResponseHandoffMode;
     use codex_protocol::protocol::RealtimeConversationVersion;
     use codex_protocol::protocol::RealtimeOutputModality;
     use codex_protocol::protocol::RealtimeVoice;
@@ -2639,6 +2645,7 @@ mod tests {
                     cwd: cwd.clone(),
                     cli_version: "0.0.0".to_string(),
                     source: v2::SessionSource::Exec,
+                    can_accept_direct_input: None,
                     thread_source: None,
                     agent_nickname: None,
                     agent_role: None,
@@ -2692,6 +2699,7 @@ mod tests {
                         "cwd": absolute_path_string("tmp"),
                         "cliVersion": "0.0.0",
                         "source": "exec",
+                        "canAcceptDirectInput": null,
                         "threadSource": null,
                         "agentNickname": null,
                         "agentRole": null,
@@ -3108,6 +3116,69 @@ mod tests {
     }
 
     #[test]
+    fn serialize_installed_apps() -> Result<()> {
+        let request = ClientRequest::AppsInstalled {
+            request_id: RequestId::Integer(9),
+            params: v2::AppsInstalledParams::default(),
+        };
+        assert_eq!(
+            json!({
+                "method": "app/installed",
+                "id": 9,
+                "params": {
+                    "threadId": null
+                }
+            }),
+            serde_json::to_value(&request)?,
+        );
+
+        let force_refresh_request = ClientRequest::AppsInstalled {
+            request_id: RequestId::Integer(10),
+            params: v2::AppsInstalledParams {
+                thread_id: Some("thread-1".to_string()),
+                force_refresh: true,
+            },
+        };
+        assert_eq!(
+            json!({
+                "method": "app/installed",
+                "id": 10,
+                "params": {
+                    "threadId": "thread-1",
+                    "forceRefresh": true
+                }
+            }),
+            serde_json::to_value(&force_refresh_request)?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_installed_apps_response() -> Result<()> {
+        let response = v2::AppsInstalledResponse {
+            apps: vec![v2::InstalledApp {
+                id: "demo-app".to_string(),
+                runtime_name: Some("Demo App".to_string()),
+                enabled: false,
+                callable: false,
+            }],
+        };
+
+        assert_eq!(
+            json!({
+                "apps": [{
+                    "id": "demo-app",
+                    "runtimeName": "Demo App",
+                    "enabled": false,
+                    "callable": false
+                }]
+            }),
+            serde_json::to_value(response)?,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn serialize_read_apps() -> Result<()> {
         let request = ClientRequest::AppsRead {
             request_id: RequestId::Integer(9),
@@ -3320,7 +3391,7 @@ mod tests {
                 flush_transcript_tail_on_session_end: Some(true),
                 codex_responses_as_items: None,
                 codex_response_item_prefix: None,
-                codex_response_handoff_prefix: Some("silent context".to_string()),
+                codex_response_handoff_mode: Some(CodexResponseHandoffMode::BemTags),
                 thread_id: "thr_123".to_string(),
                 model: Some("realtime-treatment-model".to_string()),
                 output_modality: RealtimeOutputModality::Audio,
@@ -3342,7 +3413,7 @@ mod tests {
                     "flushTranscriptTailOnSessionEnd": true,
                     "codexResponsesAsItems": null,
                     "codexResponseItemPrefix": null,
-                    "codexResponseHandoffPrefix": "silent context",
+                    "codexResponseHandoffMode": "bemTags",
                     "model": "realtime-treatment-model",
                     "outputModality": "audio",
                     "includeStartupContext": false,
@@ -3367,7 +3438,7 @@ mod tests {
                 flush_transcript_tail_on_session_end: None,
                 codex_responses_as_items: None,
                 codex_response_item_prefix: None,
-                codex_response_handoff_prefix: None,
+                codex_response_handoff_mode: None,
                 thread_id: "thr_123".to_string(),
                 model: None,
                 output_modality: RealtimeOutputModality::Audio,
@@ -3389,7 +3460,7 @@ mod tests {
                     "flushTranscriptTailOnSessionEnd": null,
                     "codexResponsesAsItems": null,
                     "codexResponseItemPrefix": null,
-                    "codexResponseHandoffPrefix": null,
+                    "codexResponseHandoffMode": null,
                     "model": null,
                     "outputModality": "audio",
                     "includeStartupContext": null,
@@ -3409,7 +3480,7 @@ mod tests {
                 flush_transcript_tail_on_session_end: None,
                 codex_responses_as_items: None,
                 codex_response_item_prefix: None,
-                codex_response_handoff_prefix: None,
+                codex_response_handoff_mode: None,
                 thread_id: "thr_123".to_string(),
                 model: None,
                 output_modality: RealtimeOutputModality::Audio,
@@ -3431,7 +3502,7 @@ mod tests {
                     "flushTranscriptTailOnSessionEnd": null,
                     "codexResponsesAsItems": null,
                     "codexResponseItemPrefix": null,
-                    "codexResponseHandoffPrefix": null,
+                    "codexResponseHandoffMode": null,
                     "model": null,
                     "outputModality": "audio",
                     "includeStartupContext": null,
@@ -3450,6 +3521,8 @@ mod tests {
             "id": 9,
             "params": {
                 "threadId": "thr_123",
+                // Retain runtime compatibility with clients that have not yet removed this field.
+                "codexResponseHandoffPrefix": "",
                 "outputModality": "audio",
                 "realtimeSessionId": null,
                 "transport": null,
@@ -3649,7 +3722,7 @@ mod tests {
                 flush_transcript_tail_on_session_end: None,
                 codex_responses_as_items: None,
                 codex_response_item_prefix: None,
-                codex_response_handoff_prefix: None,
+                codex_response_handoff_mode: None,
                 thread_id: "thr_123".to_string(),
                 model: None,
                 output_modality: RealtimeOutputModality::Audio,

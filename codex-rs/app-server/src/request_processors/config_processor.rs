@@ -408,6 +408,7 @@ fn map_hooks_requirements_to_api(hooks: ManagedHooksRequirementsToml) -> Managed
         pre_compact,
         post_compact,
         session_start,
+        session_end,
         user_prompt_submit,
         subagent_start,
         subagent_stop,
@@ -416,7 +417,6 @@ fn map_hooks_requirements_to_api(hooks: ManagedHooksRequirementsToml) -> Managed
         // StopFailure, FileChanged) are not yet exported through the app-server API.
         post_tool_use_failure: _,
         notification: _,
-        session_end: _,
         stop_failure: _,
         file_changed: _,
     } = hooks;
@@ -430,6 +430,7 @@ fn map_hooks_requirements_to_api(hooks: ManagedHooksRequirementsToml) -> Managed
         pre_compact: map_hook_matcher_groups_to_api(pre_compact),
         post_compact: map_hook_matcher_groups_to_api(post_compact),
         session_start: map_hook_matcher_groups_to_api(session_start),
+        session_end: map_hook_matcher_groups_to_api(session_end),
         user_prompt_submit: map_hook_matcher_groups_to_api(user_prompt_submit),
         subagent_start: map_hook_matcher_groups_to_api(subagent_start),
         subagent_stop: map_hook_matcher_groups_to_api(subagent_stop),
