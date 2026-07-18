@@ -757,7 +757,7 @@ fn event_description(event_name: HookEventName) -> &'static str {
         HookEventName::PostToolUseFailure => "After a tool execution fails",
         HookEventName::Notification => "When Codex sends a notification",
         HookEventName::SessionStart => "When a new session starts",
-        HookEventName::SessionEnd => "When a session ends",
+        HookEventName::SessionEnd => "Right before a session ends",
         HookEventName::UserPromptSubmit => "When the user submits a prompt",
         HookEventName::SubagentStart => "When a subagent is created",
         HookEventName::SubagentStop => "Right before a subagent ends its turn",

@@ -2,15 +2,18 @@ use codex_app_server_protocol::ThreadHistoryChangeSet;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::TurnStatus;
 use codex_protocol::ThreadId;
+use codex_protocol::models::MessagePhase;
 
 use super::LocalThreadStore;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
 
 mod read;
+mod search;
 
 pub(super) use read::list_items;
 pub(super) use read::list_turns;
+pub(super) use search::search_thread_occurrences;
 
 pub(super) async fn next_rollout_byte_offset(
     store: &LocalThreadStore,
@@ -236,14 +239,29 @@ SET
             WHERE thread_id = ?
               AND turn_id = ?
               AND json_extract(item_json, '$.type') = 'agentMessage'
+              AND json_extract(item_json, '$.phase') = 'final_answer'
             ORDER BY rollout_ordinal DESC
             LIMIT 1
         ),
+        CASE
+            WHEN status IN ('completed', 'interrupted', 'failed') THEN (
+                SELECT item_id
+                FROM thread_items
+                WHERE thread_id = ?
+                  AND turn_id = ?
+                  AND json_extract(item_json, '$.type') = 'agentMessage'
+                  AND json_extract(item_json, '$.phase') IS NULL
+                ORDER BY rollout_ordinal DESC
+                LIMIT 1
+            )
+        END,
         final_agent_item_id
     )
 WHERE thread_id = ? AND turn_id = ?
             "#,
         )
+        .bind(thread_id)
+        .bind(turn_id.as_str())
         .bind(thread_id)
         .bind(turn_id.as_str())
         .bind(thread_id)
@@ -269,9 +287,11 @@ INSERT INTO thread_items (
     item_id,
     rollout_ordinal,
     created_at_ms,
+    item_type,
     item_json
-) VALUES (?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, json_extract(?, '$.type'), ?)
 ON CONFLICT(thread_id, turn_id, item_id) DO UPDATE SET
+    item_type = excluded.item_type,
     item_json = excluded.item_json
             "#,
         )
@@ -280,13 +300,14 @@ ON CONFLICT(thread_id, turn_id, item_id) DO UPDATE SET
         .bind(item_id.as_str())
         .bind(rollout_ordinal)
         .bind(created_at_ms)
+        .bind(item_json.as_str())
         .bind(item_json)
         .execute(&mut **transaction)
         .await
         .map_err(thread_history_error)?;
 
-        // Keep the first user item and latest agent item on the turn row so reads do not need to
-        // scan every item in the turn.
+        // Keep summary item IDs on the turn row so reads do not need to scan every item in the
+        // turn.
         match item.item {
             ThreadItem::UserMessage { .. } => {
                 sqlx::query(
@@ -303,7 +324,10 @@ WHERE thread_id = ? AND turn_id = ?
                 .await
                 .map_err(thread_history_error)?;
             }
-            ThreadItem::AgentMessage { .. } => {
+            ThreadItem::AgentMessage {
+                phase: Some(MessagePhase::FinalAnswer),
+                ..
+            } => {
                 sqlx::query(
                     r#"
 UPDATE thread_turns
@@ -318,7 +342,11 @@ WHERE thread_id = ? AND turn_id = ?
                 .await
                 .map_err(thread_history_error)?;
             }
-            ThreadItem::HookPrompt { .. }
+            ThreadItem::AgentMessage {
+                phase: Some(MessagePhase::Commentary) | None,
+                ..
+            }
+            | ThreadItem::HookPrompt { .. }
             | ThreadItem::Plan { .. }
             | ThreadItem::Reasoning { .. }
             | ThreadItem::CommandExecution { .. }

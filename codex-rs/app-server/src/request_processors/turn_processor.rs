@@ -18,6 +18,18 @@ use crate::image_url::is_remote_image_url;
 const DIRECT_INPUT_TO_MULTI_AGENT_V2_SUBAGENT_ERROR: &str =
     "direct app-server input is not allowed for multi-agent v2 sub-agents";
 
+/// Mirrors the direct-input policy in both request validation and thread capability responses.
+pub(super) fn can_accept_direct_input(
+    multi_agent_version: Option<MultiAgentVersion>,
+    session_source: &SessionSource,
+) -> bool {
+    multi_agent_version != Some(MultiAgentVersion::V2)
+        || !matches!(
+            session_source,
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
+        )
+}
+
 fn validate_user_input_image_urls(input: &[V2UserInput]) -> Result<(), JSONRPCErrorError> {
     if input.iter().any(|item| {
         matches!(
@@ -327,12 +339,11 @@ impl TurnRequestProcessor {
         request_id: &ConnectionRequestId,
         thread: &CodexThread,
     ) -> Result<(), JSONRPCErrorError> {
-        if thread.multi_agent_version() == Some(MultiAgentVersion::V2)
-            && matches!(
-                thread.config_snapshot().await.session_source,
-                SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
-            )
-        {
+        let config_snapshot = thread.config_snapshot().await;
+        if !can_accept_direct_input(
+            thread.multi_agent_version(),
+            &config_snapshot.session_source,
+        ) {
             let error = invalid_request(DIRECT_INPUT_TO_MULTI_AGENT_V2_SUBAGENT_ERROR);
             self.track_error_response(request_id, &error, /*error_type*/ None);
             return Err(error);
@@ -1067,7 +1078,7 @@ impl TurnRequestProcessor {
                     .unwrap_or(false),
                 codex_responses_as_items: params.codex_responses_as_items.unwrap_or(false),
                 codex_response_item_prefix: params.codex_response_item_prefix,
-                codex_response_handoff_prefix: params.codex_response_handoff_prefix,
+                codex_response_handoff_mode: params.codex_response_handoff_mode.unwrap_or_default(),
                 model: params.model,
                 output_modality: params.output_modality,
                 include_startup_context: params.include_startup_context.unwrap_or(true),
@@ -1259,6 +1270,17 @@ impl TurnRequestProcessor {
         parent_thread: Arc<CodexThread>,
         prompt: &str,
     ) -> std::result::Result<(), JSONRPCErrorError> {
+        // AgentRunner::start still delegates to spawn_subagent, which forks from the parent's
+        // full history. Paginated threads only allow bounded model-context reads, so keep this
+        // closed until detached review has a bounded fork path.
+        if matches!(
+            parent_thread.config_snapshot().await.history_mode,
+            codex_protocol::protocol::ThreadHistoryMode::Paginated
+        ) {
+            return Err(invalid_request(
+                "paginated threads do not support detached review",
+            ));
+        }
         let mut config = self.config.as_ref().clone();
         if let Some(review_model) = &config.review_model {
             config.model = Some(review_model.clone());

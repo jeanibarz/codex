@@ -7,6 +7,7 @@ use codex_connectors::ConnectorRuntimeManager;
 use codex_connectors::ConnectorSnapshot;
 use codex_connectors::PluginConnectorSource;
 use codex_core_plugins::PluginsManager;
+use codex_exec_server::ExecutorCapabilityDiscoverySnapshot;
 use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionDataInit;
 use codex_extension_api::ExtensionRegistry;
@@ -24,6 +25,7 @@ use codex_mcp::codex_apps_mcp_server_config;
 use codex_mcp::configured_mcp_servers;
 use codex_mcp::effective_mcp_servers;
 use codex_plugin::AppConnectorId;
+use codex_protocol::capabilities::SelectedCapabilityRoot;
 
 const LEGACY_CODEX_APPS_REGISTRATION_ID: &str = "legacy_codex_apps";
 
@@ -107,7 +109,8 @@ impl McpManager {
         thread_init: &ExtensionDataInit,
         thread_store: &ExtensionData,
         originator: &str,
-        available_environment_ids: &[String],
+        ready_selected_capability_roots: &[SelectedCapabilityRoot],
+        executor_capability_discovery: Option<&ExecutorCapabilityDiscoverySnapshot>,
     ) -> McpRuntimeProjection {
         self.runtime_config_with_context(
             McpServerContributionContext::for_step(
@@ -115,7 +118,8 @@ impl McpManager {
                 thread_init,
                 thread_store,
                 originator,
-                available_environment_ids,
+                ready_selected_capability_roots,
+                executor_capability_discovery,
             ),
             Some(originator),
         )

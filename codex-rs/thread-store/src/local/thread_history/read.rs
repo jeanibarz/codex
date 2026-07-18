@@ -36,9 +36,9 @@ struct HistoryCursor {
 
 #[derive(Clone, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
-enum CursorScope {
+pub(super) enum CursorScope {
     Turns,
-    Items { turn_id: Option<String> },
+    Items,
 }
 
 struct StoredTurnRow {
@@ -148,9 +148,7 @@ pub(in crate::local) async fn list_items(
         "list_items",
     )
     .await?;
-    let scope = CursorScope::Items {
-        turn_id: params.turn_id.clone(),
-    };
+    let scope = CursorScope::Items;
     let cursor = parse_cursor(params.cursor.as_deref(), params.thread_id, &scope)?;
     let pool = store.thread_history_db().await?;
     let limit = page_limit(params.page_size)?;
@@ -193,7 +191,7 @@ WHERE thread_id =
     })
 }
 
-async fn validate_thread_for_paginated_reads(
+pub(super) async fn validate_thread_for_paginated_reads(
     store: &LocalThreadStore,
     thread_id: ThreadId,
     include_archived: bool,
@@ -308,7 +306,7 @@ fn page_cursors(
     Ok((next_cursor, backwards_cursor))
 }
 
-fn serialize_cursor(
+pub(super) fn serialize_cursor(
     thread_id: ThreadId,
     scope: &CursorScope,
     rollout_ordinal: i64,

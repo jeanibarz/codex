@@ -483,7 +483,7 @@ impl Session {
         exec_policy: Arc<ExecPolicyManager>,
         tx_event: Sender<Event>,
         agent_status: watch::Sender<AgentStatus>,
-        initial_history: InitialHistory,
+        mut initial_history: InitialHistory,
         session_source: SessionSource,
         skills_service: Arc<SkillsService>,
         plugins_manager: Arc<PluginsManager>,
@@ -515,6 +515,22 @@ impl Session {
             .parent_thread_id
             .or_else(|| initial_history.get_resumed_parent_thread_id());
         session_configuration.parent_thread_id = parent_thread_id;
+        let is_paginated_subagent = matches!(
+            session_configuration.history_mode,
+            ThreadHistoryMode::Paginated
+        ) && matches!(
+            session_configuration.thread_source.as_ref(),
+            Some(ThreadSource::Subagent)
+        );
+        if (config.features.enabled(Feature::ItemIds)
+            || matches!(
+                session_configuration.history_mode,
+                ThreadHistoryMode::Paginated
+            ))
+            && let InitialHistory::Forked(items) = &mut initial_history
+        {
+            Self::assign_missing_rollout_response_item_ids(items);
+        }
         let multi_agent_version = multi_agent_version.map(OnceLock::from).unwrap_or_default();
         let initial_multi_agent_version = multi_agent_version.get().copied();
 
@@ -567,6 +583,9 @@ impl Session {
                     roots
                 }
             };
+        thread_extension_init.insert(codex_extension_api::ThreadOriginator(
+            session_configuration.originator.clone(),
+        ));
         let mcp_thread_init = thread_extension_init.clone();
         let thread_extension_data = codex_extension_api::ExtensionData::new_with_init(
             thread_id.to_string(),
@@ -599,6 +618,7 @@ impl Session {
                             selected_capability_roots: selected_capability_roots.clone(),
                             multi_agent_version: initial_multi_agent_version,
                             history_mode: session_configuration.history_mode,
+                            subagent_history_start_ordinal: None,
                             initial_window_id: initial_auto_compact_window_ids
                                 .window_id
                                 .to_string(),
@@ -612,7 +632,18 @@ impl Session {
                                 },
                             },
                         };
-                        LiveThread::create(Arc::clone(&thread_store), params).await?
+                        if is_paginated_subagent
+                            && let InitialHistory::Forked(items) = &initial_history
+                        {
+                            LiveThread::create_with_inherited_model_context(
+                                Arc::clone(&thread_store),
+                                params,
+                                items,
+                            )
+                            .await?
+                        } else {
+                            LiveThread::create(Arc::clone(&thread_store), params).await?
+                        }
                     }
                     InitialHistory::Resumed(resumed_history) => {
                         let params = ResumeThreadParams {
@@ -685,7 +716,8 @@ impl Session {
                     mcp_thread_init_for_startup,
                     thread_extension_data_for_mcp,
                     &mcp_originator,
-                    /*available_environment_ids*/ &[],
+                    /*ready_selected_capability_roots*/ &[],
+                    /*executor_capability_discovery*/ None,
                 )
                 .await;
             let mcp_config = &mcp_projection.config;
@@ -959,12 +991,7 @@ impl Session {
                         )
                     });
             let (network_proxy, session_network_proxy) =
-                if let Some(spec) = config
-                    .permissions
-                    .network
-                    .as_ref()
-                    .filter(|spec| !cfg!(target_os = "windows") || spec.enabled())
-                {
+                if let Some(spec) = config.permissions.network.as_ref() {
                     let current_exec_policy = exec_policy.current();
                     let (network_proxy, session_network_proxy) = Self::start_managed_network_proxy(
                         spec,
@@ -1009,20 +1036,16 @@ impl Session {
                     config.analytics_enabled,
                 )
             });
-            // Keep one stable manager handle for the session so extension resource clients
-            // automatically observe the manager installed at startup and on later refreshes.
-            let mcp_connection_manager = Arc::new(arc_swap::ArcSwap::from_pointee(
+            let mcp_runtime = Arc::new(McpRuntime::new(Arc::new(
                 McpConnectionManager::new_uninitialized_with_permission_profile(
                     &config.permissions.approval_policy,
                     config.permissions.permission_profile(),
                     config.prefix_mcp_tool_names(),
                 ),
-            ));
+            )));
             let session_extension_data =
                 codex_extension_api::ExtensionData::new(session_id.to_string());
-            session_extension_data.insert(McpResourceClient::new(Arc::clone(
-                &mcp_connection_manager,
-            )));
+            session_extension_data.insert(McpResourceClient::new(Arc::clone(&mcp_runtime)));
             for contributor in extensions.thread_lifecycle_contributors() {
                 contributor.on_thread_start(codex_extension_api::ThreadStartInput {
                     config: config.as_ref(),
@@ -1035,15 +1058,10 @@ impl Session {
             }
 
             let services = SessionServices {
-                // Initialize the MCP connection manager with an uninitialized
-                // instance. It will be replaced with one created via
-                // McpConnectionManager::new() once all its constructor args are
-                // available. This also ensures `SessionConfigured` is emitted
-                // before any MCP-related events. It is reasonable to consider
-                // changing this to use Option or OnceCell, though the current
-                // setup is straightforward enough and performs well.
-                mcp_connection_manager,
-                mcp_runtime: arc_swap::ArcSwapOption::empty(),
+                // Start with an empty connection set. The initialized set is
+                // published after SessionConfigured so MCP events follow it.
+                mcp_runtime,
+                mcp_runtime_snapshot: arc_swap::ArcSwapOption::empty(),
                 mcp_projection_lock: Mutex::new(()),
                 mcp_startup_cancellation_token: Mutex::new(CancellationToken::new()),
                 unified_exec_manager: UnifiedExecProcessManager::new(
@@ -1246,11 +1264,11 @@ impl Session {
             ))
             .await;
             sess.services
-                .install_mcp_connection_manager(
+                .install_mcp_runtime(
                     Arc::new(mcp_projection.config),
                     mcp_projection.plugins_available,
                     mcp_runtime_context,
-                    /*available_environment_ids*/ Vec::new(),
+                    /*ready_selected_capability_roots*/ Vec::new(),
                     mcp_connection_manager,
                 )
                 .await?;

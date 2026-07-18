@@ -11,6 +11,7 @@ mod apps;
 // `ask` lists from settings.json). Not yet wired into ExecPolicyManager in
 // this rebase; tracked as a known gap and left as dead code so the module
 // stays compilable against upstream API changes.
+mod audio_preparation;
 #[allow(dead_code)]
 mod claude_permissions_compat;
 mod client;
@@ -65,11 +66,7 @@ mod mcp_skill_dependencies;
 mod mcp_tool_approval_templates;
 mod mcp_tool_exposure;
 mod network_policy_decision;
-pub(crate) mod network_proxy_loader;
 pub use mcp::McpManager;
-pub use network_proxy_loader::MtimeConfigReloader;
-pub use network_proxy_loader::build_network_proxy_state;
-pub use network_proxy_loader::build_network_proxy_state_and_reloader;
 mod original_image_detail;
 pub use codex_mcp::CodexAppsToolsCache;
 pub use codex_mcp::SandboxState;

@@ -470,6 +470,7 @@ fn sample_thread(thread_id: &str) -> Thread {
         cwd: test_path_buf("/tmp").abs(),
         cli_version: "0.0.0".to_string(),
         source: AppServerSessionSource::Exec,
+        can_accept_direct_input: None,
         thread_source: None,
         agent_nickname: None,
         agent_role: None,
@@ -513,6 +514,8 @@ fn sample_thread_resume_response() -> ClientResponsePayload {
         reasoning_effort: None,
         multi_agent_mode: Default::default(),
         initial_turns_page: None,
+        turns_backwards_cursor: None,
+        items_backwards_cursor: None,
     })
 }
 

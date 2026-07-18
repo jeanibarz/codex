@@ -30,6 +30,7 @@ const PRE_COMPACT_INPUT_FIXTURE: &str = "pre-compact.command.input.schema.json";
 const PRE_COMPACT_OUTPUT_FIXTURE: &str = "pre-compact.command.output.schema.json";
 const SESSION_START_INPUT_FIXTURE: &str = "session-start.command.input.schema.json";
 const SESSION_START_OUTPUT_FIXTURE: &str = "session-start.command.output.schema.json";
+const SESSION_END_INPUT_FIXTURE: &str = "session-end.command.input.schema.json";
 const USER_PROMPT_SUBMIT_INPUT_FIXTURE: &str = "user-prompt-submit.command.input.schema.json";
 const USER_PROMPT_SUBMIT_OUTPUT_FIXTURE: &str = "user-prompt-submit.command.output.schema.json";
 const SUBAGENT_START_INPUT_FIXTURE: &str = "subagent-start.command.input.schema.json";
@@ -39,7 +40,6 @@ const SUBAGENT_STOP_OUTPUT_FIXTURE: &str = "subagent-stop.command.output.schema.
 const STOP_INPUT_FIXTURE: &str = "stop.command.input.schema.json";
 const STOP_OUTPUT_FIXTURE: &str = "stop.command.output.schema.json";
 const STOP_FAILURE_INPUT_FIXTURE: &str = "stop-failure.command.input.schema.json";
-const SESSION_END_INPUT_FIXTURE: &str = "session-end.command.input.schema.json";
 const POST_TOOL_USE_FAILURE_INPUT_FIXTURE: &str = "post-tool-use-failure.command.input.schema.json";
 const NOTIFICATION_INPUT_FIXTURE: &str = "notification.command.input.schema.json";
 const FILE_CHANGED_INPUT_FIXTURE: &str = "file-changed.command.input.schema.json";
@@ -983,6 +983,7 @@ mod tests {
     use super::PreCompactCommandInput;
     use super::PreToolUseCommandInput;
     use super::PreToolUseCommandOutputWire;
+    use super::SESSION_END_INPUT_FIXTURE;
     use super::SESSION_START_INPUT_FIXTURE;
     use super::SESSION_START_OUTPUT_FIXTURE;
     use super::STOP_INPUT_FIXTURE;
@@ -1047,6 +1048,9 @@ mod tests {
             }
             SESSION_START_OUTPUT_FIXTURE => {
                 include_str!("../schema/generated/session-start.command.output.schema.json")
+            }
+            SESSION_END_INPUT_FIXTURE => {
+                include_str!("../schema/generated/session-end.command.input.schema.json")
             }
             USER_PROMPT_SUBMIT_INPUT_FIXTURE => {
                 include_str!("../schema/generated/user-prompt-submit.command.input.schema.json")
@@ -1116,6 +1120,7 @@ mod tests {
             PRE_TOOL_USE_OUTPUT_FIXTURE,
             SESSION_START_INPUT_FIXTURE,
             SESSION_START_OUTPUT_FIXTURE,
+            SESSION_END_INPUT_FIXTURE,
             USER_PROMPT_SUBMIT_INPUT_FIXTURE,
             USER_PROMPT_SUBMIT_OUTPUT_FIXTURE,
             SUBAGENT_START_INPUT_FIXTURE,

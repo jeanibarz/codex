@@ -1,5 +1,6 @@
 use anyhow::Result;
 use app_test_support::TestAppServer;
+use app_test_support::create_fake_paginated_rollout;
 use app_test_support::create_fake_rollout_with_text_elements;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::rollout_path;
@@ -30,6 +31,8 @@ use codex_app_server_protocol::ThreadReadResponse;
 use codex_app_server_protocol::ThreadResumeInitialTurnsPageParams;
 use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
+use codex_app_server_protocol::ThreadSearchOccurrencesParams;
+use codex_app_server_protocol::ThreadSearchOccurrencesResponse;
 use codex_app_server_protocol::ThreadSetNameParams;
 use codex_app_server_protocol::ThreadSetNameResponse;
 use codex_app_server_protocol::ThreadStartParams;
@@ -55,6 +58,7 @@ use codex_protocol::items::AgentMessageItem;
 use codex_protocol::items::TurnItem as CoreTurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::BaseInstructions;
+use codex_protocol::models::MessagePhase;
 use codex_protocol::protocol::AgentMessageEvent;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ItemCompletedEvent;
@@ -223,18 +227,13 @@ async fn paginated_stored_thread_routes_projected_turns_and_rejects_legacy_histo
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
 
-    let conversation_id = create_fake_rollout_with_text_elements(
+    let conversation_id = create_fake_paginated_rollout(
         codex_home.path(),
         "2025-01-05T12-00-00",
         "2025-01-05T12:00:00Z",
         "Saved user message",
-        Vec::new(),
         Some("mock_provider"),
         /*git_info*/ None,
-    )?;
-    set_rollout_history_mode(
-        rollout_path(codex_home.path(), "2025-01-05T12-00-00", &conversation_id).as_path(),
-        ThreadHistoryMode::Paginated,
     )?;
 
     let mut mcp = TestAppServer::builder()
@@ -293,12 +292,15 @@ async fn paginated_stored_thread_routes_projected_turns_and_rejects_legacy_histo
             include_turns: true,
         })
         .await?;
-    assert_paginated_threads_unsupported(
-        timeout(
-            DEFAULT_READ_TIMEOUT,
-            mcp.read_stream_until_error_message(RequestId::Integer(read_id)),
-        )
-        .await??,
+    let read_err: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(read_id)),
+    )
+    .await??;
+    assert_eq!(read_err.error.code, -32600);
+    assert_eq!(
+        read_err.error.message,
+        "paginated threads do not support thread/read(includeTurns=true)"
     );
 
     let turns_list_id = mcp
@@ -322,20 +324,6 @@ async fn paginated_stored_thread_routes_projected_turns_and_rejects_legacy_histo
             next_cursor: None,
             backwards_cursor: None,
         }
-    );
-
-    let resume_id = mcp
-        .send_thread_resume_request(ThreadResumeParams {
-            thread_id: conversation_id,
-            ..Default::default()
-        })
-        .await?;
-    assert_paginated_threads_unsupported(
-        timeout(
-            DEFAULT_READ_TIMEOUT,
-            mcp.read_stream_until_error_message(RequestId::Integer(resume_id)),
-        )
-        .await??,
     );
 
     Ok(())
@@ -502,6 +490,191 @@ async fn thread_turns_list_supports_requested_items_view() -> Result<()> {
     assert_eq!(not_loaded.started_at, full.started_at);
     assert_eq!(not_loaded.completed_at, full.completed_at);
     assert_eq!(not_loaded.duration_ms, full.duration_ms);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_search_occurrences_reads_paginated_projection() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+    let thread_id = codex_protocol::ThreadId::default();
+    let state_db = codex_state::StateRuntime::init(
+        codex_home.path().to_path_buf(),
+        "mock_provider".to_string(),
+    )
+    .await?;
+    let store = LocalThreadStore::new(
+        LocalThreadStoreConfig {
+            codex_home: codex_home.path().to_path_buf(),
+            sqlite_home: codex_home.path().to_path_buf(),
+            default_model_provider_id: "mock_provider".to_string(),
+        },
+        Some(state_db),
+    );
+    store
+        .create_thread(CreateThreadParams {
+            session_id: thread_id.into(),
+            thread_id,
+            extra_config: None,
+            forked_from_id: None,
+            parent_thread_id: None,
+            source: ProtocolSessionSource::Cli,
+            thread_source: None,
+            originator: "test_originator".to_string(),
+            base_instructions: BaseInstructions::default(),
+            dynamic_tools: Vec::new(),
+            selected_capability_roots: Vec::new(),
+            multi_agent_version: None,
+            history_mode: codex_protocol::protocol::ThreadHistoryMode::Paginated,
+            subagent_history_start_ordinal: None,
+            initial_window_id: Uuid::now_v7().to_string(),
+            metadata: ThreadPersistenceMetadata {
+                cwd: Some(codex_home.path().to_path_buf()),
+                model_provider: "mock_provider".to_string(),
+                memory_mode: ThreadMemoryMode::Enabled,
+            },
+        })
+        .await?;
+    store.persist_thread(thread_id).await?;
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id,
+            items: vec![
+                paginated_turn_started("turn-1"),
+                paginated_completed_item(
+                    thread_id,
+                    "turn-1",
+                    CoreTurnItem::UserMessage(UserMessageItem {
+                        id: "user-1".to_string(),
+                        client_id: None,
+                        content: vec![
+                            codex_protocol::user_input::UserInput::Text {
+                                text: "Nee".to_string(),
+                                text_elements: Vec::new(),
+                            },
+                            codex_protocol::user_input::UserInput::Text {
+                                text: "dle needle needle needle".to_string(),
+                                text_elements: Vec::new(),
+                            },
+                        ],
+                    }),
+                ),
+                paginated_completed_item(
+                    thread_id,
+                    "turn-1",
+                    CoreTurnItem::UserMessage(UserMessageItem {
+                        id: "steer-1".to_string(),
+                        client_id: None,
+                        content: vec![codex_protocol::user_input::UserInput::Text {
+                            text: "steer toward needle".to_string(),
+                            text_elements: Vec::new(),
+                        }],
+                    }),
+                ),
+                paginated_completed_item(
+                    thread_id,
+                    "turn-1",
+                    CoreTurnItem::AgentMessage(AgentMessageItem {
+                        id: "commentary-1".to_string(),
+                        content: vec![AgentMessageContent::Text {
+                            text: "commentary needle".to_string(),
+                        }],
+                        phase: Some(MessagePhase::Commentary),
+                        memory_citation: None,
+                    }),
+                ),
+                paginated_completed_item(
+                    thread_id,
+                    "turn-1",
+                    CoreTurnItem::AgentMessage(AgentMessageItem {
+                        id: "final-1".to_string(),
+                        content: vec![AgentMessageContent::Text {
+                            text: "😀 **Final**  \nneedle".to_string(),
+                        }],
+                        phase: Some(MessagePhase::FinalAnswer),
+                        memory_citation: None,
+                    }),
+                ),
+                paginated_turn_completed("turn-1"),
+            ],
+        })
+        .await?;
+    store.shutdown_thread(thread_id).await?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build()
+        .await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let request_id = mcp
+        .send_thread_search_occurrences_request(ThreadSearchOccurrencesParams {
+            thread_id: thread_id.to_string(),
+            search_term: "needle".to_string(),
+            cursor: None,
+            limit: Some(3),
+        })
+        .await?;
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    let ThreadSearchOccurrencesResponse { data, next_cursor } = to_response(response)?;
+
+    assert_eq!(
+        data.iter()
+            .map(|occurrence| occurrence.item_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["user-1", "user-1", "user-1"]
+    );
+    assert_eq!(
+        data.iter()
+            .map(|occurrence| occurrence.turn_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["turn-1", "turn-1", "turn-1"]
+    );
+    assert_eq!(
+        data.iter()
+            .map(|occurrence| occurrence.snippet_match_range.start)
+            .collect::<Vec<_>>(),
+        vec![0, 7, 14]
+    );
+    let next_cursor = next_cursor.expect("first page should have another occurrence");
+
+    let request_id = mcp
+        .send_thread_search_occurrences_request(ThreadSearchOccurrencesParams {
+            thread_id: thread_id.to_string(),
+            search_term: "needle".to_string(),
+            cursor: Some(next_cursor),
+            limit: Some(3),
+        })
+        .await?;
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    let ThreadSearchOccurrencesResponse { data, next_cursor } = to_response(response)?;
+
+    assert_eq!(
+        data.iter()
+            .map(|occurrence| occurrence.item_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["user-1", "steer-1", "final-1"]
+    );
+    assert_eq!(
+        data.iter()
+            .map(|occurrence| occurrence.turn_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["turn-1", "turn-1", "turn-1"]
+    );
+    assert_eq!(data[2].snippet, "😀 Final needle");
+    assert_eq!(data[2].snippet_match_range.start, 9);
+    assert_eq!(data[2].snippet_match_range.end, 15);
+    assert_eq!(next_cursor, None);
 
     Ok(())
 }
@@ -1354,6 +1527,7 @@ async fn paginated_history_lists_use_projected_turns_and_items() -> Result<()> {
             selected_capability_roots: Vec::new(),
             multi_agent_version: None,
             history_mode: codex_protocol::protocol::ThreadHistoryMode::Paginated,
+            subagent_history_start_ordinal: None,
             initial_window_id: Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(codex_home.path().to_path_buf()),
@@ -1412,11 +1586,108 @@ async fn paginated_history_lists_use_projected_turns_and_items() -> Result<()> {
         .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
+    let resume_id = mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: thread_id.to_string(),
+            exclude_turns: true,
+            ..Default::default()
+        })
+        .await?;
+    let resume_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(resume_id)),
+    )
+    .await??;
+    let ThreadResumeResponse {
+        thread,
+        turns_backwards_cursor,
+        items_backwards_cursor,
+        ..
+    } = to_response::<ThreadResumeResponse>(resume_resp)?;
+    assert!(thread.turns.is_empty());
+    let turns_backwards_cursor =
+        turns_backwards_cursor.expect("resume should return a turn head cursor");
+    let items_backwards_cursor =
+        items_backwards_cursor.expect("resume should return an item head cursor");
+
+    let rejoin_id = mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: thread_id.to_string(),
+            exclude_turns: true,
+            ..Default::default()
+        })
+        .await?;
+    let rejoin_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(rejoin_id)),
+    )
+    .await??;
+    let ThreadResumeResponse {
+        turns_backwards_cursor: rejoin_turns_backwards_cursor,
+        items_backwards_cursor: rejoin_items_backwards_cursor,
+        ..
+    } = to_response::<ThreadResumeResponse>(rejoin_resp)?;
+    assert_eq!(
+        rejoin_turns_backwards_cursor.as_deref(),
+        Some(turns_backwards_cursor.as_str())
+    );
+    assert_eq!(
+        rejoin_items_backwards_cursor.as_deref(),
+        Some(items_backwards_cursor.as_str())
+    );
+
+    let ThreadTurnsListResponse { data, .. } = read_turns_page(
+        &mut mcp,
+        thread_id,
+        Some(turns_backwards_cursor),
+        Some(2),
+        SortDirection::Desc,
+        Some(TurnItemsView::NotLoaded),
+    )
+    .await?;
+    assert_eq!(
+        data.into_iter().map(|turn| turn.id).collect::<Vec<_>>(),
+        vec!["turn-2", "turn-1"]
+    );
+
+    let ThreadItemsListResponse { data, .. } = read_items_page(
+        &mut mcp,
+        thread_id,
+        /*turn_id*/ None,
+        Some(items_backwards_cursor.clone()),
+        Some(3),
+        SortDirection::Desc,
+    )
+    .await?;
+    assert_eq!(
+        data.into_iter()
+            .map(|entry| entry.item.id().to_string())
+            .collect::<Vec<_>>(),
+        vec!["user-2", "agent-1", "user-1"]
+    );
+
+    let ThreadItemsListResponse { data, .. } = read_items_page(
+        &mut mcp,
+        thread_id,
+        Some("turn-1"),
+        Some(items_backwards_cursor),
+        Some(2),
+        SortDirection::Desc,
+    )
+    .await?;
+    assert_eq!(
+        data.into_iter()
+            .map(|entry| entry.item.id().to_string())
+            .collect::<Vec<_>>(),
+        vec!["agent-1", "user-1"]
+    );
+
     let first_page = read_turns_page(
         &mut mcp,
         thread_id,
         /*cursor*/ None,
         Some(1),
+        SortDirection::Asc,
         Some(TurnItemsView::Summary),
     )
     .await?;
@@ -1451,6 +1722,7 @@ async fn paginated_history_lists_use_projected_turns_and_items() -> Result<()> {
         thread_id,
         Some(next_cursor),
         Some(1),
+        SortDirection::Asc,
         Some(TurnItemsView::NotLoaded),
     )
     .await?;
@@ -1488,15 +1760,25 @@ async fn paginated_history_lists_use_projected_turns_and_items() -> Result<()> {
         "thread/turns/list itemsView full is not supported for paginated threads; use thread/items/list"
     );
 
-    let first_items_page = read_items_page(&mut mcp, thread_id, /*cursor*/ None, Some(1)).await?;
+    let first_items_page = read_items_page(
+        &mut mcp,
+        thread_id,
+        /*turn_id*/ None,
+        /*cursor*/ None,
+        Some(1),
+        SortDirection::Asc,
+    )
+    .await?;
     assert_eq!(first_items_page.data.len(), 1);
     assert_eq!(first_items_page.data[0].turn_id, "turn-1");
     assert_eq!(first_items_page.data[0].item.id(), "user-1");
     let second_items_page = read_items_page(
         &mut mcp,
         thread_id,
+        /*turn_id*/ None,
         Some(first_items_page.next_cursor.expect("next item cursor")),
         Some(1),
+        SortDirection::Asc,
     )
     .await?;
     assert_eq!(second_items_page.data.len(), 1);
@@ -1505,8 +1787,10 @@ async fn paginated_history_lists_use_projected_turns_and_items() -> Result<()> {
     let third_items_page = read_items_page(
         &mut mcp,
         thread_id,
+        /*turn_id*/ None,
         Some(second_items_page.next_cursor.expect("next item cursor")),
         Some(1),
+        SortDirection::Asc,
     )
     .await?;
     assert_eq!(third_items_page.data.len(), 1);
@@ -1706,6 +1990,7 @@ async fn read_turns_page(
     thread_id: codex_protocol::ThreadId,
     cursor: Option<String>,
     limit: Option<u32>,
+    sort_direction: SortDirection,
     items_view: Option<TurnItemsView>,
 ) -> Result<ThreadTurnsListResponse> {
     let request_id = mcp
@@ -1713,7 +1998,7 @@ async fn read_turns_page(
             thread_id: thread_id.to_string(),
             cursor,
             limit,
-            sort_direction: Some(SortDirection::Asc),
+            sort_direction: Some(sort_direction),
             items_view,
         })
         .await?;
@@ -1728,16 +2013,18 @@ async fn read_turns_page(
 async fn read_items_page(
     mcp: &mut TestAppServer,
     thread_id: codex_protocol::ThreadId,
+    turn_id: Option<&str>,
     cursor: Option<String>,
     limit: Option<u32>,
+    sort_direction: SortDirection,
 ) -> Result<ThreadItemsListResponse> {
     let request_id = mcp
         .send_thread_items_list_request(ThreadItemsListParams {
             thread_id: thread_id.to_string(),
-            turn_id: None,
+            turn_id: turn_id.map(str::to_string),
             cursor,
             limit,
-            sort_direction: Some(SortDirection::Asc),
+            sort_direction: Some(sort_direction),
         })
         .await?;
     let response: JSONRPCResponse = timeout(
@@ -1791,6 +2078,8 @@ fn turn_user_texts(turns: &[codex_app_server_protocol::Turn]) -> Vec<&str> {
                 UserInput::Text { text, .. } => Some(text.as_str()),
                 UserInput::Image { .. }
                 | UserInput::LocalImage { .. }
+                | UserInput::Audio { .. }
+                | UserInput::LocalAudio { .. }
                 | UserInput::Skill { .. }
                 | UserInput::Mention { .. } => None,
             },
@@ -1839,6 +2128,7 @@ async fn seed_pathless_store_thread(
             selected_capability_roots: Vec::new(),
             multi_agent_version: None,
             history_mode: Default::default(),
+            subagent_history_start_ordinal: None,
             initial_window_id: Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: None,
@@ -1877,26 +2167,6 @@ fn store_history_items() -> Vec<RolloutItem> {
             ..Default::default()
         },
     ))]
-}
-
-fn set_rollout_history_mode(path: &Path, history_mode: ThreadHistoryMode) -> Result<()> {
-    let mut lines = std::fs::read_to_string(path)?
-        .lines()
-        .map(serde_json::from_str::<Value>)
-        .collect::<Result<Vec<_>, _>>()?;
-    lines[0]["payload"]["history_mode"] = serde_json::to_value(history_mode)?;
-    let contents = lines
-        .into_iter()
-        .map(|line| line.to_string())
-        .collect::<Vec<_>>()
-        .join("\n");
-    std::fs::write(path, format!("{contents}\n"))?;
-    Ok(())
-}
-
-fn assert_paginated_threads_unsupported(err: JSONRPCError) {
-    assert_eq!(err.error.code, -32601);
-    assert_eq!(err.error.message, "paginated_threads is not supported yet");
 }
 
 fn create_config_toml_with_thread_store(codex_home: &Path, store_id: &str) -> std::io::Result<()> {

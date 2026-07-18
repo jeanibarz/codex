@@ -38,8 +38,8 @@ pub const HOOK_EVENT_NAMES: [&str; 15] = [
 ///
 /// Other events can appear in hooks JSON, but Codex ignores their matcher
 /// fields because those events do not dispatch against a tool, compaction
-/// trigger, or session-start source.
-pub const HOOK_EVENT_NAMES_WITH_MATCHERS: [&str; 10] = [
+/// trigger, session-start source, or session-end reason.
+pub const HOOK_EVENT_NAMES_WITH_MATCHERS: [&str; 11] = [
     "PreToolUse",
     "PermissionRequest",
     "PostToolUse",
@@ -47,6 +47,7 @@ pub const HOOK_EVENT_NAMES_WITH_MATCHERS: [&str; 10] = [
     "PostCompact",
     "PostToolUseFailure",
     "SessionStart",
+    "SessionEnd",
     "SubagentStart",
     "SubagentStop",
     "FileChanged",

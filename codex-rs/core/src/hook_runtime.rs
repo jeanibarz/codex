@@ -17,7 +17,6 @@ use codex_hooks::PostToolUseRequest;
 use codex_hooks::PreToolUseOutcome;
 use codex_hooks::PreToolUseRequest;
 use codex_hooks::SessionEndReason;
-use codex_hooks::SessionEndRequest;
 use codex_hooks::SessionStartOutcome;
 use codex_hooks::StartHookTarget;
 use codex_hooks::StopFailureRequest;
@@ -396,6 +395,40 @@ pub(crate) async fn run_turn_stop_hooks(
     let mut outcome = hooks.run_stop(request).await;
     emit_hook_completed_events(sess, turn_context, std::mem::take(&mut outcome.hook_events)).await;
     outcome
+}
+
+#[instrument(level = "trace", skip_all)]
+pub(crate) async fn run_session_end_hooks(sess: &Arc<Session>) {
+    let hooks = sess.hooks();
+    let turn_context = sess.new_default_turn().await;
+
+    // SessionEnd is root-only; ThreadSpawn uses SubagentStart/SubagentStop and other subagents
+    // are internal implementation details.
+    if matches!(&turn_context.session_source, SessionSource::SubAgent(_)) {
+        return;
+    }
+
+    let (cwd, model, approval_policy) = sess.session_end_hook_fields().await;
+    let request = codex_hooks::SessionEndRequest {
+        session_id: sess.session_id().into(),
+        turn_id: turn_context.sub_id.clone(),
+        cwd,
+        transcript_path: sess.hook_transcript_path().await,
+        model,
+        permission_mode: hook_permission_mode_for_approval(approval_policy),
+        reason: SessionEndReason::Other,
+    };
+    let preview_runs = hooks.preview_session_end(&request);
+    if preview_runs.is_empty() {
+        return;
+    }
+    if let Err(err) = sess.flush_rollout().await {
+        tracing::warn!("failed to flush transcript before SessionEnd hook: {err}");
+    }
+    emit_hook_started_events(sess, &turn_context, preview_runs).await;
+
+    let outcome = hooks.run_session_end(request).await;
+    emit_hook_completed_events(sess, &turn_context, outcome.hook_events).await;
 }
 
 pub(crate) async fn run_pre_compact_hooks(
@@ -885,41 +918,6 @@ pub(crate) async fn run_notification_hooks(
     emit_hook_completed_events(sess, turn_context, outcome.hook_events).await;
 }
 
-/// Fires the SessionEnd hook during Codex shutdown so supervisors can observe
-/// the session-terminated signal even when the shell exited abruptly.
-pub(crate) async fn run_session_end_hooks(
-    sess: &Arc<Session>,
-    sub_id: String,
-    reason: SessionEndReason,
-) {
-    let (cwd, model, approval_policy) = sess.session_end_hook_fields().await;
-    let request = SessionEndRequest {
-        session_id: sess.thread_id,
-        cwd,
-        transcript_path: sess.hook_transcript_path().await,
-        model,
-        permission_mode: hook_permission_mode_for_approval(approval_policy),
-        reason,
-    };
-
-    for run in sess.hooks().preview_session_end(&request) {
-        let event = codex_protocol::protocol::Event {
-            id: sub_id.clone(),
-            msg: EventMsg::HookStarted(HookStartedEvent { turn_id: None, run }),
-        };
-        sess.send_event_raw(event).await;
-    }
-
-    let outcome = sess.hooks().run_session_end(request).await;
-    for completed in outcome.hook_events {
-        let event = codex_protocol::protocol::Event {
-            id: sub_id.clone(),
-            msg: EventMsg::HookCompleted(completed),
-        };
-        sess.send_event_raw(event).await;
-    }
-}
-
 /// Fires the StopFailure hook when a turn ends via an API error (rate
 /// limit, auth, billing, bad request, etc.). Distinct from Stop, which
 /// fires on normal turn completion.
@@ -984,7 +982,9 @@ mod tests {
                             .iter()
                             .map(|item| match item {
                                 ContentItem::InputText { text } => text.as_str(),
-                                ContentItem::InputImage { .. } | ContentItem::OutputText { .. } => {
+                                ContentItem::InputImage { .. }
+                                | ContentItem::InputAudio { .. }
+                                | ContentItem::OutputText { .. } => {
                                     panic!("expected input text content, got {item:?}")
                                 }
                             })

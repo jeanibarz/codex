@@ -1,10 +1,16 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::sync::RwLock;
 
+use codex_protocol::capabilities::CapabilityRootLocation;
+use codex_protocol::capabilities::SelectedCapabilityRoot;
 use futures::FutureExt;
 
+use crate::CapabilityRootsDiscoverParams;
+use crate::CapabilityRootsDiscoverResponse;
 use crate::ExecServerError;
 use crate::ExecServerRuntimePaths;
 use crate::ExecutorFileSystem;
@@ -72,9 +78,23 @@ pub struct EnvironmentManager {
     local_runtime_paths: Option<ExecServerRuntimePaths>,
 }
 
+/// Information supplied by the environment owner when a deferred environment is ready.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct EnvironmentReadyInfo {
+    /// Ordered capability roots selected for this environment.
+    pub selected_capability_roots: Vec<SelectedCapabilityRoot>,
+}
+
 /// The one-shot capability to complete a deferred environment registration.
 #[must_use = "the deferred environment cannot connect until registration is completed"]
-pub struct DeferredEnvironmentRegistration(oneshot::Sender<Result<(), String>>);
+pub struct DeferredEnvironmentRegistration {
+    completion: oneshot::Sender<Result<(), String>>,
+    environment_id: String,
+    ready_info: Arc<OnceLock<EnvironmentReadyInfo>>,
+}
+
+/// Maximum capability roots accepted from deferred environment ready information.
+pub const MAX_SELECTED_CAPABILITY_ROOTS: usize = 256;
 
 pub const LOCAL_ENVIRONMENT_ID: &str = "local";
 pub const REMOTE_ENVIRONMENT_ID: &str = "remote";
@@ -367,15 +387,22 @@ impl EnvironmentManager {
         validate_environment_id(&environment_id)?;
         let identity = noise_channel_identity()?;
         let (completion, readiness) = oneshot::channel();
-        let environment = Arc::new(Environment::remote_with_transport(
+        let ready_info = Arc::new(OnceLock::new());
+        let mut environment = Environment::remote_with_transport(
             ExecServerTransportParams::Deferred(Box::new(crate::client_api::Deferred {
                 readiness: readiness.shared(),
                 transport: ExecServerTransportParams::NoiseRendezvous { provider, identity },
             })),
             self.local_runtime_paths.clone(),
-        ));
-        self.insert_environment(environment_id, environment);
-        Ok(DeferredEnvironmentRegistration(completion))
+        );
+        environment.ready_info = Some(Arc::clone(&ready_info));
+        let environment = Arc::new(environment);
+        self.insert_environment(environment_id.clone(), environment);
+        Ok(DeferredEnvironmentRegistration {
+            completion,
+            environment_id,
+            ready_info,
+        })
     }
 
     /// Adds or replaces a named remote environment that connects through an
@@ -408,9 +435,48 @@ impl EnvironmentManager {
 }
 
 impl DeferredEnvironmentRegistration {
-    /// Completes provisioning with readiness or a terminal error message.
-    pub fn complete(self, result: Result<(), String>) -> Result<(), ExecServerError> {
-        self.0.send(result).map_err(|_| {
+    /// Completes provisioning with ready information or a terminal error message.
+    pub fn complete(
+        self,
+        result: Result<EnvironmentReadyInfo, String>,
+    ) -> Result<(), ExecServerError> {
+        let result = match result {
+            Ok(ready_info) => {
+                if ready_info.selected_capability_roots.len() > MAX_SELECTED_CAPABILITY_ROOTS {
+                    let error = ExecServerError::Protocol(format!(
+                        "environment ready info contains more than {MAX_SELECTED_CAPABILITY_ROOTS} selected capability roots"
+                    ));
+                    let _ = self.completion.send(Err(error.to_string()));
+                    return Err(error);
+                }
+                let mut root_ids =
+                    HashSet::with_capacity(ready_info.selected_capability_roots.len());
+                for root in &ready_info.selected_capability_roots {
+                    let CapabilityRootLocation::Environment { environment_id, .. } = &root.location;
+                    if root.id.trim().is_empty()
+                        || environment_id != &self.environment_id
+                        || !root_ids.insert(root.id.as_str())
+                    {
+                        let error = ExecServerError::Protocol(format!(
+                            "selected capability roots must have unique non-empty IDs and belong to environment `{}`",
+                            self.environment_id
+                        ));
+                        let _ = self.completion.send(Err(error.to_string()));
+                        return Err(error);
+                    }
+                }
+                if self.ready_info.set(ready_info).is_err() {
+                    let error = ExecServerError::Protocol(
+                        "deferred environment ready info was already set".to_string(),
+                    );
+                    let _ = self.completion.send(Err(error.to_string()));
+                    return Err(error);
+                }
+                Ok(())
+            }
+            Err(message) => Err(message),
+        };
+        self.completion.send(result).map_err(|_| {
             ExecServerError::Disconnected("deferred environment registration is inactive".into())
         })
     }
@@ -499,6 +565,7 @@ fn optional_environment_value(name: &str) -> Option<String> {
 #[derive(Clone)]
 pub struct Environment {
     remote_client: Option<LazyRemoteExecServerClient>,
+    ready_info: Option<Arc<OnceLock<EnvironmentReadyInfo>>>,
     // Dropping the environment stops unfinished background startup work.
     startup_task: Arc<Mutex<Option<AbortOnDropHandle<()>>>>,
     exec_backend: Arc<dyn ExecBackend>,
@@ -512,6 +579,7 @@ impl Environment {
     pub fn default_for_tests() -> Self {
         Self {
             remote_client: None,
+            ready_info: None,
             startup_task: Arc::new(Mutex::new(None)),
             exec_backend: Arc::new(LocalProcess::default()),
             filesystem: Arc::new(LocalFileSystem::unsandboxed()),
@@ -566,6 +634,7 @@ impl Environment {
     pub(crate) fn local(local_runtime_paths: ExecServerRuntimePaths) -> Self {
         Self {
             remote_client: None,
+            ready_info: None,
             startup_task: Arc::new(Mutex::new(None)),
             exec_backend: Arc::new(LocalProcess::with_local_runtime_paths(
                 local_runtime_paths.clone(),
@@ -602,6 +671,7 @@ impl Environment {
 
         Self {
             remote_client: Some(client.clone()),
+            ready_info: None,
             startup_task: Arc::new(Mutex::new(None)),
             exec_backend,
             filesystem,
@@ -612,6 +682,16 @@ impl Environment {
 
     pub fn is_remote(&self) -> bool {
         self.remote_client.is_some()
+    }
+
+    /// Returns capability roots supplied with the deferred environment's ready signal.
+    pub fn selected_capability_roots(&self) -> &[SelectedCapabilityRoot] {
+        self.ready_info
+            .as_ref()
+            .and_then(|ready_info| ready_info.get())
+            .map_or(&[], |ready_info| {
+                ready_info.selected_capability_roots.as_slice()
+            })
     }
 
     /// Subscribes to the current connection state for this remote environment.
@@ -632,6 +712,19 @@ impl Environment {
         match &self.remote_client {
             Some(client) => client.environment_info().await,
             None => Ok(EnvironmentInfo::local()),
+        }
+    }
+
+    /// Discovers plugin and skill manifests through the environment's high-level discovery API.
+    pub async fn discover_capability_roots(
+        &self,
+        params: CapabilityRootsDiscoverParams,
+    ) -> Result<CapabilityRootsDiscoverResponse, ExecServerError> {
+        match &self.remote_client {
+            Some(client) => client.get().await?.discover_capability_roots(params).await,
+            None => crate::discover_capability_roots(self.filesystem.as_ref(), params)
+                .await
+                .map_err(|error| ExecServerError::Protocol(error.to_string())),
         }
     }
 
@@ -1366,6 +1459,7 @@ mod tests {
                 sandbox: None,
                 enforce_managed_network: false,
                 managed_network: None,
+                network_proxy: None,
             })
             .await
             .expect("start process");
@@ -1406,6 +1500,7 @@ mod tests {
                 sandbox: Some(sandbox),
                 enforce_managed_network: false,
                 managed_network: None,
+                network_proxy: None,
             })
             .await;
         let Err(err) = result else {

@@ -26,6 +26,7 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::MultiAgentVersion;
@@ -34,9 +35,11 @@ use codex_protocol::protocol::ResumedHistory;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::user_input::UserInput;
+use codex_thread_store::LoadThreadHistoryParams;
 use codex_thread_store::ReadThreadParams;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -746,6 +749,10 @@ pub(crate) fn render_input_preview(input: &[UserInput]) -> String {
             UserInput::Image { .. } => "[image]".to_string(),
             UserInput::LocalImage { path, .. } => {
                 format!("[local_image:{}]", path.display())
+            }
+            UserInput::Audio { .. } => "[audio]".to_string(),
+            UserInput::LocalAudio { path } => {
+                format!("[local_audio:{}]", path.display())
             }
             UserInput::Skill { name, path, .. } => {
                 format!("[skill:${name}]({})", path.display())
