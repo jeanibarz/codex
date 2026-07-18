@@ -11,6 +11,7 @@ mod apps;
 // `ask` lists from settings.json). Not yet wired into ExecPolicyManager in
 // this rebase; tracked as a known gap and left as dead code so the module
 // stays compilable against upstream API changes.
+mod audio_preparation;
 #[allow(dead_code)]
 mod claude_permissions_compat;
 mod client;
