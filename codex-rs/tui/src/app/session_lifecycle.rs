@@ -7,6 +7,8 @@
 use super::*;
 use crate::app_server_session::source_agent_path;
 use crate::app_server_session::thread_blocks_direct_input;
+use codex_config::types::ResumeCwdMode;
+use std::collections::HashSet;
 
 #[derive(Clone, Copy)]
 pub(super) enum ThreadAttachPresentation {
@@ -14,9 +16,17 @@ pub(super) enum ThreadAttachPresentation {
     PromptEdit,
 }
 
+/// Reports whether a loaded-thread backfill completed and which descendants already had their
+/// liveness metadata refreshed, allowing the picker to skip duplicate `thread/read` requests.
+#[derive(Default)]
+pub(super) struct LoadedSubagentBackfill {
+    pub(super) completed: bool,
+    pub(super) refreshed_thread_ids: HashSet<ThreadId>,
+}
+
 impl App {
     pub(super) async fn open_agent_picker(&mut self, app_server: &mut AppServerSession) {
-        self.backfill_loaded_subagent_threads(app_server).await;
+        let backfill = self.backfill_loaded_subagent_threads(app_server).await;
         // V2 subagents are identified by canonical paths observed from activity events or loaded
         // thread metadata. A buffered active turn is positive liveness evidence; a completed
         // snapshot is terminal evidence. An empty store does not clear a successful spawn hint.
@@ -45,7 +55,7 @@ impl App {
                 } else if has_terminal_snapshot {
                     self.agent_navigation.mark_stopped(thread_id);
                 }
-            } else {
+            } else if !backfill.refreshed_thread_ids.contains(&thread_id) {
                 self.refresh_agent_picker_thread_liveness(app_server, thread_id)
                     .await;
             }
@@ -91,6 +101,7 @@ impl App {
         for thread_id in thread_ids {
             if path_backed_thread_ids.contains(&thread_id)
                 || self.side_threads.contains_key(&thread_id)
+                || backfill.refreshed_thread_ids.contains(&thread_id)
             {
                 continue;
             }
@@ -407,9 +418,13 @@ impl App {
             return Ok(());
         }
 
-        if !self
-            .refresh_agent_picker_thread_liveness(app_server, thread_id)
-            .await
+        // A tracked side thread stays loaded until it is explicitly discarded and already has a
+        // replay channel, so another liveness read cannot add anything before selection.
+        if !(self.side_threads.contains_key(&thread_id)
+            && self.thread_event_channels.contains_key(&thread_id)
+            || self
+                .refresh_agent_picker_thread_liveness(app_server, thread_id)
+                .await)
         {
             self.chat_widget
                 .add_error_message(format!("Agent thread {thread_id} is no longer available."));
@@ -626,7 +641,6 @@ impl App {
                 if let Err(err) = self
                     .replace_chat_widget_with_app_server_thread(
                         tui,
-                        app_server,
                         started,
                         ThreadAttachPresentation::SessionLineage,
                         initial_user_message,
@@ -661,7 +675,6 @@ impl App {
     pub(super) async fn replace_chat_widget_with_app_server_thread(
         &mut self,
         tui: &mut tui::Tui,
-        app_server: &mut AppServerSession,
         started: AppServerStartedThread,
         presentation: ThreadAttachPresentation,
         initial_user_message: Option<crate::chatwidget::UserMessage>,
@@ -685,16 +698,15 @@ impl App {
             presentation,
         )
         .await?;
-        self.backfill_loaded_subagent_threads(app_server).await;
         Ok(())
     }
 
     /// Fetches all loaded threads from the app server and registers descendants of the primary
     /// thread in the navigation cache and chat widget metadata.
     ///
-    /// Called after `replace_chat_widget_with_app_server_thread` during resume, fork, and new
-    /// thread creation so that the `/agent` picker and keyboard navigation are pre-populated even
-    /// if the TUI did not witness the original spawn events.
+    /// Called when opening the `/agent` picker and after resuming a thread so that the picker and
+    /// keyboard navigation are pre-populated even if the TUI did not witness the original spawn
+    /// events. Fresh and forked threads cannot have pre-existing descendants.
     ///
     /// The loaded-thread list is fetched in full (no pagination) and the spawn tree is walked
     /// by `find_loaded_subagent_threads_for_primary`. Each discovered subagent is registered via
@@ -703,9 +715,9 @@ impl App {
     pub(super) async fn backfill_loaded_subagent_threads(
         &mut self,
         app_server: &mut AppServerSession,
-    ) -> bool {
+    ) -> LoadedSubagentBackfill {
         let Some(primary_thread_id) = self.primary_thread_id else {
-            return false;
+            return LoadedSubagentBackfill::default();
         };
 
         let loaded_thread_ids = match app_server
@@ -718,7 +730,7 @@ impl App {
             Ok(response) => response.data,
             Err(err) => {
                 tracing::warn!(%err, "failed to list loaded threads for subagent backfill");
-                return false;
+                return LoadedSubagentBackfill::default();
             }
         };
 
@@ -746,8 +758,14 @@ impl App {
             }
         }
 
+        let mut refreshed_thread_ids = HashSet::new();
         for thread in find_loaded_subagent_threads_for_primary(threads, primary_thread_id) {
             let agent_path = thread.agent_path;
+            let has_live_channel = self
+                .thread_event_channels
+                .get(&thread.thread_id)
+                .is_some_and(|channel| channel.attachment() == ThreadEventAttachment::Live);
+            let is_closed = !has_live_channel && thread.is_closed;
             if thread.blocks_direct_input {
                 self.agent_navigation.mark_parent_owned(thread.thread_id);
             }
@@ -755,14 +773,28 @@ impl App {
                 thread.thread_id,
                 thread.agent_nickname,
                 thread.agent_role,
-                /*is_closed*/ false,
+                is_closed,
             );
             self.agent_navigation
                 .set_agent_path(thread.thread_id, agent_path);
+            // A live channel can have an empty store after a successful spawn. Only apply server
+            // status for channels that would otherwise need another liveness read.
+            if !has_live_channel {
+                if thread.is_running {
+                    self.agent_navigation.mark_running(thread.thread_id);
+                } else {
+                    self.agent_navigation
+                        .set_running(thread.thread_id, /*is_running*/ false);
+                }
+                refreshed_thread_ids.insert(thread.thread_id);
+            }
         }
         self.sync_active_agent_label();
 
-        !had_read_error
+        LoadedSubagentBackfill {
+            completed: !had_read_error,
+            refreshed_thread_ids,
+        }
     }
 
     /// Returns the adjacent thread id for keyboard navigation, backfilling from the server if the
@@ -791,7 +823,11 @@ impl App {
             return None;
         }
 
-        if self.backfill_loaded_subagent_threads(app_server).await {
+        if self
+            .backfill_loaded_subagent_threads(app_server)
+            .await
+            .completed
+        {
             self.last_subagent_backfill_attempt = Some(primary_thread_id);
         }
         self.agent_navigation
@@ -814,31 +850,80 @@ impl App {
             return Ok(AppRunControl::Continue);
         }
 
-        let current_cwd = self.config.cwd.to_path_buf();
+        self.refresh_in_memory_config_from_disk_best_effort("resuming a thread")
+            .await;
+        let cwd_override = self
+            .harness_overrides
+            .cwd
+            .as_deref()
+            .or_else(|| app_server.remote_cwd_override());
+        let resume_cwd_mode = crate::session_resume::effective_resume_cwd_mode(
+            self.config.tui_resume_cwd,
+            cwd_override,
+        );
+        let remembered_current_cwd = cwd_override.unwrap_or(self.launch_cwd.as_path());
+        let current_cwd = if matches!(resume_cwd_mode, Some(ResumeCwdMode::Current)) {
+            remembered_current_cwd.to_path_buf()
+        } else {
+            self.config.cwd.to_path_buf()
+        };
+        let uses_remote_workspace_or_environment = crate::uses_remote_workspace_or_environment(
+            &self.app_server_target,
+            &self.environment_manager,
+        );
+        if uses_remote_workspace_or_environment
+            && self.harness_overrides.cwd.is_none()
+            && app_server.remote_cwd_override().is_none()
+            && matches!(resume_cwd_mode, Some(ResumeCwdMode::Current))
+        {
+            self.chat_widget.add_error_message(
+                "`tui.resume_cwd = \"current\"` requires `--cd` when using a remote workspace"
+                    .to_string(),
+            );
+            return Ok(AppRunControl::Continue);
+        }
         let resume_cwd = if self.app_server_target.uses_remote_workspace() {
             current_cwd.clone()
         } else {
-            match crate::session_resume::resolve_cwd_for_resume_or_fork(
+            let outcome = crate::session_resume::resolve_cwd_for_resume_or_fork(
                 tui,
+                &self.config,
                 self.state_db.as_deref(),
-                &current_cwd,
-                target_session.thread_id,
-                target_session.path.as_deref(),
+                &target_session,
                 CwdPromptAction::Resume,
-                /*allow_prompt*/ true,
+                crate::session_resume::ResumeCwdContext {
+                    current_cwd: &current_cwd,
+                    remembered_current_cwd,
+                    allow_remember_current: !uses_remote_workspace_or_environment
+                        || cwd_override.is_some(),
+                    mode: resume_cwd_mode,
+                },
             )
-            .await?
-            {
-                crate::session_resume::ResolveCwdOutcome::Continue(Some(cwd)) => cwd,
-                crate::session_resume::ResolveCwdOutcome::Continue(None) => current_cwd.clone(),
-                crate::session_resume::ResolveCwdOutcome::Exit => {
+            .await;
+            match outcome {
+                Err(err) => {
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to determine working directory for resume: {err}"
+                    ));
+                    return Ok(AppRunControl::Continue);
+                }
+                Ok(crate::session_resume::ResolveCwdOutcome::Continue(Some(cwd))) => cwd,
+                Ok(crate::session_resume::ResolveCwdOutcome::Continue(None)) => current_cwd.clone(),
+                Ok(crate::session_resume::ResolveCwdOutcome::Exit) => {
                     return Ok(AppRunControl::Exit(ExitReason::UserRequested));
                 }
             }
         };
 
+        let (config_current_cwd, config_resume_cwd) =
+            if self.app_server_target.uses_remote_workspace() {
+                let local_config_cwd = self.config.cwd.to_path_buf();
+                (local_config_cwd.clone(), local_config_cwd)
+            } else {
+                (current_cwd, resume_cwd)
+            };
         let mut resume_config = match self
-            .rebuild_config_for_resume_or_fallback(&current_cwd, resume_cwd)
+            .rebuild_config_for_resume_or_fallback(&config_current_cwd, config_resume_cwd)
             .await
         {
             Ok(cfg) => cfg,
@@ -878,7 +963,6 @@ impl App {
                 match self
                     .replace_chat_widget_with_app_server_thread(
                         tui,
-                        app_server,
                         resumed,
                         ThreadAttachPresentation::SessionLineage,
                         /*initial_user_message*/ None,
@@ -886,6 +970,7 @@ impl App {
                     .await
                 {
                     Ok(()) => {
+                        self.backfill_loaded_subagent_threads(app_server).await;
                         if let Some(summary) = summary {
                             let mut lines: Vec<Line<'static>> = Vec::new();
                             if let Some(usage_line) = summary.usage_line {

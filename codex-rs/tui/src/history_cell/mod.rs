@@ -112,6 +112,7 @@ mod approvals;
 mod base;
 mod exec;
 mod hook_cell;
+mod markdown_render_cache;
 mod mcp;
 mod messages;
 mod notices;
@@ -276,6 +277,14 @@ pub(crate) trait HistoryCell: std::fmt::Debug + Send + Sync + Any {
             .line_count(width)
             .try_into()
             .unwrap_or(0)
+    }
+
+    /// Whether the transcript height remains valid across later overlay renders.
+    ///
+    /// Cells backed by external state should return `false` so the pager remeasures them before
+    /// rendering instead of reusing a height that may now clip their content.
+    fn has_stable_transcript_height(&self) -> bool {
+        true
     }
 
     fn is_stream_continuation(&self) -> bool {
