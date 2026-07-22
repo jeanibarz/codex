@@ -168,7 +168,7 @@ fn merge_persisted_resume_metadata(
 }
 
 fn merge_persisted_approvals_reviewer(
-    thread_history: &InitialHistory,
+    history: &[RolloutItem],
     request_overrides: Option<&HashMap<String, serde_json::Value>>,
     typesafe_overrides: &mut ConfigOverrides,
 ) {
@@ -178,21 +178,13 @@ fn merge_persisted_approvals_reviewer(
         return;
     }
 
-    let InitialHistory::Resumed(resumed_history) = thread_history else {
-        return;
-    };
-    typesafe_overrides.approvals_reviewer =
-        resumed_history
-            .history
-            .iter()
-            .rev()
-            .find_map(|item| match item {
-                RolloutItem::TurnContext(turn_context) => turn_context.approvals_reviewer,
-                RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => {
-                    Some(event.thread_settings.approvals_reviewer)
-                }
-                _ => None,
-            });
+    typesafe_overrides.approvals_reviewer = history.iter().rev().find_map(|item| match item {
+        RolloutItem::TurnContext(turn_context) => turn_context.approvals_reviewer,
+        RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => {
+            Some(event.thread_settings.approvals_reviewer)
+        }
+        _ => None,
+    });
 }
 
 fn normalize_thread_list_cwd_filters(
@@ -1319,7 +1311,7 @@ impl ThreadRequestProcessor {
 
         listener_task_context
             .thread_watch_manager
-            .upsert_thread_silently(thread.clone())
+            .upsert_thread_silently(&thread.id)
             .instrument(tracing::info_span!(
                 "app_server.thread_start.upsert_thread",
                 otel.name = "app_server.thread_start.upsert_thread",
@@ -2992,14 +2984,9 @@ impl ThreadRequestProcessor {
         let mut raw_events_enabled = false;
         if let Ok(thread) = self.thread_manager.get_thread(thread_id).await {
             let config_snapshot = thread.config_snapshot().await;
-            let loaded_thread = build_thread_from_snapshot(
-                thread_id,
-                thread.session_configured().session_id.to_string(),
-                thread.multi_agent_version(),
-                &config_snapshot,
-                thread.rollout_path(),
-            );
-            self.thread_watch_manager.upsert_thread(loaded_thread).await;
+            self.thread_watch_manager
+                .upsert_thread(&thread_id.to_string())
+                .await;
             if let Some(parent_thread_id) = config_snapshot.parent_thread_id {
                 raw_events_enabled = self
                     .thread_state_manager
@@ -3294,9 +3281,7 @@ impl ThreadRequestProcessor {
                     thread.turns = materialized_turns;
                 }
 
-                self.thread_watch_manager
-                    .upsert_thread(thread.clone())
-                    .await;
+                self.thread_watch_manager.upsert_thread(&thread.id).await;
 
                 let thread_status = self
                     .thread_watch_manager
@@ -3330,7 +3315,9 @@ impl ThreadRequestProcessor {
                 let active_permission_profile = thread_response_active_permission_profile(
                     config_snapshot.active_permission_profile,
                 );
-                let token_usage_thread = include_turns.then(|| thread.clone());
+                let token_usage_turn_id = include_turns.then(|| {
+                    restored_token_usage_turn_id(response_history.get_rollout_items(), &thread)
+                });
                 let mut initial_turns_page = if let Some(params) = initial_turns_page.as_ref() {
                     let initial_turns_page_result = if paginated_resume {
                         self.paginated_resume_initial_turns_page(thread_id, params)
@@ -3387,11 +3374,7 @@ impl ThreadRequestProcessor {
                     .await;
                 // `excludeTurns` is explicitly the cheap resume path, so avoid
                 // rebuilding history only to attribute a replayed usage update.
-                if let Some(token_usage_thread) = token_usage_thread {
-                    let token_usage_turn_id = latest_token_usage_turn_id_from_rollout_items(
-                        response_history.get_rollout_items(),
-                        token_usage_thread.turns.as_slice(),
-                    );
+                if let Some(token_usage_turn_id) = token_usage_turn_id {
                     // The client needs restored usage before it starts another turn.
                     // Sending after the response preserves JSON-RPC request ordering while
                     // still filling the status line before the next turn lifecycle begins.
@@ -3399,7 +3382,6 @@ impl ThreadRequestProcessor {
                         &self.outgoing,
                         connection_id,
                         thread_id,
-                        &token_usage_thread,
                         codex_thread.as_ref(),
                         token_usage_turn_id,
                     )
@@ -3423,14 +3405,14 @@ impl ThreadRequestProcessor {
         request_overrides: &mut Option<HashMap<String, serde_json::Value>>,
         typesafe_overrides: &mut ConfigOverrides,
     ) -> Option<ThreadMetadata> {
-        merge_persisted_approvals_reviewer(
-            thread_history,
-            request_overrides.as_ref(),
-            typesafe_overrides,
-        );
         let InitialHistory::Resumed(resumed_history) = thread_history else {
             return None;
         };
+        merge_persisted_approvals_reviewer(
+            &resumed_history.history,
+            request_overrides.as_ref(),
+            typesafe_overrides,
+        );
         let state_db_ctx = self.state_db.clone()?;
         let persisted_metadata = state_db_ctx
             .get_thread(resumed_history.conversation_id)
@@ -4039,7 +4021,7 @@ impl ThreadRequestProcessor {
             .name
             .as_deref()
             .and_then(codex_core::util::normalize_thread_name);
-        let history_items = source_thread
+        let source_history_items = source_thread
             .history
             .take()
             .map(|history| history.items)
@@ -4048,16 +4030,17 @@ impl ThreadRequestProcessor {
                     "thread {source_thread_id} did not include persisted history"
                 ))
             })?;
+        let source_history_items = Arc::new(source_history_items);
         let history_items = match (last_turn_id.as_deref(), before_turn_id.as_deref()) {
             (Some(last_turn_id), None) => Arc::new(
-                truncate_rollout_after_turn_id(&history_items, last_turn_id)
+                truncate_rollout_after_turn_id(&source_history_items, last_turn_id)
                     .map_err(|err| core_thread_write_error("truncate thread for fork", err))?,
             ),
             (None, Some(before_turn_id)) => Arc::new(
-                truncate_rollout_before_turn_id(&history_items, before_turn_id)
+                truncate_rollout_before_turn_id(&source_history_items, before_turn_id)
                     .map_err(|err| core_thread_write_error("truncate thread for fork", err))?,
             ),
-            (None, None) => Arc::new(history_items),
+            (None, None) => Arc::clone(&source_history_items),
             (Some(_), Some(_)) => unreachable!("fork boundaries are mutually exclusive"),
         };
         let history_cwd = Some(source_thread.cwd.clone());
@@ -4084,6 +4067,11 @@ impl ThreadRequestProcessor {
         } else {
             Some(cli_overrides)
         };
+        let thread_history = InitialHistory::Resumed(ResumedHistory {
+            conversation_id: source_thread_id,
+            history: Arc::clone(&history_items),
+            rollout_path: source_thread.rollout_path.clone(),
+        });
         let runtime_workspace_roots = runtime_workspace_roots.map(resolve_runtime_workspace_roots);
         let mut typesafe_overrides = self.build_thread_config_overrides(
             model,
@@ -4101,7 +4089,11 @@ impl ThreadRequestProcessor {
         );
         self.apply_process_thread_config_overrides(&mut typesafe_overrides);
         typesafe_overrides.ephemeral = ephemeral.then_some(true);
-        self.apply_process_thread_config_overrides(&mut typesafe_overrides);
+        merge_persisted_approvals_reviewer(
+            &source_history_items,
+            request_overrides.as_ref(),
+            &mut typesafe_overrides,
+        );
         // Derive a Config using the same logic as new conversation, honoring overrides if provided.
         let config = self
             .config_manager
@@ -4122,11 +4114,7 @@ impl ThreadRequestProcessor {
             .fork_thread_from_history(
                 ForkSnapshot::Interrupted,
                 config,
-                InitialHistory::Resumed(ResumedHistory {
-                    conversation_id: source_thread_id,
-                    history: Arc::clone(&history_items),
-                    rollout_path: source_thread.rollout_path.clone(),
-                }),
+                thread_history,
                 thread_source.map(Into::into),
                 self.request_trace_context(&request_id).await,
                 supports_openai_form_elicitation,
@@ -4247,7 +4235,7 @@ impl ThreadRequestProcessor {
         thread.thread_source = config_snapshot.thread_source.clone().map(Into::into);
 
         self.thread_watch_manager
-            .upsert_thread_silently(thread.clone())
+            .upsert_thread_silently(&thread.id)
             .await;
 
         thread.status = resolve_thread_status(
@@ -4279,24 +4267,20 @@ impl ThreadRequestProcessor {
 
         let notif = thread_started_notification(thread);
         let connection_id = request_id.connection_id;
-        let token_usage_thread = include_turns.then(|| response.thread.clone());
+        let token_usage_turn_id =
+            include_turns.then(|| restored_token_usage_turn_id(&history_items, &response.thread));
         self.outgoing
             .send_response_with_thread_originator(request_id, response, thread_originator)
             .await;
         // `excludeTurns` is the cheap fork path, so skip restored usage replay
         // instead of rebuilding history only to attribute a historical update.
-        if let Some(token_usage_thread) = token_usage_thread {
-            let token_usage_turn_id = latest_token_usage_turn_id_from_rollout_items(
-                &history_items,
-                token_usage_thread.turns.as_slice(),
-            );
+        if let Some(token_usage_turn_id) = token_usage_turn_id {
             // Mirror the resume contract for forks: the new thread is usable as soon
             // as the response arrives, so restored usage must follow immediately.
             send_thread_token_usage_update_to_connection(
                 &self.outgoing,
                 connection_id,
                 thread_id,
-                &token_usage_thread,
                 forked_thread.as_ref(),
                 token_usage_turn_id,
             )

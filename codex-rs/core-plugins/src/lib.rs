@@ -4,6 +4,7 @@ mod claude_loader;
 mod command_migration;
 mod config_layer_compat;
 mod discoverable;
+mod http_client_selector;
 pub mod installed_marketplaces;
 pub mod loader;
 mod manager;
