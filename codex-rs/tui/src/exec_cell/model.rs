@@ -5,17 +5,59 @@
 //! end events into the right cell, and it treats "call id not found" as a real signal (for
 //! example, an orphan end that should render as a separate history entry).
 
+use std::borrow::Cow;
 use std::time::Duration;
 use std::time::Instant;
 
+use super::live_output::LiveCommandOutput;
 use codex_app_server_protocol::CommandExecutionSource as ExecCommandSource;
 use codex_protocol::parse_command::ParsedCommand;
+use itertools::Either;
 
 #[derive(Debug, Default)]
 pub(crate) struct CommandOutput {
     pub(crate) exit_code: i32,
-    /// The aggregated stderr + stdout interleaved.
-    pub(crate) aggregated_output: String,
+    /// The finalized, interleaved stderr and stdout that replaces any streamed preview.
+    aggregated_output: String,
+    /// The live preview while command-output deltas are still arriving.
+    live_output: Option<LiveCommandOutput>,
+}
+
+impl CommandOutput {
+    pub(crate) fn new(exit_code: i32, aggregated_output: String) -> Self {
+        Self {
+            exit_code,
+            aggregated_output,
+            live_output: None,
+        }
+    }
+
+    /// Returns the total number of logical lines and the number retained for rendering.
+    pub(super) fn line_counts(&self) -> (usize, usize) {
+        match self.live_output.as_ref() {
+            Some(output) => (output.total_lines(), output.retained_lines()),
+            None => {
+                let total = self.aggregated_output.lines().count();
+                (total, total)
+            }
+        }
+    }
+
+    /// Returns retained preview lines with reverse traversal for efficient tail rendering.
+    pub(super) fn lines(&self) -> impl DoubleEndedIterator<Item = Cow<'_, str>> {
+        match self.live_output.as_ref() {
+            Some(output) => Either::Left(output.lines()),
+            None => Either::Right(self.aggregated_output.lines().map(Cow::Borrowed)),
+        }
+    }
+
+    /// Returns lines for the expanded transcript, including any storage-level omission marker.
+    pub(super) fn transcript_lines(&self) -> impl Iterator<Item = Cow<'_, str>> {
+        match self.live_output.as_ref() {
+            Some(output) => Either::Left(output.transcript_lines()),
+            None => Either::Right(self.aggregated_output.lines().map(Cow::Borrowed)),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -141,7 +183,10 @@ impl ExecCell {
             return false;
         };
         let output = call.output.get_or_insert_with(CommandOutput::default);
-        output.aggregated_output.push_str(chunk);
+        output
+            .live_output
+            .get_or_insert_with(LiveCommandOutput::default)
+            .push_str(chunk);
         true
     }
 
