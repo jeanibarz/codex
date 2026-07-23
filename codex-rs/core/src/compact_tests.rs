@@ -24,7 +24,6 @@ async fn process_compacted_history_with_test_session(
             &turn_context,
             world_state.as_ref(),
             step_context.mcp.as_ref(),
-            &step_context.extension_data,
         )
         .await;
     let initial_context_injection = InitialContextInjection::BeforeLastUserMessage {
@@ -285,6 +284,7 @@ fn should_use_remote_compact_task_for_azure_provider() {
         websocket_connect_timeout_ms: None,
         requires_openai_auth: false,
         supports_websockets: false,
+        supports_standalone_web_search: false,
     };
 
     assert!(should_use_remote_compact_task(&provider));
