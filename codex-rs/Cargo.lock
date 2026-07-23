@@ -3119,7 +3119,7 @@ dependencies = [
 
 [[package]]
 name = "codex-git-attribution"
-version = "0.0.0"
+version = "0.145.0-alpha.4"
 dependencies = [
  "codex-backend-client",
  "codex-extension-api",
