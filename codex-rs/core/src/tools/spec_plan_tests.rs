@@ -186,7 +186,9 @@ async fn probe_with(
     let turn = Arc::new(turn);
     let step_context = StepContext::for_test(Arc::clone(&turn));
     let router = ToolRouter::from_context(
-        step_context.as_ref(),
+        step_context.turn.as_ref(),
+        &step_context.environments,
+        step_context.mcp.as_ref(),
         ToolRouterParams {
             tool_suggest_candidates: inputs.tool_suggest_candidates,
             tool_runtimes: inputs.tool_runtimes,
@@ -684,17 +686,12 @@ async fn environment_tools_follow_the_step_context() {
     let environments = turn.environments.clone();
     turn.environments.environments.clear();
     let turn = Arc::new(turn);
-    let step_context = Arc::new(StepContext::new(
-        Arc::clone(&turn),
-        environments,
-        Vec::new(),
-        /*executor_capability_discovery*/ None,
-        crate::session::McpRuntimeSnapshot::new_uninitialized_for_test(&turn.config),
-        /*loaded_agents_md*/ None,
-    ));
+    let mcp = crate::session::McpRuntimeSnapshot::new_uninitialized_for_test(&turn.config);
 
     let plan = ToolPlanProbe::from_router(ToolRouter::from_context(
-        step_context.as_ref(),
+        turn.as_ref(),
+        &environments,
+        mcp.as_ref(),
         ToolRouterParams {
             tool_runtimes: Vec::new(),
             tool_suggest_candidates: None,
@@ -840,7 +837,9 @@ async fn tool_search_cache_rebuilds_when_deferred_sources_change() {
     let first_turn = Arc::new(first_turn);
     let first_step_context = StepContext::for_test(Arc::clone(&first_turn));
     let first_router = ToolRouter::from_context(
-        first_step_context.as_ref(),
+        first_step_context.turn.as_ref(),
+        &first_step_context.environments,
+        first_step_context.mcp.as_ref(),
         ToolRouterParams {
             tool_runtimes: vec![mcp_runtime(
                 "first",
@@ -861,7 +860,9 @@ async fn tool_search_cache_rebuilds_when_deferred_sources_change() {
     let second_turn = Arc::new(second_turn);
     let second_step_context = StepContext::for_test(Arc::clone(&second_turn));
     let second_router = ToolRouter::from_context(
-        second_step_context.as_ref(),
+        second_step_context.turn.as_ref(),
+        &second_step_context.environments,
+        second_step_context.mcp.as_ref(),
         ToolRouterParams {
             tool_runtimes: vec![mcp_runtime(
                 "second",
@@ -1342,6 +1343,30 @@ async fn multi_agent_v2_message_schemas_are_encrypted() {
             Some(true)
         );
     }
+}
+
+#[tokio::test]
+async fn multi_agent_v2_can_disable_wait_agent() {
+    let plan = probe(|turn| {
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+        update_config(turn, |config| {
+            config.multi_agent_v2.wait_agent_enabled = false;
+        });
+    })
+    .await;
+
+    assert_eq!(
+        plan.namespace_function_names(MULTI_AGENT_V2_NAMESPACE),
+        &[
+            "followup_task".to_string(),
+            "interrupt_agent".to_string(),
+            "list_agents".to_string(),
+            "send_message".to_string(),
+            "spawn_agent".to_string(),
+        ]
+    );
+    plan.assert_visible_lacks(&["clock"]);
+    plan.assert_registered_lacks(&["collaboration.wait_agent", "clock.sleep"]);
 }
 
 #[tokio::test]

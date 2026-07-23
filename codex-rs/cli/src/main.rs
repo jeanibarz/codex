@@ -26,8 +26,8 @@ use codex_execpolicy::ExecPolicyCheckCommand;
 use codex_responses_api_proxy::Args as ResponsesApiProxyArgs;
 use codex_rollout_trace::REDUCED_STATE_FILE_NAME;
 use codex_rollout_trace::replay_bundle;
+use codex_state::SqliteConfig;
 use codex_state::StateRuntime;
-use codex_state::memories_db_path;
 use codex_tui::AppExitInfo;
 use codex_tui::Cli as TuiCli;
 use codex_tui::ExitReason;
@@ -2006,10 +2006,20 @@ async fn run_debug_prompt_input_command(
     let user_instructions_provider = Arc::new(CodexHomeUserInstructionsProvider::new(
         config.codex_home.clone(),
     ));
+    let auth_manager =
+        AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false).await;
+    let mut extensions = codex_extension_api::ExtensionRegistryBuilder::new();
+    codex_git_attribution::install(
+        &mut extensions,
+        auth_manager,
+        config.chatgpt_base_url.clone(),
+        config.http_client_factory(),
+    );
     let prompt_input = codex_core::build_prompt_input(
         config,
         input,
         /*state_db*/ None,
+        Arc::new(extensions.build()),
         user_instructions_provider,
     )
     .await?;
@@ -2059,7 +2069,9 @@ async fn run_debug_clear_memories_command(
         .build()
         .await?;
 
-    let memories_path = memories_db_path(config.sqlite_home.as_path());
+    let sqlite_home =
+        AbsolutePathBuf::resolve_path_against_base(&config.sqlite_home, &config.codex_home);
+    let memories_path = SqliteConfig::from_sqlite_home(sqlite_home).memories_db_path();
     let cleared_memories_db =
         StateRuntime::clear_memory_data_in_sqlite_home(config.sqlite_home.as_path()).await?;
 
