@@ -225,6 +225,7 @@ fn spawn_agent_tool_v1_description_authorizes_skill_workflow_spawns() {
     let tool = create_spawn_agent_tool_v1(SpawnAgentToolOptions {
         available_models: vec![model_preset("visible", /*show_in_picker*/ true)],
         agent_type_description: "role help".to_string(),
+        expose_agent_type: true,
         hide_agent_type_model_reasoning: false,
         expose_spawn_agent_model_overrides: true,
         multi_agent_version: MultiAgentVersion::V1,

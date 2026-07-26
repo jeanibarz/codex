@@ -160,7 +160,7 @@ enabled = true
 
     let full = load_plugins_from_layer_stack(
         &stack,
-        HashMap::new(),
+        RemoteInstalledPluginsSnapshot::default(),
         &store,
         /*plugin_skill_snapshots*/ None,
         Some(Product::Codex),
@@ -291,19 +291,20 @@ async fn hooks_only_scope_loads_claude_plugin_hooks_without_other_capabilities()
 
     let full = load_plugins_from_layer_stack(
         &stack,
-        HashMap::new(),
+        RemoteInstalledPluginsSnapshot::default(),
         &store,
         /*plugin_skill_snapshots*/ None,
         Some(Product::Codex),
         /*plugin_hooks_enabled*/ true,
-        /*prefer_remote_curated_conflicts*/ false,
+        /*remote_global_catalog_active*/ false,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
     )
     .await;
     let hooks_only = load_plugins_from_layer_stack_with_scope(
         &stack,
         HashMap::new(),
         &store,
-        /*prefer_remote_curated_conflicts*/ false,
+        /*remote_global_catalog_active*/ false,
         PluginLoadScope::HooksOnly,
     )
     .await;

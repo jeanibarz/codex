@@ -86,6 +86,42 @@ fn code_mode_only_requires_code_mode() {
 }
 
 #[test]
+fn code_mode_host_feature_config_preserves_boolean_toggle() {
+    let features: FeaturesToml =
+        toml::from_str("code_mode_host = false").expect("features table should deserialize");
+
+    assert_eq!(features.code_mode_host, Some(FeatureToml::Enabled(false)));
+    assert_eq!(
+        features.entries(),
+        BTreeMap::from([("code_mode_host".to_string(), false)])
+    );
+}
+
+#[test]
+fn code_mode_host_feature_config_deserializes_fallback_setting() {
+    let features: FeaturesToml = toml::from_str(
+        r#"
+[code_mode_host]
+enabled = true
+disable_in_process_fallback = true
+"#,
+    )
+    .expect("features table should deserialize");
+
+    assert_eq!(
+        features.code_mode_host,
+        Some(FeatureToml::Config(crate::CodeModeHostConfigToml {
+            enabled: Some(true),
+            disable_in_process_fallback: Some(true),
+        }))
+    );
+    assert_eq!(
+        features.entries(),
+        BTreeMap::from([("code_mode_host".to_string(), true)])
+    );
+}
+
+#[test]
 fn from_sources_ignores_removed_terminal_resize_reflow_feature_key() {
     let features_toml = FeaturesToml::from(BTreeMap::from([(
         "terminal_resize_reflow".to_string(),
@@ -445,14 +481,60 @@ non_code_mode_only = true
 }
 
 #[test]
+fn non_prefixed_mcp_tool_names_feature_config_deserializes_boolean_toggle() {
+    let features: FeaturesToml = toml::from_str("non_prefixed_mcp_tool_names = true")
+        .expect("features table should deserialize");
+
+    assert_eq!(
+        features.entries(),
+        BTreeMap::from([("non_prefixed_mcp_tool_names".to_string(), true)])
+    );
+    assert_eq!(
+        features.non_prefixed_mcp_tool_names,
+        Some(FeatureToml::Enabled(true))
+    );
+}
+
+#[test]
+fn non_prefixed_mcp_tool_names_feature_config_deserializes_table() {
+    let features: FeaturesToml = toml::from_str(
+        r#"
+[non_prefixed_mcp_tool_names]
+enabled = true
+server_names = ["history", "notes"]
+"#,
+    )
+    .expect("features table should deserialize");
+
+    assert_eq!(
+        features.entries(),
+        BTreeMap::from([("non_prefixed_mcp_tool_names".to_string(), true)])
+    );
+    assert_eq!(
+        features.non_prefixed_mcp_tool_names,
+        Some(FeatureToml::Config(
+            crate::NonPrefixedMcpToolNamesConfigToml {
+                enabled: Some(true),
+                server_names: Some(vec!["history".to_string(), "notes".to_string()]),
+            }
+        ))
+    );
+}
+
+#[test]
 fn materialize_resolved_enabled_writes_all_features_and_preserves_custom_config() {
     let mut features = Features::with_defaults();
     features.enable(Feature::CodeMode);
     features.enable(Feature::MultiAgentV2);
     features.enable(Feature::NetworkProxy);
+    features.enable(Feature::NonPrefixedMcpToolNames);
     features.enable(Feature::RespectSystemProxy);
 
     let mut features_toml = FeaturesToml {
+        code_mode_host: Some(FeatureToml::Config(crate::CodeModeHostConfigToml {
+            enabled: Some(false),
+            disable_in_process_fallback: Some(true),
+        })),
         multi_agent_v2: Some(FeatureToml::Config(crate::MultiAgentV2ConfigToml {
             enabled: Some(false),
             min_wait_timeout_ms: Some(2500),
@@ -463,6 +545,12 @@ fn materialize_resolved_enabled_writes_all_features_and_preserves_custom_config(
             proxy_url: Some("http://127.0.0.1:43128".to_string()),
             ..Default::default()
         })),
+        non_prefixed_mcp_tool_names: Some(FeatureToml::Config(
+            crate::NonPrefixedMcpToolNamesConfigToml {
+                enabled: Some(false),
+                server_names: Some(vec!["history".to_string(), "notes".to_string()]),
+            },
+        )),
         entries: BTreeMap::new(),
         ..Default::default()
     };
@@ -479,6 +567,13 @@ fn materialize_resolved_enabled_writes_all_features_and_preserves_custom_config(
         );
     }
     assert_eq!(
+        features_toml.code_mode_host,
+        Some(FeatureToml::Config(crate::CodeModeHostConfigToml {
+            enabled: Some(true),
+            disable_in_process_fallback: Some(true),
+        }))
+    );
+    assert_eq!(
         features_toml.multi_agent_v2,
         Some(FeatureToml::Config(crate::MultiAgentV2ConfigToml {
             enabled: Some(true),
@@ -493,6 +588,15 @@ fn materialize_resolved_enabled_writes_all_features_and_preserves_custom_config(
             proxy_url: Some("http://127.0.0.1:43128".to_string()),
             ..Default::default()
         }))
+    );
+    assert_eq!(
+        features_toml.non_prefixed_mcp_tool_names,
+        Some(FeatureToml::Config(
+            crate::NonPrefixedMcpToolNamesConfigToml {
+                enabled: Some(true),
+                server_names: Some(vec!["history".to_string(), "notes".to_string()]),
+            }
+        ))
     );
     let replayed = Features::from_sources(
         FeatureConfigSource {

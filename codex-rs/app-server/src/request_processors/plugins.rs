@@ -59,6 +59,8 @@ fn plugin_skills_to_info(
                     short_description: interface.short_description,
                     icon_small: interface.icon_small,
                     icon_large: interface.icon_large,
+                    icon_small_url: None,
+                    icon_large_url: None,
                     brand_color: interface.brand_color,
                     default_prompt: interface.default_prompt,
                 }
@@ -155,6 +157,7 @@ fn share_context_for_source(
                 creator_account_user_id: None,
                 creator_name: None,
                 share_principals: None,
+                can_publish_to_workspace: None,
             }),
         MarketplacePluginSource::Git { .. } | MarketplacePluginSource::Npm { .. } => None,
     }
@@ -1052,6 +1055,8 @@ impl PluginRequestProcessor {
                                     Some(remote_plugin_share_context_to_info(remote_share_context))
                                 } else {
                                     let remote_version = remote_share_context.remote_version;
+                                    let can_publish_to_workspace =
+                                        remote_share_context.can_publish_to_workspace;
                                     let remote_plugin_id = context.remote_plugin_id.clone();
                                     warn!(
                                         remote_plugin_id = %remote_plugin_id,
@@ -1059,6 +1064,7 @@ impl PluginRequestProcessor {
                                     );
                                     Some(PluginShareContext {
                                         remote_version,
+                                        can_publish_to_workspace,
                                         ..context
                                     })
                                 }
@@ -1286,6 +1292,7 @@ impl PluginRequestProcessor {
         Ok(PluginShareSaveResponse {
             remote_plugin_id,
             share_url: result.share_url.unwrap_or_default(),
+            can_publish_to_workspace: result.can_publish_to_workspace,
         })
     }
 
@@ -1864,6 +1871,7 @@ impl PluginRequestProcessor {
             let callback_url = config.mcp_oauth_callback_url.clone();
             let outgoing = Arc::clone(&self.outgoing);
             let notification_name = name.clone();
+            let thread_manager = Arc::clone(&self.thread_manager);
 
             tokio::spawn(async move {
                 let oauth_client_id = server.oauth_client_id();
@@ -1906,6 +1914,9 @@ impl PluginRequestProcessor {
                     Ok(()) => (true, None),
                     Err(err) => (false, Some(err.to_string())),
                 };
+                if success {
+                    thread_manager.invalidate_mcp_runtimes().await;
+                }
 
                 let notification = ServerNotification::McpServerOauthLoginCompleted(
                     McpServerOauthLoginCompletedNotification {
@@ -2205,6 +2216,7 @@ fn remote_plugin_share_context_to_info(
                 .map(plugin_share_principal_from_remote)
                 .collect()
         }),
+        can_publish_to_workspace: context.can_publish_to_workspace,
     }
 }
 

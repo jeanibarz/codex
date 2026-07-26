@@ -279,6 +279,7 @@ pub(crate) async fn maybe_emit_implicit_skill_invocation(
         skill_scope: candidate.scope,
         skill_path: candidate.path_to_skills_md.to_path_buf(),
         plugin_id: candidate.plugin_id,
+        remote_plugin_id: candidate.remote_plugin_id,
         invocation_type: InvocationType::Implicit,
     };
     let skill_scope = match invocation.skill_scope {
@@ -342,6 +343,8 @@ pub(crate) async fn maybe_emit_implicit_skill_invocation(
 mod tests {
     use super::*;
     use codex_utils_absolute_path::AbsolutePathBuf;
+    use codex_utils_plugins::PluginIdentity;
+    use codex_utils_plugins::SkillDiscoveryMode;
     use pretty_assertions::assert_eq;
     use std::fs;
     use tempfile::tempdir;
@@ -370,9 +373,13 @@ mod tests {
             include_cli_plugin_skill_roots(&config, Vec::new()),
             vec![PluginSkillRoot {
                 path: expected_skill_root,
-                plugin_id: "kookr-toolkit".to_string(),
+                plugin_identity: PluginIdentity {
+                    plugin_id: "kookr-toolkit".to_string(),
+                    remote_plugin_id: None,
+                },
                 plugin_namespace: "kookr-toolkit".to_string(),
                 plugin_root: expected_plugin_root,
+                discovery_mode: SkillDiscoveryMode::Recursive,
             }]
         );
     }

@@ -601,36 +601,21 @@ impl CodexThread {
         self.session.get_config().await
     }
 
-    /// Resolves the MCP runtime configuration using this thread's extension data.
-    pub async fn runtime_mcp_config(&self, config: &crate::config::Config) -> codex_mcp::McpConfig {
-        self.session.runtime_mcp_config(config).await
+    /// Resolves MCP configuration and environment bindings from the same config snapshot.
+    pub async fn runtime_mcp_config_and_context(
+        &self,
+        config: &crate::config::Config,
+    ) -> (codex_mcp::McpConfig, codex_mcp::McpRuntimeContext) {
+        self.session.runtime_mcp_config_and_context(config).await
     }
 
-    /// Returns the exact MCP config, environment bindings, and manager most recently published.
-    pub async fn current_mcp_runtime(&self) -> Arc<crate::session::McpRuntimeSnapshot> {
-        let turn_context = self.session.new_default_turn().await;
-        let environments = turn_context.environments.refresh_readiness();
-        let selected_capability_roots = self
-            .session
-            .resolve_selected_capability_roots_for_step(&environments)
-            .await;
-        let ready_selected_capability_roots =
-            Session::ready_selected_capability_roots(&selected_capability_roots);
-        let executor_capability_discovery = self
-            .session
-            .executor_capability_discovery_for_step(
-                &turn_context.config,
-                &ready_selected_capability_roots,
-            )
-            .await;
-        self.session
-            .mcp_runtime_for_step(
-                turn_context.as_ref(),
-                &environments,
-                &selected_capability_roots,
-                executor_capability_discovery.as_deref(),
-            )
-            .await
+    /// Captures the exact MCP config and environment bindings for the current thread state.
+    pub async fn current_mcp_config_and_runtime_context(
+        &self,
+    ) -> (Arc<codex_mcp::McpConfig>, codex_mcp::McpRuntimeContext) {
+        let config = self.session.get_config().await;
+        let (mcp_config, runtime_context) = self.runtime_mcp_config_and_context(&config).await;
+        (Arc::new(mcp_config), runtime_context)
     }
 
     pub fn multi_agent_version(&self) -> Option<MultiAgentVersion> {
@@ -642,6 +627,11 @@ impl CodexThread {
     /// unchanged.
     pub async fn refresh_runtime_config(&self, next_config: crate::config::Config) {
         self.session.refresh_runtime_config(next_config).await;
+    }
+
+    /// Refresh MCP configuration and managed requirements without reloading unrelated settings.
+    pub async fn refresh_mcp_config(&self, next_config: crate::config::Config) {
+        self.session.refresh_mcp_config(next_config).await;
     }
 
     pub async fn environment_selections(&self) -> Vec<TurnEnvironmentSelection> {
@@ -662,11 +652,12 @@ impl CodexThread {
         server: &str,
         uri: &str,
     ) -> anyhow::Result<serde_json::Value> {
+        self.session.refresh_mcp_if_dirty().await;
         let result = self
-            .current_mcp_runtime()
-            .await
-            .manager_arc()
-            .read_resource(server, ReadResourceRequestParams::new(uri))
+            .session
+            .services
+            .mcp_runtime
+            .latest_read_resource(server, ReadResourceRequestParams::new(uri))
             .await?;
 
         Ok(serde_json::to_value(result)?)
@@ -679,10 +670,11 @@ impl CodexThread {
         arguments: Option<serde_json::Value>,
         meta: Option<serde_json::Value>,
     ) -> anyhow::Result<CallToolResult> {
-        self.current_mcp_runtime()
-            .await
-            .manager_arc()
-            .call_tool(server, tool, arguments, meta)
+        self.session.refresh_mcp_if_dirty().await;
+        self.session
+            .services
+            .mcp_runtime
+            .latest_call_tool(server, tool, arguments, meta)
             .await
     }
 
