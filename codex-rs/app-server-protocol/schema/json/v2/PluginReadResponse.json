@@ -413,6 +413,13 @@
     },
     "PluginShareContext": {
       "properties": {
+        "canPublishToWorkspace": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "creatorAccountUserId": {
           "type": [
             "string",
@@ -906,6 +913,13 @@
             }
           ]
         },
+        "iconLargeUrl": {
+          "description": "Remote large icon URL from the plugin catalog.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "iconSmall": {
           "anyOf": [
             {
@@ -914,6 +928,13 @@
             {
               "type": "null"
             }
+          ]
+        },
+        "iconSmallUrl": {
+          "description": "Remote small icon URL from the plugin catalog.",
+          "type": [
+            "string",
+            "null"
           ]
         },
         "shortDescription": {
