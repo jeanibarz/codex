@@ -304,7 +304,7 @@ async fn hooks_only_scope_loads_claude_plugin_hooks_without_other_capabilities()
         &stack,
         HashMap::new(),
         &store,
-        /*prefer_remote_curated_conflicts*/ false,
+        /*remote_global_catalog_active*/ false,
         PluginLoadScope::HooksOnly,
     )
     .await;
