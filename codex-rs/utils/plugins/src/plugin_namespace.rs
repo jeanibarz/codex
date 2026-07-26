@@ -1,6 +1,8 @@
 //! Resolve plugin namespace from skill file paths by walking ancestors for `plugin.json`.
 
+use crate::PluginIdentity;
 use crate::PluginSkillRoot;
+use crate::SkillDiscoveryMode;
 use codex_exec_server::ExecutorFileSystem;
 use codex_exec_server_protocol::DISCOVERABLE_PLUGIN_MANIFEST_PATHS;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -67,9 +69,13 @@ pub fn plugin_skill_root_from_cli_dir(dir: &Path) -> Option<PluginSkillRoot> {
     let abs_dir = AbsolutePathBuf::from_absolute_path_checked(canonical).ok()?;
     Some(PluginSkillRoot {
         path: abs_dir.join("skills"),
-        plugin_id: name.clone(),
+        plugin_identity: PluginIdentity {
+            plugin_id: name.clone(),
+            remote_plugin_id: None,
+        },
         plugin_namespace: name,
         plugin_root: abs_dir,
+        discovery_mode: SkillDiscoveryMode::Recursive,
     })
 }
 

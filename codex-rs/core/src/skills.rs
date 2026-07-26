@@ -21,7 +21,9 @@ use codex_protocol::request_user_input::RequestUserInputArgs;
 use codex_protocol::request_user_input::RequestUserInputQuestion;
 use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_plugins::PluginIdentity;
 use codex_utils_plugins::PluginSkillRoot;
+use codex_utils_plugins::SkillDiscoveryMode;
 use tracing::warn;
 
 pub use codex_core_skills::SkillDependencyInfo;
@@ -371,9 +373,13 @@ mod tests {
             include_cli_plugin_skill_roots(&config, Vec::new()),
             vec![PluginSkillRoot {
                 path: expected_skill_root,
-                plugin_id: "kookr-toolkit".to_string(),
+                plugin_identity: PluginIdentity {
+                    plugin_id: "kookr-toolkit".to_string(),
+                    remote_plugin_id: None,
+                },
                 plugin_namespace: "kookr-toolkit".to_string(),
                 plugin_root: expected_plugin_root,
+                discovery_mode: SkillDiscoveryMode::Recursive,
             }]
         );
     }

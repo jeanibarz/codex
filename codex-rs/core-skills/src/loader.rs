@@ -352,9 +352,10 @@ fn skill_roots_from_layer_stack_inner(
                         path: home_dir.join(CLAUDE_DIR_NAME).join(SKILLS_DIR_NAME),
                         scope: SkillScope::User,
                         file_system: Arc::clone(&LOCAL_FS),
-                        plugin_id: None,
+                        plugin_identity: None,
                         plugin_namespace: None,
                         plugin_root: None,
+                        discovery_mode: SkillDiscoveryMode::Recursive,
                     });
                 }
 
