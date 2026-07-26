@@ -91,7 +91,8 @@ mod tests {
         let config_toml = AbsolutePathBuf::try_from(home.path().join(".codex/config.toml"))
             .expect("absolute path");
         let stack = ConfigLayerStack::default()
-            .with_user_config(&config_toml, Value::Table(toml::map::Map::new()));
+            .with_user_config(&config_toml, Value::Table(toml::map::Map::new()))
+            .expect("valid user config");
 
         assert_eq!(base_user_home_dir(&stack), Some(home.path().to_path_buf()));
     }

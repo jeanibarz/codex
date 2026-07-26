@@ -111,6 +111,7 @@ fn plugins_config_input_with_requirements(
         String::new(),
         /*plugins_enabled*/ true,
         /*remote_plugin_enabled*/ false,
+        /*plugin_hooks_enabled*/ false,
         String::new(),
         test_http_client_factory(),
     )
@@ -2933,10 +2934,12 @@ async fn plugin_cache_distinguishes_hook_loading_flag() {
     let config = |plugin_hooks_enabled| {
         PluginsConfigInput::new(
             stack.clone(),
+            String::new(),
             /*plugins_enabled*/ true,
             /*remote_plugin_enabled*/ false,
             plugin_hooks_enabled,
             "https://chatgpt.com".to_string(),
+            test_http_client_factory(),
         )
     };
     let manager = PluginsManager::new(codex_home.path().to_path_buf());

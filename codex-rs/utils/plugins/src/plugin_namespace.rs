@@ -226,7 +226,7 @@ mod tests {
         .expect("write manifest");
 
         let root = plugin_skill_root_from_cli_dir(&plugin_root).expect("plugin root resolved");
-        assert_eq!(root.plugin_id, "my-toolkit");
+        assert_eq!(root.plugin_identity.plugin_id, "my-toolkit");
         assert!(root.path.as_path().ends_with("skills"));
     }
 
@@ -244,7 +244,7 @@ mod tests {
         .expect("write manifest");
 
         let root = plugin_skill_root_from_cli_dir(&plugin_root).expect("plugin root resolved");
-        assert_eq!(root.plugin_id, "kookr-toolkit");
+        assert_eq!(root.plugin_identity.plugin_id, "kookr-toolkit");
     }
 
     #[test]
@@ -271,7 +271,7 @@ mod tests {
         .expect("write manifest");
 
         let root = plugin_skill_root_from_cli_dir(&plugin_root).expect("plugin root resolved");
-        assert_eq!(root.plugin_id, "fallback-name");
+        assert_eq!(root.plugin_identity.plugin_id, "fallback-name");
     }
 
     #[test]

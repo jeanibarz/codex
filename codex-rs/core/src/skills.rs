@@ -21,9 +21,7 @@ use codex_protocol::request_user_input::RequestUserInputArgs;
 use codex_protocol::request_user_input::RequestUserInputQuestion;
 use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_utils_absolute_path::AbsolutePathBuf;
-use codex_utils_plugins::PluginIdentity;
 use codex_utils_plugins::PluginSkillRoot;
-use codex_utils_plugins::SkillDiscoveryMode;
 use tracing::warn;
 
 pub use codex_core_skills::SkillDependencyInfo;
@@ -345,6 +343,8 @@ pub(crate) async fn maybe_emit_implicit_skill_invocation(
 mod tests {
     use super::*;
     use codex_utils_absolute_path::AbsolutePathBuf;
+    use codex_utils_plugins::PluginIdentity;
+    use codex_utils_plugins::SkillDiscoveryMode;
     use pretty_assertions::assert_eq;
     use std::fs;
     use tempfile::tempdir;
