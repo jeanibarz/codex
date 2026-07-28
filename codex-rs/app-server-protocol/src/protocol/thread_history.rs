@@ -95,6 +95,8 @@ pub fn build_turns_from_rollout_items(items: &[RolloutItem]) -> Vec<Turn> {
 pub struct ThreadHistoryItemChange {
     pub turn_id: String,
     pub item: ThreadItem,
+    pub started_at_ms: Option<i64>,
+    pub completed_at_ms: Option<i64>,
 }
 
 /// Lightweight turn metadata snapshot for projectors that track turn status without
@@ -1245,8 +1247,16 @@ impl ThreadHistoryBuilder {
     }
 
     fn handle_turn_complete(&mut self, payload: &TurnCompleteEvent) {
-        let mark_completed = |turn: &mut PendingTurn| {
-            if matches!(turn.status, TurnStatus::Completed | TurnStatus::InProgress) {
+        let terminal_error = payload.error.as_ref().map(|error| V2TurnError {
+            message: error.message.clone(),
+            codex_error_info: error.codex_error_info.clone().map(Into::into),
+            additional_details: None,
+        });
+        let apply_completion = |turn: &mut PendingTurn| {
+            if let Some(error) = terminal_error.as_ref() {
+                turn.status = TurnStatus::Failed;
+                turn.error = Some(error.clone());
+            } else if matches!(turn.status, TurnStatus::Completed | TurnStatus::InProgress) {
                 turn.status = TurnStatus::Completed;
             }
             turn.completed_at = payload.completed_at;
@@ -1260,7 +1270,7 @@ impl ThreadHistoryBuilder {
             .as_mut()
             .filter(|turn| turn.id == payload.turn_id)
         {
-            let changed_turn = mark_completed(current_turn);
+            let changed_turn = apply_completion(current_turn);
             self.record_changed_turn(changed_turn);
             self.finish_current_turn();
             return;
@@ -1271,7 +1281,10 @@ impl ThreadHistoryBuilder {
             .iter_mut()
             .find(|turn| turn.id == payload.turn_id)
         {
-            if matches!(turn.status, TurnStatus::Completed | TurnStatus::InProgress) {
+            if let Some(error) = terminal_error.as_ref() {
+                turn.status = TurnStatus::Failed;
+                turn.error = Some(error.clone());
+            } else if matches!(turn.status, TurnStatus::Completed | TurnStatus::InProgress) {
                 turn.status = TurnStatus::Completed;
             }
             turn.completed_at = payload.completed_at;
@@ -1283,7 +1296,7 @@ impl ThreadHistoryBuilder {
 
         // If the completion event cannot be matched, apply it to the active turn.
         if let Some(current_turn) = self.current_turn.as_mut() {
-            let changed_turn = mark_completed(current_turn);
+            let changed_turn = apply_completion(current_turn);
             self.record_changed_turn(changed_turn);
             self.finish_current_turn();
         }
@@ -1432,9 +1445,13 @@ impl ThreadHistoryBuilder {
 
     fn record_changed_item(&mut self, turn_id: String, item: ThreadItem) {
         if let Some(change_set) = self.active_change_set.as_mut() {
-            change_set
-                .changed_items
-                .push(ThreadHistoryItemChange { turn_id, item });
+            change_set.changed_items.push(ThreadHistoryItemChange {
+                turn_id,
+                item,
+                // Legacy events used by ThreadHistoryBuilder don't have timestamps
+                started_at_ms: None,
+                completed_at_ms: None,
+            });
         }
     }
 
@@ -3672,6 +3689,106 @@ mod tests {
     }
 
     #[test]
+    fn late_turn_complete_with_embedded_error_preserves_active_turn() {
+        let events = vec![
+            EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "turn-a".into(),
+                trace_id: None,
+                started_at: Some(10),
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            }),
+            EventMsg::UserMessage(UserMessageEvent {
+                client_id: None,
+                message: "first".into(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+                ..Default::default()
+            }),
+            EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "turn-b".into(),
+                trace_id: None,
+                started_at: Some(30),
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            }),
+            EventMsg::UserMessage(UserMessageEvent {
+                client_id: None,
+                message: "second".into(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+                ..Default::default()
+            }),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: "turn-a".into(),
+                started_at: Some(10),
+                last_agent_message: None,
+                error: Some(ErrorEvent {
+                    message: "Selected model is at capacity. Please try a different model.".into(),
+                    codex_error_info: Some(CodexErrorInfo::ServerOverloaded),
+                }),
+                completed_at: Some(20),
+                duration_ms: Some(10_000),
+                time_to_first_token_ms: None,
+            }),
+        ];
+
+        let items = events
+            .into_iter()
+            .map(RolloutItem::EventMsg)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            build_turns_from_rollout_items(&items),
+            vec![
+                Turn {
+                    id: "turn-a".into(),
+                    items_view: TurnItemsView::Full,
+                    items: vec![ThreadItem::UserMessage {
+                        id: "item-1".into(),
+                        client_id: None,
+                        content: vec![UserInput::Text {
+                            text: "first".into(),
+                            text_elements: Vec::new(),
+                        }],
+                    }],
+                    status: TurnStatus::Failed,
+                    error: Some(TurnError {
+                        message: "Selected model is at capacity. Please try a different model."
+                            .into(),
+                        codex_error_info: Some(
+                            crate::protocol::v2::CodexErrorInfo::ServerOverloaded,
+                        ),
+                        additional_details: None,
+                    }),
+                    started_at: Some(10),
+                    completed_at: Some(20),
+                    duration_ms: Some(10_000),
+                },
+                Turn {
+                    id: "turn-b".into(),
+                    items_view: TurnItemsView::Full,
+                    items: vec![ThreadItem::UserMessage {
+                        id: "item-2".into(),
+                        client_id: None,
+                        content: vec![UserInput::Text {
+                            text: "second".into(),
+                            text_elements: Vec::new(),
+                        }],
+                    }],
+                    status: TurnStatus::InProgress,
+                    error: None,
+                    started_at: Some(30),
+                    completed_at: None,
+                    duration_ms: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn late_turn_aborted_does_not_interrupt_active_turn() {
         let events = vec![
             EventMsg::TurnStarted(TurnStartedEvent {
@@ -4122,6 +4239,69 @@ mod tests {
     }
 
     #[test]
+    fn turn_complete_with_embedded_error_marks_turn_failed() {
+        let events = vec![
+            EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "turn-a".into(),
+                trace_id: None,
+                started_at: Some(10),
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            }),
+            EventMsg::UserMessage(UserMessageEvent {
+                client_id: None,
+                message: "retry me".into(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+                ..Default::default()
+            }),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: "turn-a".into(),
+                started_at: Some(10),
+                last_agent_message: None,
+                error: Some(ErrorEvent {
+                    message: "Selected model is at capacity. Please try a different model.".into(),
+                    codex_error_info: Some(CodexErrorInfo::ServerOverloaded),
+                }),
+                completed_at: Some(20),
+                duration_ms: Some(10_000),
+                time_to_first_token_ms: None,
+            }),
+        ];
+
+        let items = events
+            .into_iter()
+            .map(RolloutItem::EventMsg)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            build_turns_from_rollout_items(&items),
+            vec![Turn {
+                id: "turn-a".into(),
+                items_view: TurnItemsView::Full,
+                items: vec![ThreadItem::UserMessage {
+                    id: "item-1".into(),
+                    client_id: None,
+                    content: vec![UserInput::Text {
+                        text: "retry me".into(),
+                        text_elements: Vec::new(),
+                    }],
+                }],
+                status: TurnStatus::Failed,
+                error: Some(TurnError {
+                    message: "Selected model is at capacity. Please try a different model.".into(),
+                    codex_error_info: Some(crate::protocol::v2::CodexErrorInfo::ServerOverloaded),
+                    additional_details: None,
+                }),
+                started_at: Some(10),
+                completed_at: Some(20),
+                duration_ms: Some(10_000),
+            }]
+        );
+    }
+
+    #[test]
     fn rebuilds_hook_prompt_items_from_rollout_response_items() {
         let hook_prompt = build_hook_prompt_message(&[
             CoreHookPromptFragment::from_single_hook("Retry with tests.", "hook-run-1"),
@@ -4272,6 +4452,8 @@ mod tests {
                             text_elements: Vec::new(),
                         }],
                     },
+                    started_at_ms: None,
+                    completed_at_ms: None,
                 }],
                 changed_turns: vec![ThreadHistoryTurnChange {
                     turn_id: "rollout-0".into(),
@@ -4320,6 +4502,8 @@ mod tests {
                         }),
                         results: None,
                     }),
+                    started_at_ms: None,
+                    completed_at_ms: None,
                 }],
                 changed_turns: Vec::new(),
                 removed_turn_ids: Vec::new(),
@@ -4351,6 +4535,8 @@ mod tests {
                         summary: vec!["summary".into()],
                         content: vec!["raw content".into()],
                     },
+                    started_at_ms: None,
+                    completed_at_ms: None,
                 }],
                 changed_turns: Vec::new(),
                 removed_turn_ids: Vec::new(),
@@ -4457,6 +4643,8 @@ mod tests {
                         }),
                         results: None,
                     }),
+                    started_at_ms: None,
+                    completed_at_ms: None,
                 }],
                 changed_turns: vec![ThreadHistoryTurnChange {
                     turn_id: "rollout-0".into(),
