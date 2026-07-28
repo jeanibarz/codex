@@ -279,7 +279,7 @@ async fn external_agent_config_secondary_source_imports_session_and_plugin_end_t
                 "message": {
                     "content": [{
                         "type": "text",
-                        "text": "<user_query>first request</user_query>"
+                        "text": "<cursor_commands>\n/verify\n</cursor_commands>\n<timestamp>2026-07-26T18:00:00Z</timestamp>\n<user_query>first request</user_query>"
                     }]
                 }
             })
@@ -414,7 +414,7 @@ source = {:?}
             model_providers: None,
             source_kinds: None,
             archived: None,
-            is_pinned: None,
+            section_id: None,
             cwd: None,
             use_state_db_only: false,
             search_term: None,
@@ -1665,7 +1665,7 @@ async fn external_agent_config_import_creates_session_rollouts() -> Result<()> {
             model_providers: None,
             source_kinds: None,
             archived: None,
-            is_pinned: None,
+            section_id: None,
             cwd: None,
             use_state_db_only: true,
             search_term: None,
@@ -1852,7 +1852,7 @@ required = true
             model_providers: None,
             source_kinds: None,
             archived: None,
-            is_pinned: None,
+            section_id: None,
             cwd: None,
             use_state_db_only: false,
             search_term: None,
@@ -1936,7 +1936,7 @@ async fn external_agent_config_import_accepts_detected_session_payload_after_res
             model_providers: None,
             source_kinds: None,
             archived: None,
-            is_pinned: None,
+            section_id: None,
             cwd: None,
             use_state_db_only: false,
             search_term: None,
@@ -2017,7 +2017,7 @@ async fn external_agent_config_import_skips_already_imported_session_versions() 
             model_providers: None,
             source_kinds: None,
             archived: None,
-            is_pinned: None,
+            section_id: None,
             cwd: None,
             use_state_db_only: false,
             search_term: None,
@@ -2144,7 +2144,7 @@ async fn external_agent_config_import_returns_before_background_session_import_f
             model_providers: None,
             source_kinds: None,
             archived: None,
-            is_pinned: None,
+            section_id: None,
             cwd: None,
             use_state_db_only: false,
             search_term: None,
@@ -2259,7 +2259,7 @@ async fn external_agent_config_import_compacts_huge_session_before_first_follow_
             model_providers: None,
             source_kinds: None,
             archived: None,
-            is_pinned: None,
+            section_id: None,
             cwd: None,
             use_state_db_only: false,
             search_term: None,

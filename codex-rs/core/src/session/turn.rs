@@ -84,6 +84,7 @@ use codex_extension_api::TurnInputEnvironment;
 use codex_features::Feature;
 use codex_file_system::FindUpErrorPolicy;
 use codex_file_system::find_nearest_ancestor_with_markers;
+use codex_login::CodexAuth;
 use codex_mcp::ToolInfo;
 use codex_protocol::ResponseItemId;
 use codex_protocol::config_types::AutoCompactTokenLimitScope;
@@ -113,6 +114,7 @@ use codex_protocol::protocol::SafetyBufferingEvent;
 use codex_protocol::protocol::TurnDiffEvent;
 use codex_protocol::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
+use codex_tools::DiscoverableTool;
 use codex_tools::ToolName;
 use codex_tools::filter_request_plugin_install_discoverable_tools_for_client;
 use codex_utils_path_uri::PathUri;
@@ -787,12 +789,15 @@ async fn build_extension_turn_input_items(
         user_input: user_input.to_vec(),
         environments,
     };
+    let extension_metrics =
+        super::extension_metrics::from_session_telemetry(turn_context.session_telemetry.clone());
 
     let mut items = Vec::new();
     for contributor in contributors {
         let contributed_fragments = contributor
             .contribute(
                 input.clone(),
+                Some(Arc::clone(&extension_metrics)),
                 &sess.services.session_extension_data,
                 &sess.services.thread_extension_data,
                 turn_context.extension_data.as_ref(),
@@ -1294,6 +1299,50 @@ async fn run_sampling_request(
     }
 }
 
+pub(crate) struct PreparedToolRecommendations {
+    auth: Option<CodexAuth>,
+    endpoint_candidates: Option<Vec<DiscoverableTool>>,
+}
+
+#[instrument(level = "trace", skip_all)]
+pub(crate) async fn prepare_tool_recommendations(
+    sess: &Session,
+    turn_context: &TurnContext,
+) -> PreparedToolRecommendations {
+    let loaded_plugins = sess
+        .services
+        .plugins_manager
+        .plugins_for_config(&turn_context.config.plugins_config_input())
+        .instrument(trace_span!("built_tools.load_plugins"))
+        .await;
+    let tool_suggest_is_enabled = tool_suggest_enabled(turn_context);
+    let auth = if tool_suggest_is_enabled {
+        sess.services.auth_manager.auth().await
+    } else {
+        None
+    };
+    let endpoint_candidates = if tool_suggest_is_enabled {
+        let plugins_config = turn_context.config.plugins_config_input();
+        sess.services
+            .plugins_manager
+            .recommended_plugin_candidates_for_config(RecommendedPluginCandidatesInput {
+                plugins_config: &plugins_config,
+                loaded_plugins: &loaded_plugins,
+                auth: auth.as_ref(),
+                disabled_tools: &turn_context.config.tool_suggest.disabled_tools,
+                app_server_client_name: turn_context.app_server_client_name.as_deref(),
+            })
+            .await
+    } else {
+        None
+    };
+
+    PreparedToolRecommendations {
+        auth,
+        endpoint_candidates,
+    }
+}
+
 #[instrument(level = "trace",
     skip_all,
     fields(
@@ -1308,14 +1357,9 @@ pub(crate) async fn built_tools(
     environments: &TurnEnvironmentSnapshot,
     mcp: &codex_mcp::McpBinding,
     step_store: &ExtensionData,
+    prepared_recommendations: PreparedToolRecommendations,
 ) -> (Vec<ToolInfo>, Arc<ToolRouter>) {
     let all_mcp_tools = mcp.tools().to_vec();
-    let loaded_plugins = sess
-        .services
-        .plugins_manager
-        .plugins_for_config(&turn_context.config.plugins_config_input())
-        .instrument(trace_span!("built_tools.load_plugins"))
-        .await;
     let connector_snapshot = mcp.config().connector_snapshot.clone();
 
     let apps_enabled = turn_context.apps_enabled();
@@ -1341,26 +1385,10 @@ pub(crate) async fn built_tools(
         None
     };
     let tool_suggest_is_enabled = tool_suggest_enabled(turn_context);
-    let auth = if tool_suggest_is_enabled {
-        sess.services.auth_manager.auth().await
-    } else {
-        None
-    };
-    let endpoint_recommended_plugin_candidates = if tool_suggest_is_enabled {
-        let plugins_config = turn_context.config.plugins_config_input();
-        sess.services
-            .plugins_manager
-            .recommended_plugin_candidates_for_config(RecommendedPluginCandidatesInput {
-                plugins_config: &plugins_config,
-                loaded_plugins: &loaded_plugins,
-                auth: auth.as_ref(),
-                disabled_tools: &turn_context.config.tool_suggest.disabled_tools,
-                app_server_client_name: turn_context.app_server_client_name.as_deref(),
-            })
-            .await
-    } else {
-        None
-    };
+    let PreparedToolRecommendations {
+        auth,
+        endpoint_candidates: endpoint_recommended_plugin_candidates,
+    } = prepared_recommendations;
     let tool_suggest_candidates =
         if let Some(recommended_plugin_candidates) = endpoint_recommended_plugin_candidates {
             Some(ToolSuggestCandidates {
