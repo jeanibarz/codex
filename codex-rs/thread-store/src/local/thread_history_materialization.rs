@@ -26,6 +26,9 @@ pub(super) async fn materialize_to_sqlite(
     thread_id: ThreadId,
     rollout_path: &Path,
 ) -> ThreadStoreResult<()> {
+    if store.state_db.is_none() {
+        return Ok(());
+    }
     let start_offset = super::thread_history::projection_state(store, thread_id)
         .await?
         .map_or(0, |state| state.next_byte_offset);
@@ -139,7 +142,9 @@ async fn read_complete_rollout_lines(
             })?;
         // Blank physical lines consume bytes but are not rollout records.
         if !line_bytes.iter().all(u8::is_ascii_whitespace) {
-            match serde_json::from_slice(line_bytes) {
+            match serde_json::from_slice::<serde_json::Value>(line_bytes)
+                .and_then(serde_json::from_value::<RolloutLine>)
+            {
                 Ok(line) => lines.push(CompleteRolloutLine {
                     line,
                     start_byte_offset: line_start_offset,
