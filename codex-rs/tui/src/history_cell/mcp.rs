@@ -16,6 +16,7 @@ impl HistoryCell for McpImageOutputCell {
 }
 fn mcp_auth_status_label(status: McpAuthStatus) -> &'static str {
     match status {
+        McpAuthStatus::Unknown => "Unknown",
         McpAuthStatus::Unsupported => "Unsupported",
         McpAuthStatus::NotLoggedIn => "Not logged in",
         McpAuthStatus::BearerToken => "Bearer token",
@@ -317,26 +318,24 @@ fn decode_mcp_image(block: &serde_json::Value) -> Option<DynamicImage> {
         .ok()
 }
 /// Render a summary of configured MCP servers from the current `Config`.
-pub(crate) fn empty_mcp_output() -> PlainHistoryCell {
-    let lines: Vec<Line<'static>> = vec![
-        "/mcp".magenta().into(),
-        "".into(),
-        vec!["🔌  ".into(), "MCP Tools".bold()].into(),
-        "".into(),
-        "  • No MCP servers configured.".italic().into(),
-        Line::from(vec![
-            "    See the ".into(),
-            crate::terminal_hyperlinks::osc8_hyperlink(
-                "https://developers.openai.com/codex/mcp",
-                "MCP docs",
-            )
-            .underlined(),
-            " to configure them.".into(),
-        ])
-        .style(Style::default().add_modifier(Modifier::DIM)),
+pub(crate) fn empty_mcp_output() -> WebHyperlinkHistoryCell {
+    let mut docs_line = HyperlinkLine::new(Line::from("    See the "));
+    docs_line.push_span(
+        "MCP docs".underlined(),
+        Some("https://developers.openai.com/codex/mcp"),
+    );
+    docs_line.push_span(" to configure them.".into(), /*destination*/ None);
+
+    let lines = vec![
+        HyperlinkLine::new("/mcp".magenta().into()),
+        HyperlinkLine::from(""),
+        HyperlinkLine::new(vec!["🔌  ".into(), "MCP Tools".bold()].into()),
+        HyperlinkLine::from(""),
+        HyperlinkLine::new("  • No MCP servers configured.".italic().into()),
+        docs_line.style(Style::default().add_modifier(Modifier::DIM)),
     ];
 
-    PlainHistoryCell::new(lines)
+    WebHyperlinkHistoryCell::new_hyperlink_lines(lines)
 }
 
 #[cfg(test)]
@@ -547,6 +546,7 @@ pub(crate) fn new_mcp_tools_output_from_statuses(
 
         lines.push(header.into());
         let auth_status = match status.auth_status {
+            codex_app_server_protocol::McpAuthStatus::Unknown => McpAuthStatus::Unknown,
             codex_app_server_protocol::McpAuthStatus::Unsupported => McpAuthStatus::Unsupported,
             codex_app_server_protocol::McpAuthStatus::NotLoggedIn => McpAuthStatus::NotLoggedIn,
             codex_app_server_protocol::McpAuthStatus::BearerToken => McpAuthStatus::BearerToken,

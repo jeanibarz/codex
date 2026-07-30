@@ -260,6 +260,7 @@ impl Session {
         self: &Arc<Self>,
         turn_context: &TurnContext,
         selected_capability_roots: &[ResolvedSelectedCapabilityRoot],
+        required_servers: &[String],
     ) -> Arc<codex_mcp::McpBinding> {
         let ready_selected_capability_roots =
             Self::ready_selected_capability_roots(selected_capability_roots);
@@ -272,7 +273,12 @@ impl Session {
             self.mark_mcp_runtime_dirty();
         }
         self.refresh_mcp_if_dirty().await;
-        if let Some(binding) = self.services.mcp_runtime.current_binding().await {
+        if let Some(binding) = self
+            .services
+            .mcp_runtime
+            .current_binding_with_required_servers(required_servers)
+            .await
+        {
             return binding;
         }
         let config = Arc::new(self.runtime_mcp_config(&turn_context.config).await);
@@ -317,6 +323,7 @@ impl Session {
             .services
             .selected_capability_roots
             .iter()
+            .cloned()
             .chain(
                 environments
                     .turn_environments()
@@ -346,7 +353,7 @@ impl Session {
                 ready_environment_root_count += 1;
             }
             root_locations_by_id.insert(root.id.clone(), root.location.clone());
-            selected_capability_roots.push(root.clone());
+            selected_capability_roots.push(root);
         }
         self.services
             .turn_environments

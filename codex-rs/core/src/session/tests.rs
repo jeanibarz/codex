@@ -2038,6 +2038,7 @@ async fn reconstruct_history_uses_replacement_history_verbatim() {
         phase: None,
         internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
             turn_id: Some("compact-turn".to_string()),
+            ..Default::default()
         }),
     };
     let replacement_history = vec![
@@ -6804,6 +6805,7 @@ async fn submit_with_id_captures_current_span_trace_context() {
             id: "sub-1".into(),
             op: Op::Interrupt,
             client_user_message_id: None,
+            parent_turn_id: None,
             trace: None,
         })
         .await
@@ -6876,6 +6878,7 @@ fn submission_dispatch_span_prefers_submission_trace_context() {
             id: "sub-1".into(),
             op: Op::Interrupt,
             client_user_message_id: None,
+            parent_turn_id: None,
             trace: Some(submission_trace),
         })
     });
@@ -6903,6 +6906,7 @@ fn submission_dispatch_span_uses_debug_for_realtime_audio() {
             },
         }),
         client_user_message_id: None,
+        parent_turn_id: None,
         trace: None,
     });
 
@@ -6968,6 +6972,7 @@ async fn user_turn_updates_approvals_reviewer() {
             },
         },
         /*client_user_message_id*/ None,
+        /*parent_turn_id*/ None,
     )
     .await;
 
@@ -7252,6 +7257,7 @@ async fn spawn_task_turn_span_inherits_dispatch_trace_context() {
         id: "sub-1".into(),
         op: Op::Interrupt,
         client_user_message_id: None,
+        parent_turn_id: None,
         trace: Some(submission_trace.clone()),
     });
     let dispatch_span_id = dispatch_span.context().span().span_context().span_id();
@@ -8095,7 +8101,11 @@ async fn refresh_mcp_servers_uses_latest_state_for_existing_turns() {
         .await
         .expect("a fresh cancellation token cannot be cancelled");
     let rematerialized_old = session
-        .mcp_runtime_for_step(&turn_context, /*selected_capability_roots*/ &[])
+        .mcp_runtime_for_step(
+            &turn_context,
+            /*selected_capability_roots*/ &[],
+            /*required_servers*/ &[],
+        )
         .await;
 
     let configured_servers = codex_mcp::configured_mcp_servers(new_step.mcp.config());
@@ -10417,13 +10427,16 @@ async fn thread_idle_lifecycle_waits_for_trigger_turn_mailbox_work() {
     session.services.extensions = Arc::new(builder.build());
     session
         .input_queue
-        .enqueue_mailbox_communication(InterAgentCommunication::new(
-            AgentPath::root(),
-            AgentPath::root(),
-            Vec::new(),
-            "pending trigger".to_string(),
-            /*trigger_turn*/ true,
-        ))
+        .enqueue_mailbox_communication(
+            InterAgentCommunication::new(
+                AgentPath::root(),
+                AgentPath::root(),
+                Vec::new(),
+                "pending trigger".to_string(),
+                /*trigger_turn*/ true,
+            ),
+            /*parent_turn_id*/ None,
+        )
         .await;
 
     session.emit_thread_idle_lifecycle_if_idle().await;
@@ -10453,7 +10466,7 @@ async fn try_start_turn_if_idle_rejects_active_turn_without_injecting() {
     assert_eq!(TryStartTurnIfIdleRejectionReason::Busy, err.reason());
     assert_eq!(vec![item], err.into_input());
     assert_eq!(
-        Vec::<TurnInput>::new(),
+        (Vec::<TurnInput>::new(), None),
         sess.input_queue.get_pending_input(&sess.active_turn).await
     );
 
@@ -10480,7 +10493,7 @@ async fn try_start_turn_if_idle_rejects_plan_mode_without_injecting() {
     assert_eq!(vec![item], err.into_input());
     assert!(sess.active_turn.lock().await.is_none());
     assert_eq!(
-        Vec::<TurnInput>::new(),
+        (Vec::<TurnInput>::new(), None),
         sess.input_queue.get_pending_input(&sess.active_turn).await
     );
 }
@@ -10489,13 +10502,16 @@ async fn try_start_turn_if_idle_rejects_plan_mode_without_injecting() {
 async fn try_start_turn_if_idle_rejects_pending_trigger_turn_without_injecting() {
     let (sess, _tc, _rx) = make_session_and_context_with_rx().await;
     sess.input_queue
-        .enqueue_mailbox_communication(InterAgentCommunication::new(
-            AgentPath::root(),
-            AgentPath::root(),
-            Vec::new(),
-            "pending trigger".to_string(),
-            /*trigger_turn*/ true,
-        ))
+        .enqueue_mailbox_communication(
+            InterAgentCommunication::new(
+                AgentPath::root(),
+                AgentPath::root(),
+                Vec::new(),
+                "pending trigger".to_string(),
+                /*trigger_turn*/ true,
+            ),
+            /*parent_turn_id*/ None,
+        )
         .await;
 
     let item = user_message("synthetic idle input");
@@ -10535,7 +10551,7 @@ async fn try_start_turn_if_idle_rejects_active_review_turn_without_injecting() {
     assert_eq!(TryStartTurnIfIdleRejectionReason::Busy, err.reason());
     assert_eq!(vec![item], err.into_input());
     assert_eq!(
-        Vec::<TurnInput>::new(),
+        (Vec::<TurnInput>::new(), None),
         sess.input_queue.get_pending_input(&sess.active_turn).await
     );
 
@@ -10763,7 +10779,7 @@ async fn queue_only_mailbox_mail_waits_for_next_turn_after_answer_boundary() {
         .defer_mailbox_delivery_to_next_turn(&sess.active_turn, &tc.sub_id)
         .await;
     sess.input_queue
-        .enqueue_mailbox_communication(communication.clone())
+        .enqueue_mailbox_communication(communication.clone(), /*parent_turn_id*/ None)
         .await;
 
     assert!(
@@ -10772,13 +10788,13 @@ async fn queue_only_mailbox_mail_waits_for_next_turn_after_answer_boundary() {
     );
     assert_eq!(
         sess.input_queue.get_pending_input(&sess.active_turn).await,
-        Vec::new()
+        (Vec::new(), None)
     );
 
     sess.abort_all_tasks(TurnAbortReason::Replaced).await;
 
     assert_eq!(
-        sess.input_queue.get_pending_input(&sess.active_turn).await,
+        (sess.input_queue.get_pending_input(&sess.active_turn).await).0,
         vec![TurnInput::InterAgentCommunication(communication)],
     );
 }
@@ -10800,13 +10816,16 @@ async fn trigger_turn_mailbox_mail_waits_for_next_turn_after_answer_boundary() {
         .defer_mailbox_delivery_to_next_turn(&sess.active_turn, &tc.sub_id)
         .await;
     sess.input_queue
-        .enqueue_mailbox_communication(InterAgentCommunication::new(
-            AgentPath::try_from("/root/worker").expect("worker path should parse"),
-            AgentPath::root(),
-            Vec::new(),
-            "late trigger update".to_string(),
-            /*trigger_turn*/ true,
-        ))
+        .enqueue_mailbox_communication(
+            InterAgentCommunication::new(
+                AgentPath::try_from("/root/worker").expect("worker path should parse"),
+                AgentPath::root(),
+                Vec::new(),
+                "late trigger update".to_string(),
+                /*trigger_turn*/ true,
+            ),
+            /*parent_turn_id*/ None,
+        )
         .await;
 
     assert!(
@@ -10843,7 +10862,7 @@ async fn steered_input_reopens_mailbox_delivery_for_current_turn() {
         .defer_mailbox_delivery_to_next_turn(&sess.active_turn, &tc.sub_id)
         .await;
     sess.input_queue
-        .enqueue_mailbox_communication(communication.clone())
+        .enqueue_mailbox_communication(communication.clone(), /*parent_turn_id*/ None)
         .await;
     sess.steer_input(
         vec![UserInput::Text {
@@ -10859,7 +10878,7 @@ async fn steered_input_reopens_mailbox_delivery_for_current_turn() {
     .expect("steered input should be accepted");
 
     assert_eq!(
-        sess.input_queue.get_pending_input(&sess.active_turn).await,
+        (sess.input_queue.get_pending_input(&sess.active_turn).await).0,
         vec![
             TurnInput::UserInput {
                 content: vec![UserInput::Text {
@@ -10897,7 +10916,7 @@ async fn stale_defer_mailbox_delivery_does_not_override_steered_input() {
         .defer_mailbox_delivery_to_next_turn(&sess.active_turn, &tc.sub_id)
         .await;
     sess.input_queue
-        .enqueue_mailbox_communication(communication.clone())
+        .enqueue_mailbox_communication(communication.clone(), /*parent_turn_id*/ None)
         .await;
     sess.steer_input(
         vec![UserInput::Text {
@@ -10917,7 +10936,7 @@ async fn stale_defer_mailbox_delivery_does_not_override_steered_input() {
         .await;
 
     assert_eq!(
-        sess.input_queue.get_pending_input(&sess.active_turn).await,
+        (sess.input_queue.get_pending_input(&sess.active_turn).await).0,
         vec![
             TurnInput::UserInput {
                 content: vec![UserInput::Text {
@@ -10955,7 +10974,7 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
         .defer_mailbox_delivery_to_next_turn(&sess.active_turn, &tc.sub_id)
         .await;
     sess.input_queue
-        .enqueue_mailbox_communication(communication.clone())
+        .enqueue_mailbox_communication(communication.clone(), /*parent_turn_id*/ None)
         .await;
 
     let item = ResponseItem::FunctionCall {
@@ -10964,6 +10983,7 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
         namespace: None,
         arguments: "{}".to_string(),
         call_id: "call-1".to_string(),
+        encrypted_function_args: None,
         internal_chat_message_metadata_passthrough: None,
     };
     let mut ctx = HandleOutputCtx {
@@ -10981,7 +11001,7 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
     assert!(output.needs_follow_up);
     assert!(output.tool_future.is_some());
     assert_eq!(
-        sess.input_queue.get_pending_input(&sess.active_turn).await,
+        (sess.input_queue.get_pending_input(&sess.active_turn).await).0,
         vec![TurnInput::InterAgentCommunication(communication)],
     );
 }
@@ -11427,6 +11447,7 @@ while :; do sleep 1; done"#,
         })
         .to_string(),
         call_id: "shell-cleanup-call".to_string(),
+        encrypted_function_args: None,
         internal_chat_message_metadata_passthrough: None,
     };
     let call = ToolRouter::build_tool_call(item)?

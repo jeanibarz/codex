@@ -81,13 +81,3 @@ fn parses_plugin_dir_for_exec_session() {
     assert_eq!(cli.shared.plugin_dirs, vec![PathBuf::from("/tmp/plugin")]);
     assert_eq!(cli.prompt.as_deref(), Some("do the work"));
 }
-
-#[test]
-fn removed_full_auto_flag_reports_migration_path() {
-    let cli = Cli::parse_from(["codex-exec", "--full-auto", "summarize"]);
-
-    assert_eq!(
-        cli.removed_full_auto_warning(),
-        Some("warning: `--full-auto` is deprecated; use `--sandbox workspace-write` instead.")
-    );
-}

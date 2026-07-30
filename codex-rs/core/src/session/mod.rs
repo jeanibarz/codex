@@ -792,13 +792,15 @@ impl Session {
 impl SessionIo {
     /// Submit the `op` wrapped in a `Submission` with a unique ID.
     pub(crate) async fn submit(&self, op: Op) -> CodexResult<String> {
-        self.submit_with_trace(op, /*trace*/ None).await
+        self.submit_with_trace(op, /*trace*/ None, /*parent_turn_id*/ None)
+            .await
     }
 
     pub(crate) async fn submit_with_trace(
         &self,
         op: Op,
         trace: Option<W3cTraceContext>,
+        parent_turn_id: Option<String>,
     ) -> CodexResult<String> {
         let id = new_submission_id();
         let sub = Submission {
@@ -806,6 +808,7 @@ impl SessionIo {
             op,
             client_user_message_id: None,
             trace,
+            parent_turn_id,
         };
         self.submit_with_id(sub).await?;
         Ok(id)
@@ -824,6 +827,7 @@ impl SessionIo {
             op,
             client_user_message_id,
             trace,
+            parent_turn_id: None,
         };
         self.submit_with_id(sub).await?;
         Ok(id)
@@ -1212,6 +1216,7 @@ impl Session {
                 thread_settings: Default::default(),
             },
             /*client_user_message_id*/ None,
+            /*parent_turn_id*/ None,
         )
         .await;
     }
@@ -1962,7 +1967,12 @@ impl Session {
         if let Err(err) = self
             .services
             .agent_control
-            .send_inter_agent_communication(parent_thread_id, communication, context)
+            .send_inter_agent_communication(
+                parent_thread_id,
+                communication,
+                context,
+                /*parent_turn_id*/ None,
+            )
             .await
         {
             debug!("failed to notify parent thread {parent_thread_id}: {err}");
@@ -3025,6 +3035,20 @@ impl Session {
         turn_context: Arc<TurnContext>,
         cancellation_token: &CancellationToken,
     ) -> CodexResult<Arc<StepContext>> {
+        self.capture_step_context_with_required_mcp_servers(
+            turn_context,
+            cancellation_token,
+            /*required_servers*/ &[],
+        )
+        .await
+    }
+
+    pub(crate) async fn capture_step_context_with_required_mcp_servers(
+        self: &Arc<Self>,
+        turn_context: Arc<TurnContext>,
+        cancellation_token: &CancellationToken,
+        required_servers: &[String],
+    ) -> CodexResult<Arc<StepContext>> {
         // Keep selections fixed for the turn while allowing their startup work to finish.
         let environments = turn_context.environments.refresh_readiness();
         self.services
@@ -3047,7 +3071,11 @@ impl Session {
         extension_data.insert(selected_capability_roots.clone());
         let (mcp, prepared_recommendations) = async {
             tokio::join!(
-                self.mcp_runtime_for_step(turn_context.as_ref(), &selected_capability_roots),
+                self.mcp_runtime_for_step(
+                    turn_context.as_ref(),
+                    &selected_capability_roots,
+                    required_servers,
+                ),
                 turn::prepare_tool_recommendations(self.as_ref(), turn_context.as_ref()),
             )
         }
@@ -3359,22 +3387,18 @@ impl Session {
         {
             developer_sections.push(developer_instructions.to_string());
         }
-        if turn_context.config.include_skill_instructions {
-            let host_catalog_in_world_state = turn_context
+        if turn_context.config.include_skill_instructions
+            && turn_context
                 .extension_data
                 .get::<HostSkillsCatalogInWorldState>()
-                .is_some();
-            let side_effects = if host_catalog_in_world_state {
-                SkillRenderSideEffects::None
-            } else {
-                SkillRenderSideEffects::ThreadStart {
-                    session_telemetry: &self.services.session_telemetry,
-                }
-            };
+                .is_none()
+        {
             let available_skills = build_available_skills(
                 turn_context.turn_skills.snapshot.outcome(),
                 default_skill_metadata_budget(turn_context.model_info.context_window),
-                side_effects,
+                SkillRenderSideEffects::ThreadStart {
+                    session_telemetry: &self.services.session_telemetry,
+                },
             );
             if let Some(available_skills) = available_skills {
                 let warning_message = available_skills.warning_message.clone();
@@ -3391,9 +3415,7 @@ impl Session {
                     })
                     .await;
                 }
-                if !host_catalog_in_world_state {
-                    developer_sections.push(skills_instructions.render());
-                }
+                developer_sections.push(skills_instructions.render());
             }
         }
         let loaded_plugins = self
@@ -3401,23 +3423,27 @@ impl Session {
             .plugins_manager
             .plugins_for_config(&turn_context.config.plugins_config_input())
             .await;
-        let recommended_plugin_candidates =
-            if crate::tools::spec_plan::tool_suggest_enabled(turn_context) {
-                let auth = self.services.auth_manager.auth().await;
-                let plugins_config = turn_context.config.plugins_config_input();
-                self.services
-                    .plugins_manager
-                    .recommended_plugin_candidates_for_config(RecommendedPluginCandidatesInput {
-                        plugins_config: &plugins_config,
-                        loaded_plugins: &loaded_plugins,
-                        auth: auth.as_ref(),
-                        disabled_tools: &turn_context.config.tool_suggest.disabled_tools,
-                        app_server_client_name: turn_context.app_server_client_name.as_deref(),
-                    })
-                    .await
-            } else {
-                None
-            };
+        let features = turn_context.config.features.get();
+        let recommended_plugin_candidates = if features.enabled(Feature::Apps)
+            && features.enabled(Feature::Plugins)
+            && (features.enabled(Feature::ToolSuggest)
+                || features.enabled(Feature::RecommendedPlugins))
+        {
+            let auth = self.services.auth_manager.auth().await;
+            let plugins_config = turn_context.config.plugins_config_input();
+            self.services
+                .plugins_manager
+                .recommended_plugin_candidates_for_config(RecommendedPluginCandidatesInput {
+                    plugins_config: &plugins_config,
+                    loaded_plugins: &loaded_plugins,
+                    auth: auth.as_ref(),
+                    disabled_tools: &turn_context.config.tool_suggest.disabled_tools,
+                    app_server_client_name: turn_context.app_server_client_name.as_deref(),
+                })
+                .await
+        } else {
+            None
+        };
         if let Some(recommended_plugins) = recommended_plugin_candidates
             .as_deref()
             .and_then(RecommendedPluginsInstructions::from_plugins)

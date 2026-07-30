@@ -591,26 +591,21 @@ pub(crate) async fn list_tools_for_client_uncached(
     server_instructions: Option<&str>,
 ) -> Result<Vec<ToolInfo>> {
     let fetch_start = Instant::now();
-    let tools = match client.protocol_mode() {
-        McpProtocolMode::Legacy => {
-            client
-                .list_tools_with_connector_ids(/*params*/ None, timeout)
-                .await?
-                .tools
+    let protocol_mode = client.protocol_mode();
+    let tools = collect_paginated("tools/list", timeout, |params| {
+        let client = Arc::clone(client);
+        async move {
+            let response = client
+                .list_tools_with_connector_ids(params, timeout)
+                .await?;
+            let next_cursor = match protocol_mode {
+                McpProtocolMode::Legacy => None,
+                McpProtocolMode::V20260728 => response.next_cursor,
+            };
+            Ok((response.tools, next_cursor))
         }
-        McpProtocolMode::V20260728 => {
-            collect_paginated("tools/list", timeout, |params| {
-                let client = Arc::clone(client);
-                async move {
-                    let response = client
-                        .list_tools_with_connector_ids(params, timeout)
-                        .await?;
-                    Ok((response.tools, response.next_cursor))
-                }
-            })
-            .await?
-        }
-    }
+    })
+    .await?
     .into_iter()
     .map(|tool| {
         tool_info_from_listed_tool(
@@ -898,7 +893,8 @@ async fn start_server_task(
     )
     .await
     .map_err(StartupOutcomeError::from)?;
-    let server_info = mcp_server_info_from_implementation(initialize_result.server_info);
+    let server_info =
+        mcp_server_info_from_implementation(&server_name, initialize_result.server_info);
     let shared_tools = match (codex_apps_tools_cache_context.as_ref(), fetch_ticket) {
         (Some(cache_context), Some(fetch_ticket)) => cache_context.publish_if_newest_accepted(
             fetch_ticket,
@@ -954,7 +950,11 @@ fn mcp_initialize_request_params(
     .with_protocol_version(ProtocolVersion::V_2025_06_18)
 }
 
-fn mcp_server_info_from_implementation(server_info: Implementation) -> McpServerInfo {
+fn mcp_server_info_from_implementation(
+    server_name: &str,
+    server_info: Option<Implementation>,
+) -> McpServerInfo {
+    let server_info = server_info.unwrap_or_else(|| Implementation::new(server_name, ""));
     McpServerInfo {
         name: server_info.name,
         title: server_info.title,
@@ -1085,7 +1085,7 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
     use rmcp::model::JsonObject;
-    use rmcp::model::Meta;
+    use rmcp::model::MetaObject;
     use rmcp::transport::auth::AuthError;
 
     #[test]
@@ -1096,6 +1096,44 @@ mod tests {
         let error = StartupOutcomeError::from(error);
 
         assert!(error.is_authentication_required());
+    }
+
+    #[test]
+    fn missing_server_implementation_uses_configured_server_name() {
+        assert_eq!(
+            mcp_server_info_from_implementation("configured-server", /*server_info*/ None),
+            McpServerInfo {
+                name: "configured-server".to_string(),
+                title: None,
+                version: String::new(),
+                description: None,
+                icons: None,
+                website_url: None,
+            }
+        );
+    }
+
+    #[test]
+    fn advertised_server_implementation_takes_precedence_over_configured_name() {
+        assert_eq!(
+            mcp_server_info_from_implementation(
+                "configured-server",
+                Some(
+                    Implementation::new("advertised-server", "1.2.3")
+                        .with_title("Advertised server")
+                        .with_description("Advertised description")
+                        .with_website_url("https://example.com"),
+                ),
+            ),
+            McpServerInfo {
+                name: "advertised-server".to_string(),
+                title: Some("Advertised server".to_string()),
+                version: "1.2.3".to_string(),
+                description: Some("Advertised description".to_string()),
+                icons: None,
+                website_url: Some("https://example.com".to_string()),
+            }
+        );
     }
 
     #[test]
@@ -1125,7 +1163,7 @@ mod tests {
             "test tool",
             Arc::new(JsonObject::default()),
         )
-        .with_meta(Meta(
+        .with_meta(MetaObject(
             serde_json::json!({
                 "connector_id": "connector_gmail",
                 "connector_name": "Gmail",
