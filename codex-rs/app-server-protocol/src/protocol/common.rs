@@ -1,19 +1,22 @@
+#[cfg(test)]
 use std::path::Path;
 use std::path::PathBuf;
 
 use crate::JSONRPCNotification;
 use crate::JSONRPCRequest;
+use crate::JsonSchema;
 use crate::RequestId;
+use crate::TS;
+#[cfg(test)]
 use crate::export::GeneratedSchema;
+#[cfg(test)]
 use crate::export::write_json_schema;
 use crate::protocol::v1;
 use crate::protocol::v2;
 use codex_experimental_api_macros::ExperimentalApi;
-use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 use strum_macros::Display;
-use ts_rs::TS;
 
 /// Authentication mode for OpenAI-backed providers.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Display, JsonSchema, TS)]
@@ -90,6 +93,7 @@ macro_rules! experimental_reason_expr {
     };
 }
 
+#[cfg(test)]
 macro_rules! experimental_method_entry {
     (#[experimental($reason:expr)] => $wire:literal) => {
         $wire
@@ -102,6 +106,7 @@ macro_rules! experimental_method_entry {
     };
 }
 
+#[cfg(test)]
 macro_rules! experimental_type_entry {
     (#[experimental($reason:expr)] $ty:ty) => {
         stringify!($ty)
@@ -393,22 +398,26 @@ macro_rules! client_request_definitions {
             }
         }
 
+        #[cfg(test)]
         pub(crate) const EXPERIMENTAL_CLIENT_METHODS: &[&str] = &[
             $(
                 experimental_method_entry!($(#[experimental($reason)])? => $wire),
             )*
         ];
+        #[cfg(test)]
         pub(crate) const EXPERIMENTAL_CLIENT_METHOD_PARAM_TYPES: &[&str] = &[
             $(
                 experimental_type_entry!($(#[experimental($reason)])? $params),
             )*
         ];
+        #[cfg(test)]
         pub(crate) const EXPERIMENTAL_CLIENT_METHOD_RESPONSE_TYPES: &[&str] = &[
             $(
                 experimental_type_entry!($(#[experimental($reason)])? $response),
             )*
         ];
 
+        #[cfg(test)]
         pub fn export_client_responses(
             out_dir: &::std::path::Path,
         ) -> ::std::result::Result<(), ::ts_rs::ExportError> {
@@ -418,12 +427,14 @@ macro_rules! client_request_definitions {
             Ok(())
         }
 
+        #[cfg(test)]
         pub(crate) fn visit_client_response_types(v: &mut impl ::ts_rs::TypeVisitor) {
             $(
                 v.visit::<$response>();
             )*
         }
 
+        #[cfg(test)]
         #[allow(clippy::vec_init_then_push)]
         pub fn export_client_response_schemas(
             out_dir: &::std::path::Path,
@@ -435,6 +446,7 @@ macro_rules! client_request_definitions {
             Ok(schemas)
         }
 
+        #[cfg(test)]
         #[allow(clippy::vec_init_then_push)]
         pub fn export_client_param_schemas(
             out_dir: &::std::path::Path,
@@ -621,8 +633,23 @@ client_request_definitions! {
     },
     ThreadSectionList => "threadSection/list" {
         params: v2::ThreadSectionListParams,
-        serialization: None,
+        serialization: global_shared_read("thread-sections"),
         response: v2::ThreadSectionListResponse,
+    },
+    ThreadSectionCreate => "threadSection/create" {
+        params: v2::ThreadSectionCreateParams,
+        serialization: global("thread-sections"),
+        response: v2::ThreadSectionCreateResponse,
+    },
+    ThreadSectionUpdate => "threadSection/update" {
+        params: v2::ThreadSectionUpdateParams,
+        serialization: global("thread-sections"),
+        response: v2::ThreadSectionUpdateResponse,
+    },
+    ThreadSectionDelete => "threadSection/delete" {
+        params: v2::ThreadSectionDeleteParams,
+        serialization: global("thread-sections"),
+        response: v2::ThreadSectionDeleteResponse,
     },
     #[experimental("thread/search")]
     ThreadSearch => "thread/search" {
@@ -701,6 +728,12 @@ client_request_definitions! {
         params: v2::PluginListParams,
         serialization: None,
         response: v2::PluginListResponse,
+    },
+    #[experimental("plugin/search")]
+    PluginSearch => "plugin/search" {
+        params: v2::PluginSearchParams,
+        serialization: None,
+        response: v2::PluginSearchResponse,
     },
     PluginInstalled => "plugin/installed" {
         params: v2::PluginInstalledParams,
@@ -1330,22 +1363,26 @@ macro_rules! server_request_definitions {
             }
         }
 
+        #[cfg(test)]
         pub(crate) const EXPERIMENTAL_SERVER_METHODS: &[&str] = &[
             $(
                 experimental_method_entry!($(#[experimental($reason)])? $(=> $wire)?),
             )*
         ];
+        #[cfg(test)]
         pub(crate) const EXPERIMENTAL_SERVER_METHOD_PARAM_TYPES: &[&str] = &[
             $(
                 experimental_type_entry!($(#[experimental($reason)])? $params),
             )*
         ];
+        #[cfg(test)]
         pub(crate) const EXPERIMENTAL_SERVER_METHOD_RESPONSE_TYPES: &[&str] = &[
             $(
                 experimental_type_entry!($(#[experimental($reason)])? $response),
             )*
         ];
 
+        #[cfg(test)]
         pub fn export_server_responses(
             out_dir: &::std::path::Path,
         ) -> ::std::result::Result<(), ::ts_rs::ExportError> {
@@ -1355,12 +1392,14 @@ macro_rules! server_request_definitions {
             Ok(())
         }
 
+        #[cfg(test)]
         pub(crate) fn visit_server_response_types(v: &mut impl ::ts_rs::TypeVisitor) {
             $(
                 v.visit::<$response>();
             )*
         }
 
+        #[cfg(test)]
         #[allow(clippy::vec_init_then_push)]
         pub fn export_server_response_schemas(
             out_dir: &Path,
@@ -1375,6 +1414,7 @@ macro_rules! server_request_definitions {
             Ok(schemas)
         }
 
+        #[cfg(test)]
         #[allow(clippy::vec_init_then_push)]
         pub fn export_server_param_schemas(
             out_dir: &Path,
@@ -1438,6 +1478,7 @@ macro_rules! server_notification_definitions {
             }
         }
 
+        #[cfg(test)]
         #[allow(clippy::vec_init_then_push)]
         pub fn export_server_notification_schemas(
             out_dir: &::std::path::Path,
@@ -1466,6 +1507,7 @@ macro_rules! client_notification_definitions {
             )*
         }
 
+        #[cfg(test)]
         pub fn export_client_notification_schemas(
             _out_dir: &::std::path::Path,
         ) -> ::anyhow::Result<Vec<GeneratedSchema>> {
@@ -3564,6 +3606,7 @@ mod tests {
             request_id: RequestId::Integer(9),
             params: v2::ThreadRealtimeStartParams {
                 client_managed_handoffs: Some(true),
+                delegation_ack_filler: Some(false),
                 flush_transcript_tail_on_session_end: Some(true),
                 codex_responses_as_items: None,
                 codex_response_item_prefix: None,
@@ -3590,6 +3633,8 @@ mod tests {
                         text: "Understood.".to_string(),
                     },
                 ]),
+                realtime_start_instructions: Some("Use realtime output channels.".to_string()),
+                realtime_end_instructions: Some("Resume normal text responses.".to_string()),
                 prompt: Some(Some("You are on a call".to_string())),
                 realtime_session_id: Some("sess_456".to_string()),
                 transport: None,
@@ -3604,6 +3649,7 @@ mod tests {
                 "params": {
                     "threadId": "thr_123",
                     "clientManagedHandoffs": true,
+                    "delegationAckFiller": false,
                     "flushTranscriptTailOnSessionEnd": true,
                     "codexResponsesAsItems": null,
                     "codexResponseItemPrefix": null,
@@ -3626,6 +3672,8 @@ mod tests {
                             "text": "Understood."
                         }
                     ],
+                    "realtimeStartInstructions": "Use realtime output channels.",
+                    "realtimeEndInstructions": "Resume normal text responses.",
                     "prompt": "You are on a call",
                     "realtimeSessionId": "sess_456",
                     "transport": null,
@@ -3644,6 +3692,7 @@ mod tests {
             request_id: RequestId::Integer(9),
             params: v2::ThreadRealtimeStartParams {
                 client_managed_handoffs: None,
+                delegation_ack_filler: None,
                 flush_transcript_tail_on_session_end: None,
                 codex_responses_as_items: None,
                 codex_response_item_prefix: None,
@@ -3654,6 +3703,8 @@ mod tests {
                 output_modality: RealtimeOutputModality::Audio,
                 include_startup_context: None,
                 initial_items: None,
+                realtime_start_instructions: None,
+                realtime_end_instructions: None,
                 prompt: None,
                 realtime_session_id: None,
                 transport: None,
@@ -3668,6 +3719,7 @@ mod tests {
                 "params": {
                     "threadId": "thr_123",
                     "clientManagedHandoffs": null,
+                    "delegationAckFiller": null,
                     "flushTranscriptTailOnSessionEnd": null,
                     "codexResponsesAsItems": null,
                     "codexResponseItemPrefix": null,
@@ -3677,6 +3729,8 @@ mod tests {
                     "outputModality": "audio",
                     "includeStartupContext": null,
                     "initialItems": null,
+                    "realtimeStartInstructions": null,
+                    "realtimeEndInstructions": null,
                     "realtimeSessionId": null,
                     "transport": null,
                     "version": null,
@@ -3690,6 +3744,7 @@ mod tests {
             request_id: RequestId::Integer(9),
             params: v2::ThreadRealtimeStartParams {
                 client_managed_handoffs: None,
+                delegation_ack_filler: None,
                 flush_transcript_tail_on_session_end: None,
                 codex_responses_as_items: None,
                 codex_response_item_prefix: None,
@@ -3700,6 +3755,8 @@ mod tests {
                 output_modality: RealtimeOutputModality::Audio,
                 include_startup_context: None,
                 initial_items: None,
+                realtime_start_instructions: None,
+                realtime_end_instructions: None,
                 prompt: Some(None),
                 realtime_session_id: None,
                 transport: None,
@@ -3714,6 +3771,7 @@ mod tests {
                 "params": {
                     "threadId": "thr_123",
                     "clientManagedHandoffs": null,
+                    "delegationAckFiller": null,
                     "flushTranscriptTailOnSessionEnd": null,
                     "codexResponsesAsItems": null,
                     "codexResponseItemPrefix": null,
@@ -3723,6 +3781,8 @@ mod tests {
                     "outputModality": "audio",
                     "includeStartupContext": null,
                     "initialItems": null,
+                    "realtimeStartInstructions": null,
+                    "realtimeEndInstructions": null,
                     "prompt": null,
                     "realtimeSessionId": null,
                     "transport": null,
@@ -3936,6 +3996,7 @@ mod tests {
             request_id: RequestId::Integer(1),
             params: v2::ThreadRealtimeStartParams {
                 client_managed_handoffs: None,
+                delegation_ack_filler: None,
                 flush_transcript_tail_on_session_end: None,
                 codex_responses_as_items: None,
                 codex_response_item_prefix: None,
@@ -3946,6 +4007,8 @@ mod tests {
                 output_modality: RealtimeOutputModality::Audio,
                 include_startup_context: None,
                 initial_items: None,
+                realtime_start_instructions: None,
+                realtime_end_instructions: None,
                 prompt: Some(Some("You are on a call".to_string())),
                 realtime_session_id: None,
                 transport: None,

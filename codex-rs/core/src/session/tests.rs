@@ -14,8 +14,6 @@ use crate::function_tool::FunctionCallError;
 use crate::session::step_context::StepContext;
 use crate::shell::default_user_shell;
 use crate::shell_snapshot::ShellSnapshot;
-use crate::skills::SkillRenderSideEffects;
-use crate::skills::render::SkillMetadataBudget;
 use crate::test_support::models_manager_with_provider;
 use crate::tools::format_exec_output_str;
 use crate::tools::registry::ToolRegistry;
@@ -32,7 +30,6 @@ use codex_config::loader::project_trust_key;
 use codex_config::types::McpServerConfig;
 use codex_config::types::McpServerTransportConfig;
 use codex_config::types::ToolSuggestDisabledTool;
-use codex_core_skills::HostSkillsSnapshot;
 use core_test_support::test_codex::local_selections;
 
 use codex_features::Feature;
@@ -74,6 +71,7 @@ use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::request_permissions::PermissionGrantScope;
 use codex_protocol::request_permissions::RequestPermissionProfile;
+use codex_tools::ToolSpec;
 use codex_utils_path_uri::PathUri;
 use tracing::Span;
 
@@ -82,7 +80,6 @@ use crate::rollout::recorder::RolloutRecorder;
 use crate::state::ActiveTurn;
 use crate::state::TaskKind;
 use crate::tasks::SessionTask;
-use crate::tasks::SessionTaskContext;
 use crate::tasks::SessionTaskResult;
 use crate::tasks::UserShellCommandMode;
 use crate::tasks::execute_user_shell_command;
@@ -108,10 +105,6 @@ use codex_execpolicy::Policy;
 use codex_network_proxy::NetworkProxyConfig;
 use codex_otel::MetricsClient;
 use codex_otel::MetricsConfig;
-use codex_otel::THREAD_SKILLS_DESCRIPTION_TRUNCATED_CHARS_METRIC;
-use codex_otel::THREAD_SKILLS_ENABLED_TOTAL_METRIC;
-use codex_otel::THREAD_SKILLS_KEPT_TOTAL_METRIC;
-use codex_otel::THREAD_SKILLS_TRUNCATED_METRIC;
 use codex_otel::TelemetryAuthMode;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
@@ -142,7 +135,6 @@ use codex_protocol::protocol::ResumedHistory;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
-use codex_protocol::protocol::SkillScope;
 use codex_protocol::protocol::Submission;
 use codex_protocol::protocol::ThreadRolledBackEvent;
 use codex_protocol::protocol::ThreadSettingsOverrides;
@@ -216,13 +208,22 @@ impl StepContext {
             mcp: Arc::new(codex_mcp::McpBinding::empty(mcp_config_for_test(
                 &turn.config,
             ))),
-            mcp_tools: Vec::new(),
             tool_router: Arc::new(ToolRouter::from_parts(
                 ToolRegistry::empty_for_test(),
                 Vec::new(),
             )),
             loaded_agents_md: None,
         })
+    }
+
+    pub(crate) fn with_tool_router_for_test(
+        mut self: Arc<Self>,
+        tool_router: Arc<ToolRouter>,
+    ) -> Arc<Self> {
+        Arc::get_mut(&mut self)
+            .expect("test step context must not be shared before its tool router is set")
+            .tool_router = tool_router;
+        self
     }
 }
 
@@ -284,7 +285,7 @@ async fn default_turn_context_assigns_missing_response_item_ids() {
     let (session, turn_context) = make_session_and_context().await;
     let response_item = user_message("hello");
 
-    let items = session.prepare_conversation_items_for_history(
+    let (items, _) = session.prepare_conversation_items_for_history(
         &turn_context,
         std::slice::from_ref(&response_item),
     );
@@ -308,28 +309,6 @@ fn assistant_message(text: &str) -> ResponseItem {
     }
 }
 
-fn test_session_telemetry_without_metadata() -> SessionTelemetry {
-    let exporter = InMemoryMetricExporter::default();
-    let metrics = MetricsClient::new(
-        MetricsConfig::in_memory("test", "codex-core", env!("CARGO_PKG_VERSION"), exporter)
-            .with_runtime_reader(),
-    )
-    .expect("in-memory metrics client");
-    SessionTelemetry::new(
-        ThreadId::new(),
-        "gpt-5.4",
-        "gpt-5.4",
-        /*account_id*/ None,
-        /*account_email*/ None,
-        /*auth_mode*/ None,
-        "test_originator".to_string(),
-        /*log_user_prompts*/ false,
-        "tty".to_string(),
-        SessionSource::Cli,
-    )
-    .with_metrics_without_metadata_tags(metrics)
-}
-
 fn find_metric<'a>(resource_metrics: &'a ResourceMetrics, name: &str) -> &'a Metric {
     for scope_metrics in resource_metrics.scope_metrics() {
         for metric in scope_metrics.metrics() {
@@ -339,21 +318,6 @@ fn find_metric<'a>(resource_metrics: &'a ResourceMetrics, name: &str) -> &'a Met
         }
     }
     panic!("metric {name} missing");
-}
-
-fn histogram_sum(resource_metrics: &ResourceMetrics, name: &str) -> u64 {
-    let metric = find_metric(resource_metrics, name);
-    match metric.data() {
-        AggregatedMetrics::F64(data) => match data {
-            MetricData::Histogram(histogram) => {
-                let points: Vec<_> = histogram.data_points().collect();
-                assert_eq!(points.len(), 1);
-                points[0].sum().round() as u64
-            }
-            _ => panic!("unexpected histogram aggregation"),
-        },
-        _ => panic!("unexpected metric data type"),
-    }
 }
 
 fn single_histogram_attributes(
@@ -815,23 +779,38 @@ async fn preview_session_start_hooks(
     )
 }
 
-fn test_tool_runtime(session: Arc<Session>, turn_context: Arc<TurnContext>) -> ToolCallRuntime {
-    let step_context = StepContext::for_test(Arc::clone(&turn_context));
-    let router = Arc::new(ToolRouter::from_context(
+pub(crate) fn tool_registry_for_test_step(
+    step_context: &StepContext,
+) -> (ToolRegistry, Vec<ToolSpec>) {
+    let mut registry = crate::tools::spec_plan::build_core_tool_registry(
         step_context.turn.as_ref(),
         &step_context.environments,
         step_context.mcp.as_ref(),
-        crate::tools::router::ToolRouterParams {
-            tool_suggest_candidates: None,
-            tool_runtimes: Vec::new(),
-            extension_tool_executors: Vec::new(),
-            wait_for_environment_tool_config: None,
-            dynamic_tools: turn_context.dynamic_tools.as_slice(),
-        },
+        /*tool_suggest_candidates*/ None,
+        /*wait_for_environment_tool_config*/ None,
+    );
+    let hosted_specs = crate::tools::spec_plan::append_source_tools(
+        step_context.turn.as_ref(),
+        &mut registry,
+        Vec::new(),
+        Vec::new(),
+        &step_context.turn.dynamic_tools,
+    );
+    (registry, hosted_specs)
+}
+
+fn test_tool_runtime(session: Arc<Session>, turn_context: Arc<TurnContext>) -> ToolCallRuntime {
+    let step_context = StepContext::for_test(Arc::clone(&turn_context));
+    let (registry, hosted_specs) = tool_registry_for_test_step(step_context.as_ref());
+    let router = Arc::new(ToolRouter::from_registry(
+        step_context.turn.as_ref(),
+        registry,
+        hosted_specs,
         &Default::default(),
     ));
+    let step_context = step_context.with_tool_router_for_test(router);
     let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
-    ToolCallRuntime::new(router, session, step_context, tracker)
+    ToolCallRuntime::new(session, step_context, tracker)
 }
 
 fn make_connector(id: &str, name: &str) -> AppInfo {
@@ -2559,7 +2538,8 @@ async fn resumed_history_injects_initial_context_on_first_context_update_only() 
     let step_context = StepContext::for_test(Arc::clone(&turn_context));
     session
         .record_context_updates_and_set_reference_context_item(&step_context)
-        .await;
+        .await
+        .expect("world state should build");
     let initial_context = build_initial_context(&session, &turn_context).await;
     expected.extend(initial_context);
     let history_after_seed = session.clone_history().await;
@@ -2570,7 +2550,8 @@ async fn resumed_history_injects_initial_context_on_first_context_update_only() 
 
     session
         .record_context_updates_and_set_reference_context_item(&step_context)
-        .await;
+        .await
+        .expect("world state should build");
     let history_after_second_seed = session.clone_history().await;
     assert_eq!(
         history_after_seed.raw_items(),
@@ -3192,7 +3173,12 @@ async fn start_new_context_window_assigns_and_persists_item_ids() {
         .capture_step_context(Arc::clone(&turn_context), &CancellationToken::new())
         .await
         .expect("a fresh cancellation token cannot be cancelled");
-    let world_state = Arc::new(session.build_world_state_for_step(&step_context).await);
+    let world_state = Arc::new(
+        session
+            .build_world_state_for_step(&step_context)
+            .await
+            .expect("world state should build"),
+    );
 
     session
         .start_new_context_window(&step_context, world_state)
@@ -5556,7 +5542,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         skills_service,
         plugins_manager,
         mcp_manager,
-        Arc::new(codex_code_mode::InProcessCodeModeSessionProvider),
+        Arc::new(codex_code_mode::DisabledCodeModeSessionProvider),
         Arc::new(codex_extension_api::ExtensionRegistryBuilder::new().build()),
         codex_extension_api::ExtensionDataInit::default(),
         /*supports_openai_form_elicitation*/ false,
@@ -5600,7 +5586,10 @@ pub(crate) async fn build_world_state_from_turn_context(
     turn_context: &Arc<TurnContext>,
 ) -> WorldState {
     let step_context = StepContext::for_test(Arc::clone(turn_context));
-    session.build_world_state_for_step(&step_context).await
+    session
+        .build_world_state_for_step(&step_context)
+        .await
+        .expect("world state should build")
 }
 
 // todo: use online model info
@@ -5702,6 +5691,10 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
     ));
     let network_approval = Arc::new(NetworkApprovalService::default());
     let mcp_runtime = Arc::new(codex_mcp::McpRuntime::empty(config.prefix_mcp_tool_names()));
+    let executed_tool_calls = config
+        .features
+        .enabled(Feature::ExecutedToolCallMetadata)
+        .then(|| Arc::new(crate::state::ExecutedToolCallRecorder::default()));
     let services = SessionServices {
         mcp_runtime,
         unified_exec_manager: UnifiedExecProcessManager::new(
@@ -5777,8 +5770,9 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
             /*attestation_provider*/ None,
             config.http_client_factory(),
         ),
+        executed_tool_calls,
         code_mode_service: crate::tools::code_mode::CodeModeService::new(
-            Arc::new(codex_code_mode::InProcessCodeModeSessionProvider),
+            Arc::new(codex_code_mode::DisabledCodeModeSessionProvider),
             &config.features,
         ),
         tool_search_handler_cache: Default::default(),
@@ -5841,6 +5835,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         mcp_prewarm_task: std::sync::Mutex::new(None),
         conversation: Arc::new(RealtimeConversationManager::new()),
         active_turn: Mutex::new(None),
+        pending_user_message_admissions: Default::default(),
         input_queue: super::input_queue::InputQueue::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
@@ -5954,7 +5949,7 @@ async fn make_session_with_config_and_rx(
         skills_service,
         plugins_manager,
         mcp_manager,
-        Arc::new(codex_code_mode::InProcessCodeModeSessionProvider),
+        Arc::new(codex_code_mode::DisabledCodeModeSessionProvider),
         Arc::new(codex_extension_api::ExtensionRegistryBuilder::new().build()),
         codex_extension_api::ExtensionDataInit::default(),
         /*supports_openai_form_elicitation*/ false,
@@ -6064,7 +6059,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         skills_service,
         plugins_manager,
         mcp_manager,
-        Arc::new(codex_code_mode::InProcessCodeModeSessionProvider),
+        Arc::new(codex_code_mode::DisabledCodeModeSessionProvider),
         Arc::new(codex_extension_api::ExtensionRegistryBuilder::new().build()),
         codex_extension_api::ExtensionDataInit::default(),
         /*supports_openai_form_elicitation*/ false,
@@ -7222,7 +7217,7 @@ async fn spawn_task_turn_span_inherits_dispatch_trace_context() {
 
         async fn run(
             self: Arc<Self>,
-            _session: Arc<SessionTaskContext>,
+            _session: Arc<Session>,
             _ctx: Arc<TurnContext>,
             _input: Vec<TurnInput>,
             _cancellation_token: CancellationToken,
@@ -7885,6 +7880,10 @@ where
     ));
     let network_approval = Arc::new(NetworkApprovalService::default());
     let mcp_runtime = Arc::new(codex_mcp::McpRuntime::empty(config.prefix_mcp_tool_names()));
+    let executed_tool_calls = config
+        .features
+        .enabled(Feature::ExecutedToolCallMetadata)
+        .then(|| Arc::new(crate::state::ExecutedToolCallRecorder::default()));
     let services = SessionServices {
         mcp_runtime,
         unified_exec_manager: UnifiedExecProcessManager::new(
@@ -7960,8 +7959,9 @@ where
             /*attestation_provider*/ None,
             config.http_client_factory(),
         ),
+        executed_tool_calls,
         code_mode_service: crate::tools::code_mode::CodeModeService::new(
-            Arc::new(codex_code_mode::InProcessCodeModeSessionProvider),
+            Arc::new(codex_code_mode::DisabledCodeModeSessionProvider),
             &config.features,
         ),
         tool_search_handler_cache: Default::default(),
@@ -8024,6 +8024,7 @@ where
         mcp_prewarm_task: std::sync::Mutex::new(None),
         conversation: Arc::new(RealtimeConversationManager::new()),
         active_turn: Mutex::new(None),
+        pending_user_message_admissions: Default::default(),
         input_queue: super::input_queue::InputQueue::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
@@ -8690,7 +8691,6 @@ async fn record_context_updates_emits_environment_item_for_time_changes() {
             &session.services.models_manager,
         )
         .await;
-    current_context.current_date = Some("2026-02-27".to_string());
     current_context.timezone = Some("Europe/Berlin".to_string());
 
     let update_items =
@@ -8700,7 +8700,8 @@ async fn record_context_updates_emits_environment_item_for_time_changes() {
         .into_iter()
         .find(|text| text.contains("<environment_context>"))
         .expect("environment update item should be emitted");
-    assert!(environment_update.contains("<current_date>2026-02-27</current_date>"));
+    let current_date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    assert!(environment_update.contains(&format!("<current_date>{current_date}</current_date>")));
     assert!(environment_update.contains("<timezone>Europe/Berlin</timezone>"));
 }
 
@@ -8751,13 +8752,15 @@ async fn record_context_update_items(
     let previous_step = StepContext::for_test(previous_context);
     session
         .record_context_updates_and_set_reference_context_item(&previous_step)
-        .await;
+        .await
+        .expect("world state should build");
     let previous_len = session.clone_history().await.raw_items().len();
 
     let current_step = StepContext::for_test(Arc::new(current_context));
     session
         .record_context_updates_and_set_reference_context_item(&current_step)
-        .await;
+        .await
+        .expect("world state should build");
     let history = session.clone_history().await;
     history.raw_items()[previous_len..].to_vec()
 }
@@ -8805,7 +8808,7 @@ async fn record_context_updates_emits_realtime_end_when_session_stops_being_live
     assert!(
         developer_texts
             .iter()
-            .any(|text| text.contains("Reason: inactive")),
+            .any(|text| text.contains("<realtime_conversation>")),
         "expected a realtime end update, got {developer_texts:?}"
     );
 }
@@ -8983,7 +8986,8 @@ async fn record_context_updates_includes_turn_context_fragments_on_steady_state_
     let step_context = StepContext::for_test(Arc::clone(&turn_context));
     session
         .record_context_updates_and_set_reference_context_item(&step_context)
-        .await;
+        .await
+        .expect("world state should build");
 
     let history = session.clone_history().await;
     let developer_messages = developer_message_texts(history.raw_items());
@@ -9121,220 +9125,6 @@ async fn build_initial_context_omits_multi_agent_v2_usage_hints_when_hint_is_emp
 }
 
 #[tokio::test]
-async fn build_initial_context_trims_skill_metadata_from_context_window_budget() {
-    let (session, mut turn_context) = make_session_and_context().await;
-    let mut outcome = SkillLoadOutcome::default();
-    outcome.skills = vec![
-        SkillMetadata {
-            name: "admin-skill".to_string(),
-            description: "desc".to_string(),
-            short_description: None,
-            interface: None,
-            dependencies: None,
-            policy: None,
-            path_to_skills_md: test_path_buf("/tmp/admin-skill/SKILL.md").abs(),
-            scope: SkillScope::Admin,
-            plugin_id: None,
-            remote_plugin_id: None,
-        },
-        SkillMetadata {
-            name: "repo-skill".to_string(),
-            description: "desc".to_string(),
-            short_description: None,
-            interface: None,
-            dependencies: None,
-            policy: None,
-            path_to_skills_md: test_path_buf("/tmp/repo-skill/SKILL.md").abs(),
-            scope: SkillScope::Repo,
-            plugin_id: None,
-            remote_plugin_id: None,
-        },
-    ];
-    turn_context.model_info.context_window = Some(100);
-    turn_context.turn_skills = TurnSkillsContext::new(HostSkillsSnapshot::new(Arc::new(outcome)));
-    let turn_context = Arc::new(turn_context);
-
-    let initial_context = build_initial_context(&session, &turn_context).await;
-    let developer_texts = developer_input_texts(&initial_context);
-
-    assert!(
-        developer_texts
-            .iter()
-            .all(|text| !text.contains("Exceeded skills context budget")),
-        "expected skill budget warning to stay out of the initial context, got {developer_texts:?}"
-    );
-    assert!(
-        developer_texts
-            .iter()
-            .all(|text| !text.contains("- admin-skill:") && !text.contains("- repo-skill:")),
-        "expected no skill metadata entries to fit the tiny budget, got {developer_texts:?}"
-    );
-}
-
-#[test]
-fn emit_thread_start_skill_metrics_records_enabled_kept_and_truncated_values() {
-    let session_telemetry = test_session_telemetry_without_metadata();
-    let mut outcome = SkillLoadOutcome::default();
-    outcome.skills = vec![SkillMetadata {
-        name: "repo-skill".to_string(),
-        description: "desc".to_string(),
-        short_description: None,
-        interface: None,
-        dependencies: None,
-        policy: None,
-        path_to_skills_md: test_path_buf("/tmp/repo-skill/SKILL.md").abs(),
-        scope: SkillScope::Repo,
-        plugin_id: None,
-        remote_plugin_id: None,
-    }];
-    let rendered = build_available_skills(
-        &outcome,
-        SkillMetadataBudget::Characters(1),
-        SkillRenderSideEffects::ThreadStart {
-            session_telemetry: &session_telemetry,
-        },
-    )
-    .expect("skills should render");
-
-    assert_eq!(
-        rendered.warning_message,
-        Some(
-            "Exceeded skills context budget. All skill descriptions were removed and 1 additional skill was not included in the model-visible skills list."
-                .to_string()
-        )
-    );
-    let snapshot = session_telemetry
-        .snapshot_metrics()
-        .expect("runtime metrics snapshot");
-    assert_eq!(
-        histogram_sum(&snapshot, THREAD_SKILLS_ENABLED_TOTAL_METRIC),
-        1
-    );
-    assert_eq!(histogram_sum(&snapshot, THREAD_SKILLS_KEPT_TOTAL_METRIC), 0);
-    assert_eq!(histogram_sum(&snapshot, THREAD_SKILLS_TRUNCATED_METRIC), 1);
-    assert_eq!(
-        histogram_sum(&snapshot, THREAD_SKILLS_DESCRIPTION_TRUNCATED_CHARS_METRIC),
-        4
-    );
-}
-
-#[test]
-fn emit_thread_start_skill_metrics_records_description_truncated_chars_without_omitted_skills() {
-    let session_telemetry = test_session_telemetry_without_metadata();
-    let alpha = SkillMetadata {
-        name: "alpha-skill".to_string(),
-        description: "abcdef".to_string(),
-        short_description: None,
-        interface: None,
-        dependencies: None,
-        policy: None,
-        path_to_skills_md: test_path_buf("/tmp/alpha-skill/SKILL.md").abs(),
-        scope: SkillScope::Repo,
-        plugin_id: None,
-        remote_plugin_id: None,
-    };
-    let beta = SkillMetadata {
-        name: "beta-skill".to_string(),
-        description: "uvwxyz".to_string(),
-        short_description: None,
-        interface: None,
-        dependencies: None,
-        policy: None,
-        path_to_skills_md: test_path_buf("/tmp/beta-skill/SKILL.md").abs(),
-        scope: SkillScope::Repo,
-        plugin_id: None,
-        remote_plugin_id: None,
-    };
-    let minimum_skill_line_cost = |skill: &SkillMetadata| {
-        let path = skill.path_to_skills_md.to_string_lossy().replace('\\', "/");
-        format!("- {}: (file: {})\n", skill.name, path)
-            .chars()
-            .count()
-    };
-    let minimum_budget = minimum_skill_line_cost(&alpha) + minimum_skill_line_cost(&beta);
-    let mut outcome = SkillLoadOutcome::default();
-    outcome.skills = vec![alpha, beta];
-
-    let rendered = build_available_skills(
-        &outcome,
-        SkillMetadataBudget::Characters(minimum_budget + 6),
-        SkillRenderSideEffects::ThreadStart {
-            session_telemetry: &session_telemetry,
-        },
-    )
-    .expect("skills should render");
-
-    assert_eq!(rendered.report.omitted_count, 0);
-    assert_eq!(rendered.report.truncated_description_chars, 8);
-    let snapshot = session_telemetry
-        .snapshot_metrics()
-        .expect("runtime metrics snapshot");
-    assert_eq!(histogram_sum(&snapshot, THREAD_SKILLS_TRUNCATED_METRIC), 0);
-    assert_eq!(
-        histogram_sum(&snapshot, THREAD_SKILLS_DESCRIPTION_TRUNCATED_CHARS_METRIC),
-        8
-    );
-}
-
-#[tokio::test]
-async fn build_initial_context_emits_thread_start_skill_warning_on_repeated_builds() {
-    let (session, turn_context, rx) = make_session_and_context_with_rx().await;
-    let mut turn_context = Arc::into_inner(turn_context).expect("sole thread settings owner");
-    let mut outcome = SkillLoadOutcome::default();
-    outcome.skills = vec![
-        SkillMetadata {
-            name: "admin-skill".to_string(),
-            description: "desc".to_string(),
-            short_description: None,
-            interface: None,
-            dependencies: None,
-            policy: None,
-            path_to_skills_md: test_path_buf("/tmp/admin-skill/SKILL.md").abs(),
-            scope: SkillScope::Admin,
-            plugin_id: None,
-            remote_plugin_id: None,
-        },
-        SkillMetadata {
-            name: "repo-skill".to_string(),
-            description: "desc".to_string(),
-            short_description: None,
-            interface: None,
-            dependencies: None,
-            policy: None,
-            path_to_skills_md: test_path_buf("/tmp/repo-skill/SKILL.md").abs(),
-            scope: SkillScope::Repo,
-            plugin_id: None,
-            remote_plugin_id: None,
-        },
-    ];
-    turn_context.model_info.context_window = Some(100);
-    turn_context.turn_skills = TurnSkillsContext::new(HostSkillsSnapshot::new(Arc::new(outcome)));
-    let turn_context = Arc::new(turn_context);
-
-    let _ = build_initial_context(&session, &turn_context).await;
-    let warning_event = timeout(Duration::from_secs(1), rx.recv())
-        .await
-        .expect("warning event should arrive")
-        .expect("warning event should be readable");
-    assert!(matches!(
-        warning_event.msg,
-        EventMsg::Warning(WarningEvent { message })
-            if message == "Exceeded skills context budget of 2%. All skill descriptions were removed and 2 additional skills were not included in the model-visible skills list."
-    ));
-
-    let _ = build_initial_context(&session, &turn_context).await;
-    let warning_event = timeout(Duration::from_secs(1), rx.recv())
-        .await
-        .expect("warning event should arrive on repeated build")
-        .expect("warning event should be readable");
-    assert!(matches!(
-        warning_event.msg,
-        EventMsg::Warning(WarningEvent { message })
-            if message == "Exceeded skills context budget of 2%. All skill descriptions were removed and 2 additional skills were not included in the model-visible skills list."
-    ));
-}
-
-#[tokio::test]
 async fn build_initial_context_restates_realtime_start_when_reference_context_is_missing() {
     let (session, mut turn_context) = make_session_and_context().await;
     turn_context.realtime_active = true;
@@ -9441,7 +9231,8 @@ async fn record_context_updates_and_set_reference_context_item_injects_full_cont
     let step_context = StepContext::for_test(Arc::clone(&turn_context));
     session
         .record_context_updates_and_set_reference_context_item(&step_context)
-        .await;
+        .await
+        .expect("world state should build");
     let history = session.clone_history().await;
     let initial_context = build_initial_context(&session, &turn_context).await;
     assert_eq!(
@@ -9477,7 +9268,8 @@ async fn record_context_updates_and_set_reference_context_item_reinjects_full_co
         .await;
     session
         .record_context_updates_and_set_reference_context_item(&step_context)
-        .await;
+        .await
+        .expect("world state should build");
     {
         let mut state = session.state.lock().await;
         state.set_reference_context_item(/*item*/ None);
@@ -9491,7 +9283,8 @@ async fn record_context_updates_and_set_reference_context_item_reinjects_full_co
 
     session
         .record_context_updates_and_set_reference_context_item(&step_context)
-        .await;
+        .await
+        .expect("world state should build");
 
     let history = session.clone_history().await;
     let mut expected_history = vec![compacted_summary];
@@ -9536,7 +9329,8 @@ async fn record_context_updates_and_set_reference_context_item_persists_baseline
     let step_context = StepContext::for_test(Arc::clone(&turn_context));
     session
         .record_context_updates_and_set_reference_context_item(&step_context)
-        .await;
+        .await
+        .expect("world state should build");
 
     assert_eq!(
         session.clone_history().await.raw_items().to_vec(),
@@ -9585,7 +9379,8 @@ async fn record_context_updates_and_set_reference_context_item_persists_split_fi
     let step_context = StepContext::for_test(Arc::clone(&turn_context));
     session
         .record_context_updates_and_set_reference_context_item(&step_context)
-        .await;
+        .await
+        .expect("world state should build");
     session.ensure_rollout_materialized().await;
     session.flush_rollout().await.expect("rollout should flush");
 
@@ -9672,7 +9467,8 @@ async fn record_context_updates_and_set_reference_context_item_persists_full_rei
     let step_context = StepContext::for_test(Arc::clone(&turn_context));
     session
         .record_context_updates_and_set_reference_context_item(&step_context)
-        .await;
+        .await
+        .expect("world state should build");
     session.ensure_rollout_materialized().await;
     session.flush_rollout().await.expect("rollout should flush");
 
@@ -9784,7 +9580,7 @@ impl SessionTask for CompletingTask {
 
     async fn run(
         self: Arc<Self>,
-        _session: Arc<SessionTaskContext>,
+        _session: Arc<Session>,
         _ctx: Arc<TurnContext>,
         _input: Vec<TurnInput>,
         _cancellation_token: CancellationToken,
@@ -9932,7 +9728,7 @@ impl SessionTask for NeverEndingTask {
 
     async fn run(
         self: Arc<Self>,
-        _session: Arc<SessionTaskContext>,
+        _session: Arc<Session>,
         _ctx: Arc<TurnContext>,
         _input: Vec<TurnInput>,
         cancellation_token: CancellationToken,
@@ -9961,12 +9757,11 @@ impl SessionTask for GuardianDeniedApprovalTask {
 
     async fn run(
         self: Arc<Self>,
-        session: Arc<SessionTaskContext>,
+        session: Arc<Session>,
         ctx: Arc<TurnContext>,
         _input: Vec<TurnInput>,
         cancellation_token: CancellationToken,
     ) -> SessionTaskResult {
-        let session = session.clone_session();
         for _ in 0..3 {
             crate::guardian::record_guardian_denial_for_test(&session, &ctx, &ctx.sub_id).await;
         }
@@ -11087,17 +10882,11 @@ async fn abort_review_task_emits_exited_then_aborted_and_records_history() {
 async fn fatal_tool_error_stops_turn_and_reports_error() {
     let (session, turn_context, _rx) = make_session_and_context_with_rx().await;
     let step_context = StepContext::for_test(Arc::clone(&turn_context));
-    let router = ToolRouter::from_context(
+    let (registry, hosted_specs) = tool_registry_for_test_step(step_context.as_ref());
+    let router = ToolRouter::from_registry(
         step_context.turn.as_ref(),
-        &step_context.environments,
-        step_context.mcp.as_ref(),
-        crate::tools::router::ToolRouterParams {
-            tool_suggest_candidates: None,
-            tool_runtimes: Vec::new(),
-            extension_tool_executors: Vec::new(),
-            wait_for_environment_tool_config: None,
-            dynamic_tools: turn_context.dynamic_tools.as_slice(),
-        },
+        registry,
+        hosted_specs,
         &Default::default(),
     );
     let item = ResponseItem::CustomToolCall {
