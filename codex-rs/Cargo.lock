@@ -2164,7 +2164,7 @@ dependencies = [
 
 [[package]]
 name = "codex-app-server-protocol-noop-macros"
-version = "0.0.0"
+version = "0.145.0-alpha.4"
 
 [[package]]
 name = "codex-app-server-test-client"
@@ -2587,7 +2587,7 @@ dependencies = [
 
 [[package]]
 name = "codex-code-mode-runtime"
-version = "0.0.0"
+version = "0.145.0-alpha.4"
 dependencies = [
  "codex-code-mode-protocol",
  "codex-protocol",

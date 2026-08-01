@@ -224,6 +224,7 @@ async fn request_skill_dependencies(
             format!("skill-deps-{}", turn_context.sub_id),
             RequestUserInputArgs {
                 questions,
+                is_blocking: true,
                 auto_resolution_ms: None,
             },
         )
