@@ -12,6 +12,8 @@ use super::Turn;
 use super::TurnEnvironmentParams;
 use super::TurnItemsView;
 use super::shared::v2_enum_from_core;
+use crate::JsonSchema;
+use crate::TS;
 use codex_experimental_api_macros::ExperimentalApi;
 pub use codex_protocol::capabilities::CapabilityRootLocation;
 pub use codex_protocol::capabilities::SelectedCapabilityRoot;
@@ -31,13 +33,11 @@ use codex_protocol::protocol::TokenUsageInfo as CoreTokenUsageInfo;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::LegacyAppPathString;
 use codex_utils_path_uri::PathUri;
-use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use ts_rs::TS;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
@@ -1138,6 +1138,57 @@ pub struct ThreadSectionListResponse {
     /// Opaque cursor for the next page, or `null` when no sections remain.
     pub next_cursor: Option<String>,
 }
+
+/// Parameters for creating an independently persisted thread section.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadSectionCreateParams {
+    /// The user-visible name of the section.
+    pub name: String,
+}
+
+/// The independently persisted section created by the server.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadSectionCreateResponse {
+    pub section: ThreadSection,
+}
+
+/// Parameters for updating an independently persisted thread section.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadSectionUpdateParams {
+    /// The stable, server-generated identity of the section to update.
+    pub section_id: String,
+    /// The updated user-visible name of the section.
+    pub name: String,
+}
+
+/// The independently persisted section after its name is updated.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadSectionUpdateResponse {
+    pub section: ThreadSection,
+}
+
+/// Parameters for deleting an independently persisted thread section.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadSectionDeleteParams {
+    /// The stable, server-generated identity of the section to delete.
+    pub section_id: String,
+}
+
+/// Successful deletion does not return additional section data.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadSectionDeleteResponse {}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]
 #[serde(rename_all = "camelCase")]

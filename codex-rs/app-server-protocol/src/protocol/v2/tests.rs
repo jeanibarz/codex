@@ -73,6 +73,22 @@ fn test_absolute_path() -> AbsolutePathBuf {
 }
 
 #[test]
+fn external_agent_config_detect_response_defaults_connectors_for_older_servers() {
+    let response = serde_json::from_value::<ExternalAgentConfigDetectResponse>(json!({
+        "items": [],
+    }))
+    .expect("older detect response should deserialize");
+
+    assert_eq!(
+        response,
+        ExternalAgentConfigDetectResponse {
+            items: Vec::new(),
+            connectors: Vec::new(),
+        }
+    );
+}
+
+#[test]
 fn thread_background_terminals_list_response_round_trips_foreign_paths() {
     for (uri, expected_cwd) in [
         ("file:///home/alice/repo", "/home/alice/repo"),
@@ -4738,5 +4754,47 @@ fn realtime_start_deserializes_client_handoff_channel_prefixes() {
             ),
             ("final".to_string(), vec!["[DONE]".to_string()]),
         ]))
+    );
+}
+
+#[test]
+fn tool_request_user_input_params_default_legacy_missing_is_blocking_to_true() {
+    let params = serde_json::from_value::<ToolRequestUserInputParams>(json!({
+        "threadId": "thread-1",
+        "turnId": "turn-1",
+        "itemId": "call-1",
+        "questions": [{
+            "id": "q1",
+            "header": "Confirm",
+            "question": "Continue?",
+            "options": [{
+                "label": "Yes",
+                "description": "Continue."
+            }]
+        }],
+        "autoResolutionMs": 60_000
+    }))
+    .expect("legacy request_user_input params should deserialize");
+
+    assert_eq!(
+        params,
+        ToolRequestUserInputParams {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item_id: "call-1".to_string(),
+            questions: vec![ToolRequestUserInputQuestion {
+                id: "q1".to_string(),
+                header: "Confirm".to_string(),
+                question: "Continue?".to_string(),
+                is_other: false,
+                is_secret: false,
+                options: Some(vec![ToolRequestUserInputOption {
+                    label: "Yes".to_string(),
+                    description: "Continue.".to_string(),
+                }]),
+            }],
+            is_blocking: true,
+            auto_resolution_ms: Some(60_000),
+        }
     );
 }
