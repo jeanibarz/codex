@@ -94,6 +94,7 @@ members = [
     "v8-poc",
     "websocket-client",
     "utils/absolute-path",
+    "utils/audio",
     "utils/path-uri",
     "utils/cargo-bin",
     "git-utils",
@@ -248,6 +249,7 @@ codex-tui = { path = "tui" }
 codex-uds = { path = "uds" }
 codex-utils-absolute-path = { path = "utils/absolute-path" }
 codex-utils-approval-presets = { path = "utils/approval-presets" }
+codex-utils-audio = { path = "utils/audio" }
 codex-utils-cache = { path = "utils/cache" }
 codex-utils-cargo-bin = { path = "utils/cargo-bin" }
 codex-utils-cli = { path = "utils/cli" }
@@ -290,6 +292,7 @@ aws-sigv4 = "1"
 aws-types = "1"
 axum = { version = "0.8", default-features = false }
 base64 = "0.22.1"
+bitflags = "2.13.1"
 bm25 = "2.3.2"
 bytes = "1.10.1"
 chardetng = "0.1.17"

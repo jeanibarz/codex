@@ -9,7 +9,6 @@ use codex_config::CONFIG_TOML_FILE;
 use codex_config::ConfigLayerEntry;
 use codex_config::ConfigLayerSource;
 use codex_config::ConfigLayerStack;
-use codex_config::ConfigLayerStackOrdering;
 use codex_config::HookEventsToml;
 use codex_config::HookHandlerConfig;
 use codex_config::HookStateToml;
@@ -102,11 +101,6 @@ pub(crate) fn discover_handlers(
     };
 
     if let Some(config_layer_stack) = config_layer_stack {
-        let layers = config_layer_stack.get_layers(
-            ConfigLayerStackOrdering::LowestPrecedenceFirst,
-            /*include_disabled*/ false,
-        );
-
         append_managed_requirement_handlers(
             &mut handlers,
             &mut hook_entries,
@@ -116,6 +110,10 @@ pub(crate) fn discover_handlers(
             &hook_states,
             policy,
         );
+
+        // Upstream replaced get_layers(...) with layers_low_to_high(); collect once
+        // so Claude settings discovery and config-layer hook loading share order.
+        let layers: Vec<_> = config_layer_stack.layers_low_to_high().collect();
 
         append_claude_settings_handlers(
             &mut handlers,

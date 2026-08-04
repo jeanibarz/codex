@@ -1,4 +1,5 @@
 use super::mcp_refresh::McpRefresh;
+use super::turn_context::EnvironmentConfig;
 use super::turn_context::TurnEnvironment;
 use super::*;
 use crate::agents_md_manager::AgentsMdManager;
@@ -18,7 +19,6 @@ use crate::test_support::models_manager_with_provider;
 use crate::tools::format_exec_output_str;
 use crate::tools::registry::ToolRegistry;
 use codex_config::ConfigLayerStack;
-use codex_config::ConfigLayerStackOrdering;
 use codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID;
 use codex_config::LoaderOverrides;
 use codex_config::NetworkConstraints;
@@ -1269,11 +1269,7 @@ async fn danger_full_access_tool_attempts_do_not_enforce_managed_network() -> an
 
         let layers = config
             .config_layer_stack
-            .get_layers(
-                ConfigLayerStackOrdering::LowestPrecedenceFirst,
-                /*include_disabled*/ true,
-            )
-            .into_iter()
+            .all_layers_low_to_high()
             .cloned()
             .collect();
         let mut requirements = config.config_layer_stack.requirements().clone();
@@ -1470,20 +1466,21 @@ async fn get_base_instructions_no_user_content() {
 
     for test_case in test_cases {
         let model_info = model_info_for_slug(test_case.slug, &config);
+        let model_instructions = model_info.get_model_instructions(config.personality);
         if test_case.expects_apply_patch_description {
             assert_eq!(
-                model_info.base_instructions.as_str(),
+                model_instructions.as_str(),
                 prompt_with_apply_patch_instructions
             );
         }
 
         {
             let mut state = session.state.lock().await;
-            state.session_configuration.base_instructions = model_info.base_instructions.clone();
+            state.session_configuration.base_instructions = model_instructions.clone();
         }
 
         let base_instructions = session.get_base_instructions().await;
-        assert_eq!(base_instructions.text, model_info.base_instructions);
+        assert_eq!(base_instructions.text, model_instructions);
     }
 }
 
@@ -1899,11 +1896,7 @@ async fn refresh_mcp_config_replaces_managed_server_and_plugin_requirements() {
     requirements_toml.plugins = Some(plugin_requirements.clone());
     let layers = next_config
         .config_layer_stack
-        .get_layers(
-            ConfigLayerStackOrdering::LowestPrecedenceFirst,
-            /*include_disabled*/ true,
-        )
-        .into_iter()
+        .all_layers_low_to_high()
         .cloned()
         .collect();
     next_config.config_layer_stack = ConfigLayerStack::new(layers, requirements, requirements_toml)
@@ -2572,6 +2565,7 @@ async fn record_initial_history_seeds_token_info_from_rollout() {
             output_tokens: 20,
             reasoning_output_tokens: 0,
             total_tokens: 30,
+            codex_rollout_budget_units: None,
         },
         last_token_usage: TokenUsage {
             input_tokens: 3,
@@ -2580,6 +2574,7 @@ async fn record_initial_history_seeds_token_info_from_rollout() {
             output_tokens: 4,
             reasoning_output_tokens: 0,
             total_tokens: 7,
+            codex_rollout_budget_units: None,
         },
         model_context_window: Some(1_000),
     };
@@ -2591,6 +2586,7 @@ async fn record_initial_history_seeds_token_info_from_rollout() {
             output_tokens: 200,
             reasoning_output_tokens: 25,
             total_tokens: 375,
+            codex_rollout_budget_units: None,
         },
         last_token_usage: TokenUsage {
             input_tokens: 10,
@@ -2599,6 +2595,7 @@ async fn record_initial_history_seeds_token_info_from_rollout() {
             output_tokens: 20,
             reasoning_output_tokens: 5,
             total_tokens: 35,
+            codex_rollout_budget_units: None,
         },
         model_context_window: Some(2_000),
     };
@@ -2768,6 +2765,7 @@ async fn record_token_usage_info_notifies_extension_contributors() {
         output_tokens: 20,
         reasoning_output_tokens: 3,
         total_tokens: 33,
+        codex_rollout_budget_units: None,
     };
     let second_usage = TokenUsage {
         input_tokens: 7,
@@ -2776,6 +2774,7 @@ async fn record_token_usage_info_notifies_extension_contributors() {
         output_tokens: 8,
         reasoning_output_tokens: 5,
         total_tokens: 20,
+        codex_rollout_budget_units: None,
     };
 
     session
@@ -2896,6 +2895,7 @@ async fn turn_start_lifecycle_exposes_turn_metadata_and_token_baseline() {
         output_tokens: 25,
         reasoning_output_tokens: 5,
         total_tokens: 130,
+        codex_rollout_budget_units: None,
     };
     set_total_token_usage(&session, token_usage_at_turn_start.clone()).await;
 
@@ -4870,6 +4870,12 @@ async fn resolved_environments_for_configuration(
     let turn_environments = ThreadEnvironments::new(
         Arc::clone(&environment_manager),
         default_user_shell(),
+        EnvironmentConfig {
+            allow_login_shell: session_configuration
+                .original_config_do_not_use
+                .permissions
+                .allow_login_shell,
+        },
         ShellSnapshot::disabled(),
         TurnEnvironmentSnapshot::default(),
         /*non_blocking_snapshots*/ false,
@@ -5229,20 +5235,15 @@ enabled = false
     let child_turn = session
         .new_default_turn_with_sub_id("role-skill-turn".to_string())
         .await;
-    let child_skill = child_turn
-        .turn_skills
-        .snapshot
+    let skills_snapshot = child_turn.skills_snapshot();
+    let child_skill = skills_snapshot
         .outcome()
         .skills
         .iter()
         .find(|skill| skill.name == "demo-skill")
         .expect("demo skill should be discovered");
     assert_eq!(
-        child_turn
-            .turn_skills
-            .snapshot
-            .outcome()
-            .is_skill_enabled(child_skill),
+        skills_snapshot.outcome().is_skill_enabled(child_skill),
         false
     );
 }
@@ -5673,6 +5674,9 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
     let turn_environments = Arc::new(ThreadEnvironments::new(
         environment_manager,
         default_user_shell(),
+        EnvironmentConfig {
+            allow_login_shell: config.permissions.allow_login_shell,
+        },
         ShellSnapshot::disabled(),
         resolved_environments,
         /*non_blocking_snapshots*/ false,
@@ -6476,6 +6480,7 @@ async fn request_permissions_tool_resolves_relative_paths_against_selected_envir
             PathUri::from_abs_path(&environment_cwd),
             Vec::new(),
             current_environment.shell,
+            current_environment.config,
         ));
 
     let call_id = "call-1".to_string();
@@ -7137,6 +7142,7 @@ async fn primary_environment_uses_first_turn_environment() {
             second_cwd_uri.clone(),
             Vec::new(),
             /*shell*/ None,
+            first_environment.config.clone(),
         )));
 
     assert_eq!(
@@ -7862,6 +7868,9 @@ where
     let turn_environments = Arc::new(ThreadEnvironments::new(
         environment_manager,
         default_user_shell(),
+        EnvironmentConfig {
+            allow_login_shell: config.permissions.allow_login_shell,
+        },
         ShellSnapshot::disabled(),
         resolved_turn_environments.clone(),
         /*non_blocking_snapshots*/ false,
@@ -8452,6 +8461,7 @@ async fn conflicting_ready_environment_root_ids_keep_first_location() {
             local_environment.cwd().clone(),
             local_environment.workspace_roots().to_vec(),
             local_environment.shell.clone(),
+            local_environment.config.clone(),
         ));
     }
     let environments = TurnEnvironmentSnapshot {
@@ -8509,6 +8519,7 @@ async fn step_context_keeps_its_mcp_runtime_for_tools() -> anyhow::Result<()> {
             enabled: true,
             required: false,
             supports_parallel_tool_calls: false,
+            omit_tools_from: None,
             disabled_reason: None,
             startup_timeout_sec: None,
             tool_timeout_sec: None,
@@ -8615,11 +8626,7 @@ async fn record_context_updates_emits_environment_item_for_network_changes() {
     ));
     let layers = config
         .config_layer_stack
-        .get_layers(
-            ConfigLayerStackOrdering::LowestPrecedenceFirst,
-            /*include_disabled*/ true,
-        )
-        .into_iter()
+        .all_layers_low_to_high()
         .cloned()
         .collect();
     config.config_layer_stack = ConfigLayerStack::new(
@@ -8665,6 +8672,7 @@ async fn record_context_updates_emits_environment_item_for_cwd_changes() {
             PathUri::from_abs_path(&cwd),
             Vec::new(),
             environment.shell,
+            environment.config,
         ));
 
     let update_items =
@@ -8730,6 +8738,7 @@ async fn record_context_updates_omits_environment_item_when_disabled() {
             PathUri::from_abs_path(&test_path_buf("/new-repo").abs()),
             Vec::new(),
             environment.shell,
+            environment.config,
         ));
 
     let update_items =
@@ -9057,13 +9066,24 @@ async fn build_initial_context_adds_multi_agent_v2_subagent_usage_hint_as_develo
         .await
         .session_configuration
         .session_source = session_source.clone();
-    Arc::get_mut(&mut turn_context)
-        .expect("thread settings should not be shared")
-        .session_source = session_source;
+    let turn_context_mut =
+        Arc::get_mut(&mut turn_context).expect("thread settings should not be shared");
+    turn_context_mut.session_source = session_source;
+    Arc::make_mut(&mut turn_context_mut.config)
+        .features
+        .enable(Feature::TokenBudget)
+        .expect("test config should allow token budget");
 
     let initial_context = build_initial_context(&session, &turn_context).await;
 
     let developer_messages = developer_message_texts(&initial_context);
+    assert!(
+        developer_messages
+            .iter()
+            .flatten()
+            .any(|text| text.contains("<context_window>\nAgent name: /root/worker\n")),
+        "expected subagent context window to include its canonical name, got {developer_messages:?}"
+    );
     assert!(
         developer_messages
             .iter()
@@ -9181,6 +9201,7 @@ async fn turn_context_item_stores_local_cwd() {
         cwd,
         Vec::new(),
         environment.shell,
+        environment.config,
     ));
 
     #[allow(deprecated)]
