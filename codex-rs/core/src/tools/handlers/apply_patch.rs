@@ -562,7 +562,7 @@ async fn execute_verified_patch(
         turn_environment,
         action: apply.action,
         file_paths,
-        changes,
+        changes: changes.clone(),
         exec_approval_requirement: apply.exec_approval_requirement,
         additional_permissions: effective_additional_permissions.additional_permissions,
         permissions_preapproved: effective_additional_permissions.permissions_preapproved,

@@ -1,7 +1,6 @@
 use codex_config::ConfigLayerEntry;
 use codex_config::ConfigLayerSource;
 use codex_config::ConfigLayerStack;
-use codex_config::ConfigLayerStackOrdering;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::path::Path;
 use std::path::PathBuf;
@@ -33,12 +32,9 @@ pub(crate) fn effective_user_config(config_layer_stack: &ConfigLayerStack) -> Op
 fn base_user_layers(
     config_layer_stack: &ConfigLayerStack,
 ) -> impl Iterator<Item = &ConfigLayerEntry> {
+    // Upstream replaced get_layers(...) with layers_low_to_high().
     config_layer_stack
-        .get_layers(
-            ConfigLayerStackOrdering::LowestPrecedenceFirst,
-            /*include_disabled*/ false,
-        )
-        .into_iter()
+        .layers_low_to_high()
         .filter(|layer| matches!(&layer.name, ConfigLayerSource::User { .. }))
 }
 
