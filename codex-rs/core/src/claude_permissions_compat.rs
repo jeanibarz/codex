@@ -3,7 +3,6 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use codex_config::ConfigLayerStack;
-use codex_config::ConfigLayerStackOrdering;
 use codex_execpolicy::Decision;
 use serde_json::Value as JsonValue;
 
@@ -81,10 +80,8 @@ impl ClaudePermissionRules {
         let mut warnings = Vec::new();
         let mut load_order = 0_usize;
 
-        for layer in config_layer_stack.get_layers(
-            ConfigLayerStackOrdering::LowestPrecedenceFirst,
-            /*include_disabled*/ false,
-        ) {
+        // Upstream replaced get_layers(...) with layers_low_to_high().
+        for layer in config_layer_stack.layers_low_to_high() {
             let Some(config_folder) = layer.config_folder() else {
                 continue;
             };

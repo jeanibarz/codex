@@ -7,6 +7,7 @@ use crate::context::ApprovalPromptContext;
 use crate::context::world_state::AgentsMdState;
 use crate::context::world_state::AppsInstructionsState;
 use crate::context::world_state::CollaborationModeState;
+use crate::context::world_state::CompactPermissionsState;
 use crate::context::world_state::ContextWindowGuidanceState;
 use crate::context::world_state::EnvironmentsInstructionsState;
 use crate::context::world_state::EnvironmentsState;
@@ -135,6 +136,9 @@ impl Session {
                     .features
                     .enabled(Feature::RequestPermissionsTool),
             ));
+        } else {
+            let exec_policy = self.services.exec_policy.current();
+            world_state.add_section(CompactPermissionsState::new(exec_policy.as_ref()));
         }
         if turn_context.config.include_collaboration_mode_instructions {
             world_state.add_section(CollaborationModeState::from_collaboration_mode(
@@ -184,8 +188,10 @@ impl Session {
                 false
             };
         world_state.add_section(AppsInstructionsState::new(apps_available));
+        let plugins_usage_instructions_available = step_context.mcp.plugins_available()
+            && turn_context.model_info.include_plugin_usage_instructions;
         world_state.add_section(PluginsInstructionsState::new(
-            step_context.mcp.plugins_available(),
+            plugins_usage_instructions_available,
         ));
         if turn_context
             .config
