@@ -25,7 +25,6 @@ pub use codex_skills_extension::HostSkillsService;
 pub use codex_skills_extension::SkillLoadOutcome;
 pub use codex_skills_extension::bundled_skills_enabled_from_stack;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::env;
 use std::sync::Arc;
 use tracing::warn;
@@ -237,7 +236,7 @@ async fn request_skill_dependencies(
                     )
                 },
             );
-            codex_protocol::protocol::RequestUserInputQuestion {
+            codex_protocol::request_user_input::RequestUserInputQuestion {
                 id: dependency.name.clone(),
                 header: "Skill requires environment variable".to_string(),
                 question: format!(
@@ -257,14 +256,14 @@ async fn request_skill_dependencies(
         .request_user_input(
             turn_context,
             format!("skill-deps-{}", turn_context.sub_id),
-            codex_protocol::protocol::RequestUserInputArgs {
+            codex_protocol::request_user_input::RequestUserInputArgs {
                 questions,
                 is_blocking: true,
                 auto_resolution_ms: None,
             },
         )
         .await
-        .unwrap_or_else(|| codex_protocol::protocol::RequestUserInputResponse {
+        .unwrap_or_else(|| codex_protocol::request_user_input::RequestUserInputResponse {
             answers: HashMap::new(),
         });
     if response.answers.is_empty() {

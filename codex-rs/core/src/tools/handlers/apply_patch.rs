@@ -582,7 +582,7 @@ async fn execute_verified_patch(
         turn_environment,
         action: apply.action,
         file_paths,
-        changes: Arc::new(changes),
+        changes: Arc::new(changes.clone()),
         exec_approval_requirement: apply.exec_approval_requirement,
         additional_permissions: effective_additional_permissions.additional_permissions,
         permissions_preapproved: effective_additional_permissions.permissions_preapproved,
@@ -613,7 +613,7 @@ async fn execute_verified_patch(
     // Claude-compat: fire FileChanged hooks after a successful apply_patch.
     run_apply_patch_file_changed_hooks(
         &tool_ctx.session,
-        &tool_ctx.turn,
+        &tool_ctx.step_context.turn,
         tool_ctx.call_id.clone(),
         changes,
     )

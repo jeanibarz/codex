@@ -52,7 +52,7 @@ pub(crate) async fn run(
     engine: &ClaudeHooksEngine,
     request: StopFailureRequest,
 ) -> StopFailureOutcome {
-    let matched = dispatcher::select_handlers(handlers, HookEventName::StopFailure, None);
+    let matched = dispatcher::select_handlers(&engine.handlers, HookEventName::StopFailure, None);
     if matched.is_empty() {
         return StopFailureOutcome {
             hook_events: Vec::new(),

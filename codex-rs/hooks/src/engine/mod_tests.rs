@@ -284,6 +284,7 @@ with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
         plugin_hook_load_warnings: Vec::new(),
         shell_program: None,
         shell_args: Vec::new(),
+        settings_file: None,
     });
     assert!(listed.hooks[0].is_managed);
     let cwd = cwd();
@@ -1306,6 +1307,7 @@ fn profile_user_layers_load_shared_hooks_json_once() {
         feature_enabled: true,
         bypass_hook_trust: true,
         config_layer_stack: Some(config_layer_stack),
+        settings_file: None,
         ..Default::default()
     });
     assert!(listed.warnings.is_empty());
@@ -1457,6 +1459,7 @@ print(json.dumps({
         plugin_hook_load_warnings: Vec::new(),
         shell_program: None,
         shell_args: Vec::new(),
+        settings_file: None,
     });
     assert_eq!(
         listed.hooks[0].plugin_id.as_deref(),

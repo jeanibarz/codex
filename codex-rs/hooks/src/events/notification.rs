@@ -52,7 +52,7 @@ pub(crate) async fn run(
     engine: &ClaudeHooksEngine,
     request: NotificationRequest,
 ) -> NotificationOutcome {
-    let matched = dispatcher::select_handlers(handlers, HookEventName::Notification, None);
+    let matched = dispatcher::select_handlers(&engine.handlers, HookEventName::Notification, None);
     if matched.is_empty() {
         return NotificationOutcome {
             hook_events: Vec::new(),

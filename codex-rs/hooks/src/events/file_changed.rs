@@ -48,7 +48,7 @@ pub(crate) fn preview(
     let file_paths = file_paths(&request.changes);
     let matcher_inputs = file_paths.iter().map(String::as_str).collect::<Vec<_>>();
     dispatcher::select_handlers_for_matcher_inputs(
-        &engine.handlers,
+        handlers,
         HookEventName::FileChanged,
         &matcher_inputs,
     )

@@ -929,6 +929,7 @@ async fn load_plugin(
             plugin_skill_snapshots,
             remote_plugin_id_resolver: _,
             skill_root_loader,
+            plugin_hooks_enabled: _,
         } => {
             loaded_plugin.manifest_name = Some(manifest.display_name().to_string());
             loaded_plugin.manifest_description = manifest.description.clone();
@@ -1004,12 +1005,17 @@ pub(crate) async fn load_plugin_from_root(
         return loaded_plugin;
     }
 
-    let Some(manifest) = load_plugin_manifest(plugin_root.as_path()) else {
+    let Some(loaded_manifest) = load_plugin_manifest_with_format(plugin_root.as_path()) else {
         loaded_plugin.error = Some("missing or invalid plugin.json".to_string());
         return loaded_plugin;
     };
-
+    loaded_plugin.skill_discovery_mode = match loaded_manifest.format {
+        PluginManifestFormat::Legacy => SkillDiscoveryMode::Recursive,
+        PluginManifestFormat::AgentPlugin => SkillDiscoveryMode::DirectChildren,
+    };
+    let manifest = loaded_manifest.manifest;
     let manifest_paths = &manifest.paths;
+    let mcp_plugin_data_root = plugin_data_root.clone();
     loaded_plugin.plugin_namespace = Some(manifest.name.clone());
     match scope {
         PluginLoadScope::AllCapabilities {
@@ -1017,45 +1023,54 @@ pub(crate) async fn load_plugin_from_root(
             skill_config_rules,
             plugin_skill_snapshots,
             remote_plugin_id_resolver: _,
-            root_scan_slots,
-            ..
+            skill_root_loader,
+            plugin_hooks_enabled: _,
         } => {
             loaded_plugin.manifest_name = Some(manifest.display_name().to_string());
             loaded_plugin.manifest_description = manifest.description.clone();
-            loaded_plugin.skill_roots = plugin_skill_roots(&plugin_root, manifest_paths);
+            loaded_plugin.skill_roots =
+                plugin_skill_roots(&plugin_root, manifest_paths, loaded_manifest.format);
             let plugin_identity = PluginIdentity {
                 plugin_id: plugin_id.as_key(),
                 remote_plugin_id: None,
             };
-            let resolved_skills = load_plugin_skills_with_identity(
+            let resolved_skills = load_plugin_skill_inventory(
                 &plugin_root,
                 &plugin_identity,
                 &manifest,
+                loaded_manifest.format,
                 *restriction_product,
-                skill_config_rules,
                 *plugin_skill_snapshots,
-                Arc::clone(root_scan_slots),
+                *skill_root_loader,
             )
-            .await;
+            .await
+            .resolve(skill_config_rules);
             let has_enabled_skills = resolved_skills.has_enabled_skills();
             loaded_plugin.disabled_skill_paths = resolved_skills.disabled_skill_paths;
             loaded_plugin.has_enabled_skills = has_enabled_skills;
-            loaded_plugin.mcp_servers = load_plugin_mcp_servers_from_manifest(
+            loaded_plugin.mcp_servers = load_plugin_mcp_servers_from_manifest_with_format(
                 plugin_root.as_path(),
                 manifest_paths,
                 Some(mcp_server_policies),
+                Some(mcp_plugin_data_root.as_path()),
+                loaded_manifest.format,
             )
             .await;
-            loaded_plugin.apps = load_plugin_apps(plugin_root.as_path()).await;
+            if loaded_manifest.format == PluginManifestFormat::Legacy {
+                loaded_plugin.apps = load_plugin_apps(plugin_root.as_path()).await;
+            }
         }
         PluginLoadScope::HooksOnly => {}
     }
-    if scope.plugin_hooks_enabled() {
-        let (hook_sources, hook_load_warnings) =
-            load_plugin_hooks(&plugin_root, plugin_id, &plugin_data_root, manifest_paths);
-        loaded_plugin.hook_sources = hook_sources;
-        loaded_plugin.hook_load_warnings = hook_load_warnings;
-    }
+    let (hook_sources, hook_load_warnings) = if !scope.plugin_hooks_enabled() {
+        (Vec::new(), Vec::new())
+    } else if loaded_manifest.format == PluginManifestFormat::AgentPlugin {
+        (Vec::new(), Vec::new())
+    } else {
+        load_plugin_hooks(&plugin_root, plugin_id, &plugin_data_root, manifest_paths)
+    };
+    loaded_plugin.hook_sources = hook_sources;
+    loaded_plugin.hook_load_warnings = hook_load_warnings;
     loaded_plugin
 }
 
@@ -1073,6 +1088,7 @@ fn unloaded_plugin(
         root,
         enabled,
         skill_roots: Vec::new(),
+        skill_discovery_mode: SkillDiscoveryMode::Recursive,
         disabled_skill_paths: HashSet::new(),
         has_enabled_skills: false,
         mcp_servers: HashMap::new(),

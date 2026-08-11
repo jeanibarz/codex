@@ -1172,8 +1172,7 @@ impl UnifiedExecProcessManager {
             ),
             local_policy_env,
         };
-        let mut explicit_env_overrides = context
-            .turn
+        let mut explicit_env_overrides = turn
             .config
             .permissions
             .shell_environment_policy

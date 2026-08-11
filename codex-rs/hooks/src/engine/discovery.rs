@@ -32,6 +32,7 @@ use crate::events::session_end::SESSION_END_DEFAULT_TIMEOUT_SEC;
 use crate::events::session_end::SESSION_END_MAX_TIMEOUT_SEC;
 use crate::output_spill::AdditionalContextLimit;
 use crate::output_spill::DEFAULT_HOOK_OUTPUT_TOKEN_LIMIT;
+use codex_protocol::protocol::HookEventName;
 use codex_protocol::protocol::HookExecutionMode;
 use codex_protocol::protocol::HookHandlerType;
 use codex_protocol::protocol::HookSource;
@@ -784,6 +785,7 @@ fn hook_source_for_requirement_source(source: Option<&RequirementSource>) -> Hoo
 }
 
 
+#[derive(Debug, serde::Deserialize)]
 struct ClaudeSettingsHooks {
     #[serde(default)]
     hooks: HookEventsToml,

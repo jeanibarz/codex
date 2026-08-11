@@ -312,8 +312,11 @@ impl ClaudeHooksEngine {
         crate::events::stop::preview(&self.handlers, request)
     }
 
-    pub(crate) fn preview_session_end(&self) -> Vec<HookRunSummary> {
-        crate::events::session_end::preview(&self.handlers)
+    pub(crate) fn preview_session_end(
+        &self,
+        request: &SessionEndRequest,
+    ) -> Vec<HookRunSummary> {
+        crate::events::session_end::preview(&self.handlers, request)
     }
 
     pub(crate) async fn run_session_end(&self, request: SessionEndRequest) -> SessionEndOutcome {

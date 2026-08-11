@@ -249,8 +249,11 @@ impl Hooks {
         self.engine.run_stop(request).await
     }
 
-    pub fn preview_session_end(&self) -> Vec<codex_protocol::protocol::HookRunSummary> {
-        self.engine.preview_session_end()
+    pub fn preview_session_end(
+        &self,
+        request: &SessionEndRequest,
+    ) -> Vec<codex_protocol::protocol::HookRunSummary> {
+        self.engine.preview_session_end(request)
     }
 
     pub async fn run_session_end(&self, request: SessionEndRequest) -> SessionEndOutcome {

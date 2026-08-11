@@ -424,7 +424,7 @@ pub(crate) async fn run_session_end_hooks(sess: &Arc<Session>) {
         permission_mode: hook_permission_mode_for_approval(approval_policy),
         reason: SessionEndReason::Other,
     };
-    let preview_runs = hooks.preview_session_end();
+    let preview_runs = hooks.preview_session_end(&request);
     if preview_runs.is_empty() {
         return;
     }

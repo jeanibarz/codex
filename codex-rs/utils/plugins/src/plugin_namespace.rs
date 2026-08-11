@@ -8,6 +8,7 @@ use codex_exec_server_protocol::DISCOVERABLE_PLUGIN_MANIFEST_PATHS;
 use codex_utils_path_uri::PathUri;
 use std::path::Path;
 use std::path::PathBuf;
+use codex_utils_absolute_path::AbsolutePathBuf;
 
 pub const AGENT_PLUGIN_MANIFEST_RELATIVE_PATH: &str = "plugin.json";
 /// Published Agent Plugins v1 manifest schema:

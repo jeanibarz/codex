@@ -47,7 +47,7 @@ pub(crate) fn preview(
     request: &PostToolUseFailureRequest,
 ) -> Vec<HookRunSummary> {
     dispatcher::select_handlers(
-        &engine.handlers,
+        handlers,
         HookEventName::PostToolUseFailure,
         Some(request.tool_name.as_str()),
     )
