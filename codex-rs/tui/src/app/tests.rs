@@ -4,6 +4,8 @@
 mod advanced_reasoning_tests;
 #[path = "tests/key_chords.rs"]
 mod key_chords;
+#[path = "tests/mcp_startup.rs"]
+mod mcp_startup;
 mod model_catalog;
 mod plugin_catalog;
 mod rate_limits;
@@ -74,6 +76,7 @@ use codex_app_server_protocol::RequestId as AppServerRequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::Thread;
+use codex_app_server_protocol::ThreadArchivedNotification;
 use codex_app_server_protocol::ThreadClosedNotification;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadSettings;
@@ -91,6 +94,7 @@ use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
 use codex_app_server_protocol::UserInput as AppServerUserInput;
 use codex_app_server_protocol::WarningNotification;
+use codex_history::RolloutItem;
 use codex_models_manager::test_support::construct_model_info_offline_for_tests;
 use codex_models_manager::test_support::get_model_offline_for_tests;
 use codex_otel::SessionTelemetry;
@@ -106,10 +110,10 @@ use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::FileSystemPermissions;
 use codex_protocol::models::NetworkPermissions;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::openai_models::MODEL_SPECIALTY_CYBER;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::MAX_THREAD_GOAL_OBJECTIVE_CHARS;
 use codex_protocol::protocol::MultiAgentVersion;
-use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionSource as RolloutSessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -221,6 +225,7 @@ async fn handle_mcp_inventory_result_respects_origin_thread() {
     app.handle_mcp_inventory_result(
         Ok(vec![McpServerStatus {
             name: "docs".to_string(),
+            plugin_id: None,
             server_info: None,
             tools: HashMap::new(),
             resources: Vec::new(),
@@ -260,6 +265,30 @@ fn bypass_hook_trust_startup_warning_snapshot() {
 
     assert_app_snapshot!("bypass_hook_trust_startup_warning", rendered);
 }
+
+#[tokio::test]
+async fn cyber_model_auto_review_notice_snapshot() -> Result<()> {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    let mut app_server =
+        crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref()).await?;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+
+    app.handle_event(
+        &mut tui,
+        &mut app_server,
+        AppEvent::CyberModelAutoReviewNotice,
+    )
+    .await?;
+
+    let cell = match app_event_rx.try_recv() {
+        Ok(AppEvent::InsertHistoryCell(cell)) => cell,
+        other => panic!("expected InsertHistoryCell event, got {other:?}"),
+    };
+    let rendered = lines_to_single_string(&cell.display_lines(/*width*/ 80));
+    assert_app_snapshot!("cyber_model_auto_review_notice", rendered);
+    Ok(())
+}
+
 #[tokio::test]
 async fn enqueue_primary_thread_session_replays_buffered_approval_after_attach() -> Result<()> {
     let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
@@ -1409,6 +1438,43 @@ async fn collab_receiver_notification_does_not_cache_not_found_thread() {
     )));
 
     assert_eq!(app.agent_navigation.get(&receiver_thread_id), None);
+}
+
+#[tokio::test]
+async fn archived_untracked_threads_do_not_appear_in_agent_picker() -> Result<()> {
+    let mut app = Box::pin(make_test_app()).await;
+    let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(
+        app.chat_widget.config_ref(),
+    ))
+    .await?;
+    let primary_thread_id = ThreadId::new();
+    app.enqueue_primary_thread_session(
+        test_thread_session(primary_thread_id, test_path_buf("/tmp/project")),
+        Vec::new(),
+    )
+    .await?;
+
+    let archived_thread_id = ThreadId::new();
+    app.handle_app_server_event(
+        &app_server,
+        codex_app_server_client::AppServerEvent::ServerNotification(Box::new(
+            ServerNotification::ThreadArchived(ThreadArchivedNotification {
+                thread_id: archived_thread_id.to_string(),
+            }),
+        )),
+    )
+    .await;
+
+    assert!(!app.thread_event_channels.contains_key(&archived_thread_id));
+
+    Box::pin(app.open_agent_picker(&mut app_server)).await;
+
+    assert_eq!(
+        app.agent_navigation.ordered_thread_ids(),
+        vec![primary_thread_id]
+    );
+    assert_eq!(app.active_thread_id, Some(primary_thread_id));
+    Ok(())
 }
 
 #[tokio::test]
@@ -4740,6 +4806,7 @@ async fn make_test_app() -> App {
         has_emitted_history_lines: false,
         transcript_reflow: TranscriptReflowState::default(),
         initial_history_replay_buffer: None,
+        scrollback_has_older_history: false,
         enhanced_keys_supported: false,
         keymap: crate::keymap::RuntimeKeymap::defaults(),
         key_chord_matcher: crate::keymap::KeyChordMatcher::default(),
@@ -4809,6 +4876,7 @@ async fn make_test_app_with_channels() -> (
             has_emitted_history_lines: false,
             transcript_reflow: TranscriptReflowState::default(),
             initial_history_replay_buffer: None,
+            scrollback_has_older_history: false,
             enhanced_keys_supported: false,
             keymap: crate::keymap::RuntimeKeymap::defaults(),
             key_chord_matcher: crate::keymap::KeyChordMatcher::default(),
@@ -5122,7 +5190,8 @@ async fn capped_resize_reflow_renders_recent_suffix_only() {
             .map(rendered_line_text)
             .collect::<Vec<_>>(),
         vec![
-            "cell 17".to_string(),
+            "Earlier messages are available — press ctrl + t to view the full transcript"
+                .to_string(),
             String::new(),
             "cell 18".to_string(),
             String::new(),
@@ -6522,8 +6591,38 @@ async fn prompt_edit_forks_before_selected_prompt_and_preserves_source() -> Resu
             crate::app_server_session::ResumeModelSettings::OverrideFromCurrentConfig,
         )
         .await?;
+    let selected_turn = started.turns[1].clone();
     app.enqueue_primary_thread_session(started.session, started.turns)
         .await?;
+    {
+        let mut store = app
+            .thread_event_channels
+            .get(&source_thread_id)
+            .expect("source thread event channel")
+            .store
+            .lock()
+            .await;
+        store.turns.pop();
+        store.push_notification(turn_started_notification(
+            source_thread_id,
+            &selected_turn.id,
+        ));
+        for item in selected_turn.items {
+            store.push_notification(ServerNotification::ItemCompleted(
+                codex_app_server_protocol::ItemCompletedNotification {
+                    thread_id: source_thread_id.to_string(),
+                    turn_id: selected_turn.id.clone(),
+                    completed_at_ms: 0,
+                    item,
+                },
+            ));
+        }
+        store.push_notification(turn_completed_notification(
+            source_thread_id,
+            &selected_turn.id,
+            TurnStatus::Interrupted,
+        ));
+    }
     while app_event_rx.try_recv().is_ok() {}
     let source_before = std::fs::read_to_string(&source_path)?;
     let mut tui = crate::tui::test_support::make_test_tui()?;
@@ -7198,6 +7297,291 @@ async fn override_turn_context_sends_thread_settings_update() {
                 .expect("active profile")
                 .id,
             codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn selecting_cyber_model_defaults_active_thread_to_auto_review() {
+    Box::pin(async {
+        let mut app = make_test_app().await;
+        app.config
+            .permissions
+            .approval_policy
+            .set(AskForApproval::UnlessTrusted.to_core())
+            .expect("set approval policy");
+        app.chat_widget
+            .set_approval_policy(AskForApproval::UnlessTrusted);
+        let mut model = app
+            .model_catalog
+            .try_list_models()
+            .expect("model catalog")
+            .into_iter()
+            .find(|model| model.model == "gpt-5.4")
+            .expect("gpt-5.4 model");
+        model.model_specialty = Some(MODEL_SPECIALTY_CYBER.to_string());
+        app.model_catalog = Arc::new(ModelCatalog::new(vec![model]));
+
+        let mut app_server =
+            crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+                .await
+                .expect("embedded app server");
+        let started = app_server
+            .start_thread(app.chat_widget.config_ref())
+            .await
+            .expect("thread/start should succeed");
+        assert_eq!(
+            started.session.approval_policy,
+            AskForApproval::UnlessTrusted
+        );
+        assert_eq!(started.session.approvals_reviewer, ApprovalsReviewer::User);
+        let thread_id = started.session.thread_id;
+        app.enqueue_primary_thread_session(started.session, started.turns)
+            .await
+            .expect("primary thread should be registered");
+
+        let mut tui = crate::tui::test_support::make_test_tui().expect("test tui");
+        app.handle_event(
+            &mut tui,
+            &mut app_server,
+            AppEvent::UpdateModel("gpt-5.4".to_string()),
+        )
+        .await
+        .expect("model selection should succeed");
+
+        let notification = next_thread_settings_updated(&mut app_server, thread_id).await;
+        assert_eq!(
+            notification.thread_settings.approval_policy,
+            AskForApproval::OnRequest
+        );
+        assert_eq!(
+            notification.thread_settings.approvals_reviewer.to_core(),
+            ApprovalsReviewer::AutoReview
+        );
+        assert_eq!(
+            notification
+                .thread_settings
+                .active_permission_profile
+                .expect("active permission profile")
+                .id,
+            codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn changing_cyber_model_reasoning_preserves_selected_permissions() {
+    Box::pin(async {
+        let mut app = make_test_app().await;
+        let model_name = app.chat_widget.current_model().to_string();
+        let mut model = app
+            .model_catalog
+            .try_list_models()
+            .expect("model catalog")
+            .into_iter()
+            .find(|model| model.model == model_name)
+            .expect("current model");
+        model.model_specialty = Some(MODEL_SPECIALTY_CYBER.to_string());
+        app.model_catalog = Arc::new(ModelCatalog::new(vec![model]));
+
+        assert!(
+            app.apply_permission_profile_selection(PermissionProfileSelection {
+                profile_id: codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_READ_ONLY
+                    .to_string(),
+                approval_policy: Some(AskForApproval::OnRequest),
+                approvals_reviewer: Some(ApprovalsReviewer::User),
+                display_label: "Read Only".to_string(),
+            })
+            .await
+        );
+
+        let mut app_server =
+            crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+                .await
+                .expect("embedded app server");
+        let started = app_server
+            .start_thread(app.chat_widget.config_ref())
+            .await
+            .expect("thread/start should succeed");
+        let thread_id = started.session.thread_id;
+        app.enqueue_primary_thread_session(started.session, started.turns)
+            .await
+            .expect("primary thread should be registered");
+
+        let mut tui = crate::tui::test_support::make_test_tui().expect("test tui");
+        for effort in [ReasoningEffortConfig::High, ReasoningEffortConfig::Ultra] {
+            if effort == ReasoningEffortConfig::Ultra {
+                app.chat_widget
+                    .set_feature_enabled(Feature::CollaborationModes, /*enabled*/ true);
+                app.chat_widget
+                    .set_collaboration_mask(CollaborationModeMask {
+                        name: "Plan".to_string(),
+                        mode: Some(ModeKind::Plan),
+                        model: Some(model_name.clone()),
+                        reasoning_effort: Some(Some(effort.clone())),
+                        developer_instructions: None,
+                    });
+                app.handle_event(
+                    &mut tui,
+                    &mut app_server,
+                    AppEvent::ApplyAdvancedReasoning {
+                        model: model_name.clone(),
+                        effort: effort.clone(),
+                    },
+                )
+                .await
+                .expect("advanced reasoning selection should succeed");
+            } else {
+                app.handle_event(
+                    &mut tui,
+                    &mut app_server,
+                    AppEvent::UpdateModel(model_name.clone()),
+                )
+                .await
+                .expect("same-model selection should succeed");
+                app.handle_event(
+                    &mut tui,
+                    &mut app_server,
+                    AppEvent::UpdateReasoningEffort(Some(effort.clone())),
+                )
+                .await
+                .expect("reasoning selection should succeed");
+            }
+
+            let settings = next_thread_settings_updated(&mut app_server, thread_id)
+                .await
+                .thread_settings;
+            assert_eq!(settings.effort, Some(effort));
+            assert_eq!(settings.approval_policy, AskForApproval::OnRequest);
+            assert_eq!(
+                settings.approvals_reviewer.to_core(),
+                ApprovalsReviewer::User
+            );
+            assert_eq!(
+                settings
+                    .active_permission_profile
+                    .expect("active permission profile")
+                    .id,
+                codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_READ_ONLY
+            );
+            assert_eq!(
+                settings.collaboration_mode.mode,
+                app.chat_widget.effective_collaboration_mode().mode
+            );
+            assert_eq!(settings.collaboration_mode.settings.model, model_name);
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn selecting_cyber_model_falls_back_to_user_when_auto_review_is_unavailable() {
+    let mut app = make_test_app().await;
+    let mut model = app
+        .model_catalog
+        .try_list_models()
+        .expect("model catalog")
+        .into_iter()
+        .find(|model| model.model == "gpt-5.4")
+        .expect("gpt-5.4 model");
+    model.model_specialty = Some(MODEL_SPECIALTY_CYBER.to_string());
+    app.model_catalog = Arc::new(ModelCatalog::new(vec![model]));
+    let _ = app.config.features.disable(Feature::GuardianApproval);
+    app.chat_widget
+        .set_feature_enabled(Feature::GuardianApproval, /*enabled*/ false);
+    app.active_thread_id = Some(ThreadId::new());
+
+    let params = app
+        .active_thread_model_setting_update_params("gpt-5.4".to_string())
+        .expect("active thread should produce update params");
+
+    assert_eq!(
+        params.approval_policy,
+        Some(codex_app_server_protocol::AskForApproval::OnRequest)
+    );
+    assert_eq!(
+        params.approvals_reviewer,
+        Some(codex_app_server_protocol::ApprovalsReviewer::User)
+    );
+}
+
+#[tokio::test]
+async fn selecting_cyber_model_respects_auto_review_requirements() {
+    Box::pin(async {
+        let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let requirements_toml = codex_config::ConfigRequirementsToml {
+            allowed_approval_policies: Some(vec![AskForApproval::UnlessTrusted.to_core()]),
+            ..Default::default()
+        };
+        let mut requirements_with_sources = codex_config::ConfigRequirementsWithSources::default();
+        requirements_with_sources.merge_unset_fields(
+            codex_config::RequirementSource::Unknown,
+            requirements_toml.clone(),
+        );
+        let requirements = codex_config::ConfigRequirements::try_from(requirements_with_sources)
+            .expect("reviewer requirements");
+        app.config.config_layer_stack =
+            codex_config::ConfigLayerStack::new(Vec::new(), requirements, requirements_toml)
+                .expect("auto-review requirements stack");
+        app.config
+            .permissions
+            .approval_policy
+            .set(AskForApproval::UnlessTrusted.to_core())
+            .expect("set approval policy");
+        app.chat_widget
+            .set_approval_policy(AskForApproval::UnlessTrusted);
+        app.chat_widget.sync_plugin_mentions_config(&app.config);
+
+        let mut model = app
+            .model_catalog
+            .try_list_models()
+            .expect("model catalog")
+            .into_iter()
+            .find(|model| model.model == "gpt-5.4")
+            .expect("gpt-5.4 model");
+        model.model_specialty = Some(MODEL_SPECIALTY_CYBER.to_string());
+        app.model_catalog = Arc::new(ModelCatalog::new(vec![model]));
+
+        let mut app_server =
+            crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+                .await
+                .expect("embedded app server");
+        let started = app_server
+            .start_thread(app.chat_widget.config_ref())
+            .await
+            .expect("thread/start should succeed");
+        assert_eq!(
+            started.session.approval_policy,
+            AskForApproval::UnlessTrusted
+        );
+        let thread_id = started.session.thread_id;
+        app.enqueue_primary_thread_session(started.session, started.turns)
+            .await
+            .expect("primary thread should be registered");
+
+        let mut tui = crate::tui::test_support::make_test_tui().expect("test tui");
+        app.handle_event(
+            &mut tui,
+            &mut app_server,
+            AppEvent::UpdateModel("gpt-5.4".to_string()),
+        )
+        .await
+        .expect("model selection should succeed");
+
+        let notification = next_thread_settings_updated(&mut app_server, thread_id).await;
+        assert_eq!(
+            notification.thread_settings.approval_policy,
+            AskForApproval::UnlessTrusted
+        );
+        assert_eq!(
+            notification.thread_settings.approvals_reviewer.to_core(),
+            ApprovalsReviewer::User
+        );
+        assert!(
+            std::iter::from_fn(|| app_event_rx.try_recv().ok())
+                .all(|event| !matches!(event, AppEvent::CyberModelAutoReviewNotice))
         );
     })
     .await;

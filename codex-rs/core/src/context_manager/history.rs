@@ -1,4 +1,5 @@
 use crate::context::ContextualUserFragment;
+use crate::context::ModelSwitchInstructions;
 use crate::context::world_state::WorldState;
 use crate::context::world_state::WorldStateSnapshot;
 use crate::context_manager::normalize;
@@ -167,6 +168,7 @@ impl ContextManager {
         let personality = turn_context.personality.or(turn_context.config.personality);
         let base_instructions = BaseInstructions {
             text: model_info.get_model_instructions(personality),
+            provenance: None,
         };
         self.estimate_token_count_with_base_instructions(&base_instructions)
     }
@@ -245,7 +247,30 @@ impl ContextManager {
         cut_idx =
             self.trim_pre_turn_context_updates(&snapshot, first_instruction_turn_idx, cut_idx);
 
-        self.replace(snapshot[..cut_idx].to_vec());
+        let mut retained_items = snapshot[..cut_idx].to_vec();
+        if cut_idx == first_instruction_turn_idx
+            && let Some(first_turn_id) = snapshot[first_instruction_turn_idx].turn_id()
+        {
+            retained_items.retain_mut(|item| {
+                if item.turn_id() == Some(first_turn_id)
+                    && let ResponseItem::Message { role, content, .. } = item
+                    && role == "developer"
+                {
+                    content.retain(|content| {
+                        !matches!(
+                            content,
+                            ContentItem::InputText { text }
+                                if ModelSwitchInstructions::matches_text(text)
+                        )
+                    });
+                    !content.is_empty()
+                } else {
+                    true
+                }
+            });
+        }
+
+        self.replace(retained_items);
     }
 
     pub(crate) fn update_token_info(

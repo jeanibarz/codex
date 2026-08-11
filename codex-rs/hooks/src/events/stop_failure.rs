@@ -14,9 +14,9 @@ use codex_protocol::protocol::HookRunStatus;
 use codex_protocol::protocol::HookRunSummary;
 
 use super::common;
-use crate::engine::CommandShell;
+use crate::engine::ClaudeHooksEngine;
 use crate::engine::ConfiguredHandler;
-use crate::engine::command_runner::CommandRunResult;
+use crate::engine::HandlerRunResult;
 use crate::engine::dispatcher;
 use crate::schema::NullableString;
 use crate::schema::StopFailureCommandInput;
@@ -49,11 +49,10 @@ pub(crate) fn preview(
 }
 
 pub(crate) async fn run(
-    handlers: &[ConfiguredHandler],
-    shell: &CommandShell,
+    engine: &ClaudeHooksEngine,
     request: StopFailureRequest,
 ) -> StopFailureOutcome {
-    let matched = dispatcher::select_handlers(handlers, HookEventName::StopFailure, None);
+    let matched = dispatcher::select_handlers(&engine.handlers, HookEventName::StopFailure, None);
     if matched.is_empty() {
         return StopFailureOutcome {
             hook_events: Vec::new(),
@@ -84,7 +83,7 @@ pub(crate) async fn run(
     };
 
     let results = dispatcher::execute_handlers(
-        shell,
+        engine,
         matched,
         input_json,
         request.cwd.as_path(),
@@ -100,7 +99,7 @@ pub(crate) async fn run(
 
 fn parse_completed(
     handler: &ConfiguredHandler,
-    run_result: CommandRunResult,
+    run_result: HandlerRunResult,
     turn_id: Option<String>,
 ) -> dispatcher::ParsedHandler<()> {
     let mut entries = Vec::new();

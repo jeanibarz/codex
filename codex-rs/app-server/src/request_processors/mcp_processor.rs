@@ -1,5 +1,6 @@
 use super::*;
 use codex_core::McpManager;
+use codex_mcp::McpServerSource;
 
 const MCP_TOOL_THREAD_ID_META_KEY: &str = "threadId";
 
@@ -149,6 +150,11 @@ impl McpRequestProcessor {
                 "No MCP server named '{name}' found."
             )));
         };
+        let redirect_mode = if server.is_agent_plugin() {
+            StreamableHttpRedirectMode::AgentPluginV1
+        } else {
+            StreamableHttpRedirectMode::Legacy
+        };
         let server = server.config();
 
         let (url, http_headers, env_http_headers) = match &server.transport {
@@ -176,6 +182,7 @@ impl McpRequestProcessor {
                 &server.transport,
                 Arc::clone(&http_client),
                 codex_rmcp_client::OAuthDiscoveryTimeout::Requested,
+                redirect_mode,
             )
             .await
         } else {
@@ -199,6 +206,7 @@ impl McpRequestProcessor {
             mcp_config.mcp_oauth_callback_port,
             mcp_config.mcp_oauth_callback_url.as_deref(),
             http_client,
+            redirect_mode,
         )
         .await
         .map_err(|err| internal_error(format!("failed to login to MCP server '{name}': {err}")))?;
@@ -367,6 +375,17 @@ impl McpRequestProcessor {
             .iter()
             .map(|name| McpServerStatus {
                 name: name.clone(),
+                plugin_id: mcp_config.mcp_server_catalog.server(name).and_then(
+                    |server| match server.source() {
+                        McpServerSource::Plugin(plugin)
+                        | McpServerSource::SelectedPlugin(plugin) => {
+                            Some(plugin.plugin_id().to_owned())
+                        }
+                        McpServerSource::Config
+                        | McpServerSource::Compatibility { .. }
+                        | McpServerSource::Extension { .. } => None,
+                    },
+                ),
                 server_info: server_infos.get(name).cloned(),
                 tools: tools_by_server.get(name).cloned().unwrap_or_default(),
                 resources: resources.get(name).cloned().unwrap_or_default(),

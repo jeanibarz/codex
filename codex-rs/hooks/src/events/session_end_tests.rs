@@ -14,7 +14,7 @@ use super::SessionEndRequest;
 use super::parse_completed;
 use super::preview;
 use crate::engine::ConfiguredHandler;
-use crate::engine::command_runner::CommandRunResult;
+use crate::engine::HandlerRunResult;
 
 #[test]
 fn session_end_matches_other_reason() {
@@ -61,7 +61,7 @@ fn request() -> SessionEndRequest {
 fn session_end_ignores_successful_output() {
     let completed = parse_completed(
         &handler(/*matcher*/ None),
-        CommandRunResult {
+        HandlerRunResult {
             started_at: 1,
             completed_at: 2,
             duration_ms: 1,
@@ -81,13 +81,16 @@ fn handler(matcher: Option<&str>) -> ConfiguredHandler {
     ConfiguredHandler {
         event_name: HookEventName::SessionEnd,
         matcher: matcher.map(str::to_string),
-        command: "echo hook".to_string(),
         timeout_sec: 2,
         status_message: None,
         additional_context_limit: Default::default(),
         source_path: test_path_buf("/tmp/hooks.json").abs(),
         source: HookSource::User,
         display_order: 0,
-        env: HashMap::new(),
+        kind: crate::engine::ConfiguredHandlerKind::Command {
+            command: "echo hook".to_string(),
+            r#async: false,
+            env: HashMap::new(),
+        },
     }
 }

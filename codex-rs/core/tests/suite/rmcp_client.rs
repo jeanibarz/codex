@@ -36,6 +36,7 @@ use codex_mcp::SandboxState;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_utils_path_uri::LegacyAppPathString;
 
+use codex_history::RolloutItem;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::PermissionProfile;
@@ -50,10 +51,10 @@ use codex_protocol::openai_models::TruncationPolicyConfig;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::McpInvocation;
+use codex_protocol::protocol::McpStartupFailureReason;
 use codex_protocol::protocol::McpStartupStatus;
 use codex_protocol::protocol::McpToolCallBeginEvent;
 use codex_protocol::protocol::Op;
-use codex_protocol::protocol::RolloutItem;
 use codex_protocol::user_input::UserInput;
 use codex_utils_cargo_bin::cargo_bin;
 use codex_utils_path_uri::PathUri;
@@ -426,58 +427,6 @@ async fn openai_form_capability_is_not_advertised_by_default() -> anyhow::Result
     assert_openai_form_capability_advertisement(/*expected*/ false).await
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn openai_form_capability_updates_for_loaded_thread() -> anyhow::Result<()> {
-    skip_if_wine_exec!(
-        Ok(()),
-        "requires a Windows test_stdio_server in the Wine-exec environment"
-    );
-
-    let server = start_mock_server().await;
-    let server_name = "capabilities";
-    let command = stdio_server_bin()?;
-    let fixture = test_codex()
-        .with_config(move |config| {
-            insert_mcp_server(
-                config,
-                server_name,
-                stdio_transport(command, /*env*/ None, Vec::new()),
-                TestMcpServerOptions::default(),
-            );
-        })
-        .build(&server)
-        .await?;
-    wait_for_mcp_server(&fixture.codex, server_name).await?;
-
-    let unsupported = call_structured_tool(
-        &server,
-        &fixture,
-        server_name,
-        "client_capabilities",
-        "call-client-capabilities-unsupported",
-    )
-    .await?;
-    assert_eq!(
-        unsupported,
-        json!({ "supportsOpenaiFormElicitation": false })
-    );
-
-    fixture
-        .codex
-        .set_openai_form_elicitation_support(/*supported*/ true)
-        .await?;
-    let supported = call_structured_tool(
-        &server,
-        &fixture,
-        server_name,
-        "client_capabilities",
-        "call-client-capabilities-supported",
-    )
-    .await?;
-    assert_eq!(supported, json!({ "supportsOpenaiFormElicitation": true }));
-    Ok(())
-}
-
 async fn assert_openai_form_capability_advertisement(expected: bool) -> anyhow::Result<()> {
     skip_if_wine_exec!(
         Ok(()),
@@ -545,7 +494,7 @@ fn assert_cwd_tool_output(structured: &Value, expected_cwd: &Path) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mcp_namespace_instructions_are_bounded_without_hiding_tools() -> anyhow::Result<()> {
+async fn mcp_namespace_instructions_are_preserved_without_hiding_tools() -> anyhow::Result<()> {
     skip_if_wine_exec!(
         Ok(()),
         "requires a Windows test_stdio_server in the Wine-exec environment"
@@ -553,8 +502,8 @@ async fn mcp_namespace_instructions_are_bounded_without_hiding_tools() -> anyhow
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
-    let expected_description = "é".repeat(499);
-    let instructions = format!("{expected_description}🦀keep the valid MCP server");
+    let expected_description = format!("{}🦀keep the valid MCP server", "é".repeat(499));
+    let instructions = expected_description.clone();
     let response = mount_sse_once(
         &server,
         responses::sse(vec![
@@ -614,7 +563,7 @@ async fn mcp_namespace_instructions_are_bounded_without_hiding_tools() -> anyhow
     );
     assert!(
         responses::namespace_child_tool(&body, "mcp__bounded", "echo").is_some(),
-        "bounding the namespace must not hide a valid MCP tool"
+        "preserving the namespace must not hide a valid MCP tool"
     );
     Ok(())
 }
@@ -672,8 +621,8 @@ async fn stdio_server_round_trip() -> anyhow::Result<()> {
     .await;
 
     let expected_env_value = "propagated-env";
-    let expected_description = "é".repeat(499);
-    let instructions = format!("{expected_description}🦀keep the complete MCP metadata");
+    let expected_description = format!("{}🦀keep the complete MCP metadata", "é".repeat(11_000));
+    let instructions = expected_description.clone();
     let rmcp_test_server_bin = remote_aware_stdio_server_bin()?;
 
     let fixture = test_codex()
@@ -765,11 +714,11 @@ async fn stdio_server_round_trip() -> anyhow::Result<()> {
         .and_then(|tool| tool.get("description").and_then(Value::as_str))
         .expect("the model should receive a tool search description");
     assert!(
-        search_description.len() < 5 * 1024,
+        search_description.len() < 513 * 1024,
         "the complete tool search description must remain bounded"
     );
     assert!(search_description.contains(&format!("- rmcp: {expected_description}")));
-    assert!(!search_description.contains("🦀keep the complete MCP metadata"));
+    assert!(search_description.contains("🦀keep the complete MCP metadata"));
 
     let search_output = call_mock
         .single_request()
@@ -2262,6 +2211,7 @@ async fn stdio_image_responses_are_sanitized_for_text_only_model() -> anyhow::Re
                 model_messages: None,
                 include_skills_usage_instructions: false,
                 include_plugin_usage_instructions: false,
+                include_apps_usage_instructions: false,
                 supports_reasoning_summary_parameter: true,
                 default_reasoning_summary: ReasoningSummary::Auto,
                 support_verbosity: false,
@@ -2283,6 +2233,7 @@ async fn stdio_image_responses_are_sanitized_for_text_only_model() -> anyhow::Re
                 supports_search_tool: false,
                 use_responses_lite: false,
                 auto_review_model_override: None,
+                model_specialty: None,
                 tool_mode: None,
                 multi_agent_version: None,
             }],
@@ -3125,9 +3076,29 @@ async fn streamable_http_with_oauth_round_trip_impl() -> anyhow::Result<()> {
 
     let call_id = "call-789";
     let server_name = "rmcp_http_oauth";
+    let discovered_server_name = "rmcp_http_oauth_discovered";
     let namespace = format!("mcp__{server_name}");
 
     mount_sse_once(
+        &server,
+        responses::sse(vec![
+            responses::ev_assistant_message("msg-contended", "OAuth sign-in is still pending."),
+            responses::ev_completed("resp-contended"),
+        ]),
+    )
+    .await;
+    mount_sse_once(
+        &server,
+        responses::sse(vec![
+            responses::ev_assistant_message(
+                "msg-discovered",
+                "A newly discovered OAuth server is still starting.",
+            ),
+            responses::ev_completed("resp-discovered"),
+        ]),
+    )
+    .await;
+    let response_mock = mount_sse_once(
         &server,
         responses::sse(vec![
             responses::ev_response_created("resp-1"),
@@ -3170,6 +3141,11 @@ async fn streamable_http_with_oauth_round_trip_impl() -> anyhow::Result<()> {
     // server so the test does not share credentials with other suite cases.
     let temp_home = Arc::new(tempdir()?);
     let _codex_home_guard = EnvVarGuard::set("CODEX_HOME", temp_home.path().as_os_str());
+    let unset_authorization_env_var = format!(
+        "CODEX_TEST_UNSET_MCP_OAUTH_AUTHORIZATION_{}",
+        std::process::id()
+    );
+    assert!(std::env::var_os(&unset_authorization_env_var).is_none());
     let environment_id = remote_aware_environment_id();
     let credential_config: McpServerConfig = serde_json::from_value(json!({
         "url": &server_url,
@@ -3180,19 +3156,28 @@ async fn streamable_http_with_oauth_round_trip_impl() -> anyhow::Result<()> {
         credential_name.as_ref(),
         &server_url,
         client_id,
+        "expired-access-token",
+        refresh_token,
+        OAuthCredentialExpiry::Expired,
+    )?;
+    let discovered_credential_name =
+        credential_config.oauth_credential_name(discovered_server_name);
+    write_fallback_oauth_tokens(
+        discovered_credential_name.as_ref(),
+        &server_url,
+        client_id,
         expected_token,
         refresh_token,
+        OAuthCredentialExpiry::Valid,
     )?;
 
     // Phase 4: configure Codex with the OAuth-backed Streamable HTTP MCP
     // server and build the fixture in the active local or remote-aware mode.
     let fixture = test_codex()
+        .with_model_info_override("gpt-5.4", |model| model.supports_search_tool = false)
         .with_home(temp_home.clone())
         .with_config(move |config| {
-            // Keep OAuth credentials isolated to this test home because Bazel
-            // runs the full core suite in one process.
-            config.mcp_oauth_credentials_store_mode = serde_json::from_value(json!("file"))
-                .expect("`file` should deserialize as OAuthCredentialsStoreMode");
+            config.mcp_oauth_credentials_store_mode = OAuthCredentialsStoreMode::Auto;
             insert_mcp_server(
                 config,
                 server_name,
@@ -3200,7 +3185,10 @@ async fn streamable_http_with_oauth_round_trip_impl() -> anyhow::Result<()> {
                     url: server_url,
                     bearer_token_env_var: None,
                     http_headers: None,
-                    env_http_headers: None,
+                    env_http_headers: Some(HashMap::from([(
+                        "Authorization".to_string(),
+                        unset_authorization_env_var,
+                    )])),
                 },
                 TestMcpServerOptions {
                     environment_id,
@@ -3210,9 +3198,180 @@ async fn streamable_http_with_oauth_round_trip_impl() -> anyhow::Result<()> {
         })
         .build_with_auto_env(&server)
         .await?;
-    // Phase 5: wait for MCP startup before the turn is submitted, which keeps
-    // failures tied to server startup/discovery.
-    wait_for_mcp_server(&fixture.codex, server_name).await?;
+    // Phase 5: replace rejected credentials as an external OAuth login would.
+    let mut failure_reason = None;
+    let startup = wait_for_event(&fixture.codex, |event| {
+        if let EventMsg::McpStartupUpdate(update) = event
+            && update.server == server_name
+            && let McpStartupStatus::Failed { reason, .. } = &update.status
+        {
+            failure_reason = *reason;
+        }
+        matches!(event, EventMsg::McpStartupComplete(_))
+    })
+    .await;
+    let EventMsg::McpStartupComplete(startup) = startup else {
+        unreachable!("event guard guarantees McpStartupComplete");
+    };
+    assert_eq!(startup.failed.len(), 1);
+    assert_eq!(startup.failed[0].server, server_name);
+    assert_eq!(
+        failure_reason,
+        Some(McpStartupFailureReason::ReauthenticationRequired),
+    );
+
+    let store_lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(temp_home.path().join("mcp-oauth-locks/file-store.lock"))?;
+    store_lock.try_lock()?;
+    fixture
+        .codex
+        .submit(read_only_user_turn(
+            &fixture,
+            "continue while OAuth credentials are locked",
+        ))
+        .await?;
+    let (contended_turn, refreshed_failure_reason, refreshed_failed_servers) =
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut contended_turn = None;
+            let mut refreshed_failure_reason = None;
+            let mut refreshed_failed_servers = None;
+            let mut refreshed_starting = false;
+            while contended_turn.is_none()
+                || refreshed_failure_reason.is_none()
+                || refreshed_failed_servers.is_none()
+            {
+                match fixture.codex.next_event().await?.msg {
+                    EventMsg::McpStartupUpdate(update) if update.server == server_name => {
+                        match update.status {
+                            McpStartupStatus::Starting => refreshed_starting = true,
+                            McpStartupStatus::Failed { reason, .. } => {
+                                assert!(refreshed_starting);
+                                refreshed_failure_reason = Some(reason);
+                            }
+                            McpStartupStatus::Ready | McpStartupStatus::Cancelled => {}
+                        }
+                    }
+                    EventMsg::McpStartupComplete(startup) => {
+                        refreshed_failed_servers = Some(startup.failed);
+                    }
+                    EventMsg::TurnComplete(turn) => contended_turn = Some(turn),
+                    _ => {}
+                }
+            }
+            Ok::<_, anyhow::Error>((
+                contended_turn.expect("turn completion was observed"),
+                refreshed_failure_reason.expect("failure status was observed"),
+                refreshed_failed_servers.expect("startup summary was observed"),
+            ))
+        })
+        .await
+        .context("OAuth credential-store contention blocked the user turn or startup status")??;
+    assert_eq!(
+        refreshed_failure_reason,
+        Some(McpStartupFailureReason::ReauthenticationRequired),
+    );
+    assert_eq!(
+        refreshed_failed_servers
+            .into_iter()
+            .map(|failure| failure.server)
+            .collect::<Vec<_>>(),
+        vec![server_name.to_string()],
+    );
+    assert!(
+        contended_turn.error.is_none(),
+        "the user turn failed while OAuth credentials were locked: {:?}",
+        contended_turn.error,
+    );
+    assert_eq!(
+        contended_turn.last_agent_message.as_deref(),
+        Some("OAuth sign-in is still pending."),
+    );
+
+    let mut refreshed_config = fixture.config.clone();
+    let mut refreshed_servers = refreshed_config.mcp_servers.get().clone();
+    let discovered_server = refreshed_servers
+        .get(server_name)
+        .cloned()
+        .expect("the initial OAuth server should be configured");
+    refreshed_servers.insert(discovered_server_name.to_string(), discovered_server);
+    refreshed_config
+        .mcp_servers
+        .set(refreshed_servers)
+        .expect("test MCP servers should accept the discovered OAuth server");
+    let discovered_turn = tokio::time::timeout(Duration::from_secs(5), async {
+        fixture
+            .codex
+            .refresh_runtime_config(refreshed_config.clone())
+            .await;
+        fixture
+            .codex
+            .submit(read_only_user_turn(
+                &fixture,
+                "continue while a newly discovered OAuth server is starting",
+            ))
+            .await?;
+        loop {
+            if let EventMsg::TurnComplete(turn) = fixture.codex.next_event().await?.msg {
+                return Ok::<_, anyhow::Error>(turn);
+            }
+        }
+    })
+    .await
+    .context("a newly discovered OAuth server blocked the user turn during store contention")??;
+    assert!(
+        discovered_turn.error.is_none(),
+        "the user turn failed while a newly discovered OAuth server was locked: {:?}",
+        discovered_turn.error,
+    );
+    assert_eq!(
+        discovered_turn.last_agent_message.as_deref(),
+        Some("A newly discovered OAuth server is still starting."),
+    );
+    drop(store_lock);
+
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_mcp_server(&fixture.codex, discovered_server_name),
+    )
+    .await
+    .context("the newly discovered OAuth server did not recover after its store was unlocked")??;
+
+    assert!(codex_rmcp_client::delete_oauth_tokens(
+        discovered_credential_name.as_ref(),
+        http_server.url(),
+        OAuthCredentialsStoreMode::File,
+        codex_config::types::AuthKeyringBackendKind::default(),
+    )?);
+    fixture.codex.refresh_runtime_config(refreshed_config).await;
+    let logged_out_startup = tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_for_event(&fixture.codex, |event| {
+            matches!(event, EventMsg::McpStartupComplete(_))
+        }),
+    )
+    .await
+    .context("MCP startup did not finish after the discovered OAuth server was logged out")?;
+    let EventMsg::McpStartupComplete(logged_out_startup) = logged_out_startup else {
+        unreachable!("event guard guarantees McpStartupComplete");
+    };
+    assert!(
+        logged_out_startup
+            .failed
+            .iter()
+            .any(|failure| failure.server == discovered_server_name),
+        "the logged-out MCP server reused its authenticated connection: {logged_out_startup:?}",
+    );
+
+    write_fallback_oauth_tokens(
+        credential_name.as_ref(),
+        http_server.url(),
+        client_id,
+        expected_token,
+        refresh_token,
+        OAuthCredentialExpiry::Valid,
+    )?;
 
     // Phase 6: submit the user turn that should invoke the OAuth-backed tool.
     fixture
@@ -3225,12 +3384,18 @@ async fn streamable_http_with_oauth_round_trip_impl() -> anyhow::Result<()> {
 
     // Phase 7: assert Codex begins the expected tool invocation.
     let begin_event = wait_for_event(&fixture.codex, |ev| {
-        matches!(ev, EventMsg::McpToolCallBegin(_))
+        matches!(
+            ev,
+            EventMsg::McpToolCallBegin(_)
+                | EventMsg::Error(_)
+                | EventMsg::TurnAborted(_)
+                | EventMsg::TurnComplete(_)
+        )
     })
     .await;
 
     let EventMsg::McpToolCallBegin(begin) = begin_event else {
-        unreachable!("event guard guarantees McpToolCallBegin");
+        anyhow::bail!("OAuth MCP recovery ended before the tool was called: {begin_event:?}");
     };
     assert_eq!(begin.invocation.server, server_name);
     assert_eq!(begin.invocation.tool, "echo");
@@ -3277,6 +3442,11 @@ async fn streamable_http_with_oauth_round_trip_impl() -> anyhow::Result<()> {
     // placement-aware MCP server.
     wait_for_event(&fixture.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
+    let request = response_mock.single_request().body_json();
+    assert!(
+        responses::namespace_child_tool(&request, &namespace, "echo").is_some(),
+        "the recovered MCP tool must be advertised to the model"
+    );
     server.verify().await;
 
     http_server.shutdown().await;
@@ -3634,18 +3804,27 @@ fn streamable_http_metadata_url(server_url: &str) -> String {
     format!("{base_url}{STREAMABLE_HTTP_METADATA_PATH}")
 }
 
+enum OAuthCredentialExpiry {
+    Valid,
+    Expired,
+}
+
 fn write_fallback_oauth_tokens(
     server_name: &str,
     server_url: &str,
     client_id: &str,
     access_token: &str,
     refresh_token: &str,
+    expiry: OAuthCredentialExpiry,
 ) -> anyhow::Result<()> {
-    let expires_at = SystemTime::now()
-        .checked_add(Duration::from_secs(3600))
-        .ok_or_else(|| anyhow::anyhow!("failed to compute expiry time"))?
-        .duration_since(UNIX_EPOCH)?
-        .as_millis() as u64;
+    let expires_at = match expiry {
+        OAuthCredentialExpiry::Valid => SystemTime::now()
+            .checked_add(Duration::from_secs(3600))
+            .ok_or_else(|| anyhow::anyhow!("failed to compute expiry time"))?
+            .duration_since(UNIX_EPOCH)?
+            .as_millis() as u64,
+        OAuthCredentialExpiry::Expired => 0,
+    };
 
     let tokens = serde_json::from_value(json!({
         "server_name": server_name,

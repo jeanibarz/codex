@@ -6,12 +6,12 @@ use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 use std::time::SystemTime;
 
+use crate::InitialHistory;
+use crate::RolloutItem;
+use crate::RolloutLine;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::HistoryPosition;
-use codex_protocol::protocol::InitialHistory;
-use codex_protocol::protocol::RolloutItem;
-use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
@@ -305,6 +305,28 @@ async fn worker_compresses_old_active_and_archived_rollouts() -> anyhow::Result<
             .join("rollout-compression.lock")
             .exists()
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn worker_waits_for_rollout_maintenance_before_compressing() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+    let uuid = Uuid::from_u128(26);
+    let thread_id = ThreadId::from_string(&uuid.to_string())?;
+    let path = rollout_path(home.path(), "2025-01-03T12-00-00", uuid);
+    write_rollout(&path, thread_id, "migration in progress")?;
+    set_old_mtime(&path)?;
+    let guard = crate::try_acquire_rollout_maintenance_lock(home.path())?
+        .expect("claim rollout maintenance lock");
+
+    worker::run(home.path().to_path_buf()).await?;
+    assert!(path.exists());
+    assert!(!compressed_rollout_path(&path).exists());
+
+    drop(guard);
+    worker::run(home.path().to_path_buf()).await?;
+    assert!(!path.exists());
+    assert!(compressed_rollout_path(&path).exists());
     Ok(())
 }
 

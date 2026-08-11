@@ -16,9 +16,9 @@ use codex_protocol::protocol::HookRunSummary;
 use codex_utils_absolute_path::AbsolutePathBuf;
 
 use super::common;
-use crate::engine::CommandShell;
+use crate::engine::ClaudeHooksEngine;
 use crate::engine::ConfiguredHandler;
-use crate::engine::command_runner::CommandRunResult;
+use crate::engine::HandlerRunResult;
 use crate::engine::dispatcher;
 use crate::schema::FileChangedCommandInput;
 use crate::schema::NullableString;
@@ -60,14 +60,13 @@ pub(crate) fn preview(
 }
 
 pub(crate) async fn run(
-    handlers: &[ConfiguredHandler],
-    shell: &CommandShell,
+    engine: &ClaudeHooksEngine,
     request: FileChangedRequest,
 ) -> FileChangedOutcome {
     let file_paths = file_paths(&request.changes);
     let matcher_inputs = file_paths.iter().map(String::as_str).collect::<Vec<_>>();
     let matched = dispatcher::select_handlers_for_matcher_inputs(
-        handlers,
+        &engine.handlers,
         HookEventName::FileChanged,
         &matcher_inputs,
     );
@@ -104,7 +103,7 @@ pub(crate) async fn run(
     };
 
     let results = dispatcher::execute_handlers(
-        shell,
+        engine,
         matched,
         input_json,
         request.cwd.as_path(),
@@ -134,7 +133,7 @@ fn file_paths(changes: &HashMap<PathBuf, FileChange>) -> Vec<String> {
 
 fn parse_completed(
     handler: &ConfiguredHandler,
-    run_result: CommandRunResult,
+    run_result: HandlerRunResult,
     turn_id: Option<String>,
 ) -> dispatcher::ParsedHandler<()> {
     let mut entries = Vec::new();

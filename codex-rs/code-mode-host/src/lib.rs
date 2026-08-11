@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
+use codex_code_mode_protocol::CodeModeSessionCellExecutionLimits;
 use codex_code_mode_protocol::host::Capability;
 use codex_code_mode_protocol::host::CapabilitySet;
 use codex_code_mode_protocol::host::ClientToHost;
@@ -23,13 +24,16 @@ use codex_code_mode_protocol::host::HostToClient;
 use codex_code_mode_protocol::host::MAX_PENDING_DELEGATE_CALLS;
 use codex_code_mode_protocol::host::ProtocolVersion;
 use codex_code_mode_protocol::host::RequestId;
+use codex_code_mode_protocol::host::SESSION_RESOURCE_LIMITS_CAPABILITY;
 use codex_code_mode_protocol::host::SessionId;
 use codex_code_mode_protocol::host::SupportedProtocolVersions;
 use codex_code_mode_protocol::host::TransportLane;
 use codex_code_mode_runtime::InProcessCodeModeSession;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
+use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
+use tokio::sync::TryAcquireError;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -41,9 +45,12 @@ use self::transport::BulkConnectionRegistry;
 use self::transport::ConnectionReader;
 use self::transport::ConnectionWriter;
 
+pub use self::grpc::GrpcCodeModeHost;
 pub use self::transport::DEFAULT_LISTEN_URL;
 
 mod delegate;
+mod grpc;
+mod grpc_transport;
 mod peer;
 mod transport;
 
@@ -72,6 +79,14 @@ impl HostLimits {
             request_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT_REQUESTS)),
             active_cell_permits: Arc::new(Semaphore::new(MAX_ACTIVE_CELLS)),
         }
+    }
+
+    fn request_permit(&self) -> Result<OwnedSemaphorePermit, TryAcquireError> {
+        Arc::clone(&self.request_permits).try_acquire_owned()
+    }
+
+    fn cell_permit(&self) -> Result<OwnedSemaphorePermit, TryAcquireError> {
+        Arc::clone(&self.active_cell_permits).try_acquire_owned()
     }
 }
 
@@ -139,11 +154,10 @@ async fn run_connection(
     };
     let state = Arc::new(HostState {
         sessions: Mutex::new(HashMap::new()),
+        limits,
         seen_session_ids: Mutex::new(SeenSessionIds::default()),
         requests: Mutex::new(RequestRegistry::default()),
         request_tasks: TaskTracker::new(),
-        request_permits: Arc::clone(&limits.request_permits),
-        active_cell_permits: Arc::clone(&limits.active_cell_permits),
         closing: AtomicBool::new(false),
         peer: Arc::clone(&peer),
     });
@@ -314,11 +328,21 @@ async fn negotiate(
     } else {
         None
     };
-    let host_capabilities = if registration.is_some() {
-        CapabilitySet::try_new([dual_capability])?
-    } else {
-        CapabilitySet::empty()
-    };
+    let resource_limits_capability = Capability::new(SESSION_RESOURCE_LIMITS_CAPABILITY)?;
+    let resource_limits_requested = client_hello
+        .required_capabilities()
+        .contains(&resource_limits_capability)
+        || client_hello
+            .optional_capabilities()
+            .contains(&resource_limits_capability);
+    let host_capabilities = CapabilitySet::try_new(
+        [
+            registration.is_some().then_some(dual_capability),
+            resource_limits_requested.then_some(resource_limits_capability),
+        ]
+        .into_iter()
+        .flatten(),
+    )?;
     if let Some(capability) = client_hello
         .required_capabilities()
         .iter()
@@ -356,11 +380,10 @@ async fn negotiate(
 
 struct HostState {
     sessions: Mutex<HashMap<SessionId, Arc<InProcessCodeModeSession>>>,
+    limits: Arc<HostLimits>,
     seen_session_ids: Mutex<SeenSessionIds>,
     requests: Mutex<RequestRegistry>,
     request_tasks: TaskTracker,
-    request_permits: Arc<Semaphore>,
-    active_cell_permits: Arc<Semaphore>,
     closing: AtomicBool,
     peer: Arc<HostPeer>,
 }
@@ -376,7 +399,7 @@ impl HostState {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .start(request_id, RequestKind::from(&request))?;
-        let Ok(permit) = Arc::clone(&self.request_permits).try_acquire_owned() else {
+        let Ok(permit) = self.limits.request_permit() else {
             self.respond(
                 request_id,
                 Err("code-mode host has too many in-flight requests".to_string()),
@@ -419,10 +442,16 @@ impl HostState {
             return;
         }
         match request {
-            HostRequest::OpenSession { session_id } => {
-                let result = self
-                    .open_session(session_id.clone())
-                    .map(|()| HostResponse::SessionReady { session_id });
+            HostRequest::OpenSession {
+                session_id,
+                cell_execution_limits,
+            } => {
+                let result = CodeModeSessionCellExecutionLimits::try_from(
+                    cell_execution_limits.unwrap_or_default(),
+                )
+                .map_err(|error| format!("invalid code-mode session execution limits: {error}"))
+                .and_then(|limits| self.open_session(session_id.clone(), limits))
+                .map(|()| HostResponse::SessionReady { session_id });
                 self.respond(request_id, result);
             }
             HostRequest::Execute {
@@ -450,9 +479,7 @@ impl HostState {
                         return;
                     }
                 };
-                let Ok(active_cell_permit) =
-                    Arc::clone(&self.active_cell_permits).try_acquire_owned()
-                else {
+                let Ok(active_cell_permit) = self.limits.cell_permit() else {
                     self.respond(
                         request_id,
                         Err("code-mode host has too many active cells".to_string()),
@@ -537,7 +564,11 @@ impl HostState {
         }
     }
 
-    fn open_session(&self, session_id: SessionId) -> Result<(), String> {
+    fn open_session(
+        &self,
+        session_id: SessionId,
+        cell_execution_limits: CodeModeSessionCellExecutionLimits,
+    ) -> Result<(), String> {
         let mut sessions = self.sessions.lock().unwrap_or_else(PoisonError::into_inner);
         if sessions.contains_key(&session_id) {
             return Err(format!(
@@ -571,6 +602,7 @@ impl HostState {
                 InProcessCodeModeSession::with_delegate_and_task_failure_handler(
                     delegate,
                     task_failure_handler,
+                    cell_execution_limits,
                 ),
             ),
         );

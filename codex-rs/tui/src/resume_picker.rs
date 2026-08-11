@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::app_server_session::AppServerSession;
+use crate::app_server_session::HISTORY_ITEM_PAGE_LIMIT;
+use crate::app_server_session::HISTORY_ITEM_SCAN_LIMIT;
 use crate::clipboard_paste::normalize_pasted_search_query;
 use crate::color::blend;
 use crate::color::is_light;
@@ -36,11 +38,19 @@ use crate::wrapping::RtOptions;
 use crate::wrapping::adaptive_wrap_lines;
 use chrono::DateTime;
 use chrono::Utc;
+use codex_app_server_client::AppServerRequestHandle;
+use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::Thread;
+use codex_app_server_protocol::ThreadArchiveParams;
+use codex_app_server_protocol::ThreadArchiveResponse;
+use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadListCwdFilter;
 use codex_app_server_protocol::ThreadListParams;
 use codex_app_server_protocol::ThreadSortKey;
+use codex_app_server_protocol::ThreadUnarchiveParams;
+use codex_app_server_protocol::ThreadUnarchiveResponse;
 use codex_config::types::SessionPickerViewMode;
 use codex_protocol::ThreadId;
 use codex_utils_path as path_utils;
@@ -62,11 +72,14 @@ use ratatui::text::Span;
 use ratatui::widgets::Clear;
 use ratatui::widgets::Widget;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::warn;
 use unicode_width::UnicodeWidthStr;
+use uuid::Uuid;
 
+mod archive;
 mod page_loading;
 
 use page_loading::PageLoadMode;
@@ -119,7 +132,7 @@ pub enum SessionPickerAction {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionPickerLaunchContext {
     Startup,
-    ExistingSession,
+    ExistingSession { current_thread_id: Option<ThreadId> },
 }
 
 impl SessionPickerAction {
@@ -153,14 +166,26 @@ struct PageLoadRequest {
     search_token: Option<usize>,
     mode: PageLoadMode,
     cwd_filter: Option<PathBuf>,
+    status: SessionStatus,
     provider_filter: ProviderFilter,
     sort_key: ThreadSortKey,
 }
 
 enum PickerLoadRequest {
     Page(PageLoadRequest),
-    Preview { thread_id: ThreadId },
-    Transcript { thread_id: ThreadId },
+    Preview {
+        thread_id: ThreadId,
+    },
+    Transcript {
+        thread_id: ThreadId,
+        cancellation: oneshot::Receiver<()>,
+    },
+    Archive {
+        thread_id: ThreadId,
+    },
+    Unarchive {
+        thread_id: ThreadId,
+    },
 }
 
 #[derive(Clone)]
@@ -194,22 +219,32 @@ impl SessionFilterMode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionStatus {
+    Active,
+    Archived,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ToolbarControl {
     Filter,
+    Status,
     Sort,
 }
 
 impl ToolbarControl {
-    fn previous(self) -> Self {
+    fn previous(self, action: SessionPickerAction) -> Self {
         match self {
             Self::Filter => Self::Sort,
+            Self::Status => Self::Filter,
+            Self::Sort if matches!(action, SessionPickerAction::Resume) => Self::Status,
             Self::Sort => Self::Filter,
         }
     }
 
-    fn next(self) -> Self {
+    fn next(self, action: SessionPickerAction) -> Self {
         match self {
-            Self::Filter => Self::Sort,
+            Self::Filter if matches!(action, SessionPickerAction::Resume) => Self::Status,
+            Self::Filter | Self::Status => Self::Sort,
             Self::Sort => Self::Filter,
         }
     }
@@ -263,6 +298,14 @@ enum BackgroundEvent {
         thread_id: ThreadId,
         transcript: std::io::Result<TranscriptCells>,
     },
+    Archive {
+        thread_id: ThreadId,
+        result: std::io::Result<()>,
+    },
+    Unarchive {
+        thread_id: ThreadId,
+        result: std::io::Result<SessionTarget>,
+    },
 }
 
 #[derive(Clone)]
@@ -301,8 +344,8 @@ struct SessionPickerRunOptions {
 /// lazy transcript previews, and pagination.
 ///
 /// Sessions render as compact multi-line records with stable metadata first and
-/// the conversation preview last. Users can focus Sort/Filter toolbar controls
-/// with Tab, change the focused control with the arrow keys, and expand the
+/// the conversation preview last. Users can focus the toolbar controls with
+/// Tab, change the focused control with the arrow keys, and expand the
 /// selected session with Ctrl+E to load recent transcript context on demand.
 ///
 /// Sessions are loaded on-demand via cursor-based pagination. The backend
@@ -320,12 +363,14 @@ pub async fn run_resume_picker_with_app_server(
     include_non_interactive: bool,
     app_server: AppServerSession,
 ) -> Result<SessionSelection> {
+    let archive_request_handle = app_server.request_handle();
     run_resume_picker_with_launch_context(
         tui,
         config,
         show_all,
         include_non_interactive,
         app_server,
+        archive_request_handle,
         SessionPickerLaunchContext::Startup,
     )
     .await
@@ -337,6 +382,8 @@ pub async fn run_resume_picker_from_existing_session_with_app_server(
     show_all: bool,
     include_non_interactive: bool,
     app_server: AppServerSession,
+    archive_request_handle: AppServerRequestHandle,
+    current_thread_id: Option<ThreadId>,
 ) -> Result<SessionSelection> {
     run_resume_picker_with_launch_context(
         tui,
@@ -344,7 +391,8 @@ pub async fn run_resume_picker_from_existing_session_with_app_server(
         show_all,
         include_non_interactive,
         app_server,
-        SessionPickerLaunchContext::ExistingSession,
+        archive_request_handle,
+        SessionPickerLaunchContext::ExistingSession { current_thread_id },
     )
     .await
 }
@@ -355,6 +403,7 @@ async fn run_resume_picker_with_launch_context(
     show_all: bool,
     include_non_interactive: bool,
     app_server: AppServerSession,
+    archive_request_handle: AppServerRequestHandle,
     launch_context: SessionPickerLaunchContext,
 ) -> Result<SessionSelection> {
     let (bg_tx, bg_rx) = mpsc::unbounded_channel();
@@ -393,6 +442,7 @@ async fn run_resume_picker_with_launch_context(
         options,
         spawn_app_server_page_loader(
             app_server,
+            archive_request_handle,
             include_non_interactive,
             raw_reasoning_visibility(config),
             (!uses_remote_workspace).then(|| config.codex_home.to_path_buf()),
@@ -409,6 +459,7 @@ pub async fn run_fork_picker_with_app_server(
     show_all: bool,
     app_server: AppServerSession,
 ) -> Result<SessionSelection> {
+    let archive_request_handle = app_server.request_handle();
     let (bg_tx, bg_rx) = mpsc::unbounded_channel();
     let uses_remote_workspace = app_server.uses_remote_workspace();
     let cwd_filter = picker_cwd_filter(
@@ -445,6 +496,7 @@ pub async fn run_fork_picker_with_app_server(
         options,
         spawn_app_server_page_loader(
             app_server,
+            archive_request_handle,
             /*include_non_interactive*/ false,
             raw_reasoning_visibility(config),
             (!uses_remote_workspace).then(|| config.codex_home.to_path_buf()),
@@ -526,7 +578,9 @@ async fn run_session_picker_with_loader(
                 }
             }
             Some(event) = background_events.next() => {
-                state.handle_background_event(event).await?;
+                if let Some(selection) = state.handle_background_event(event).await? {
+                    return Ok(selection);
+                }
             }
             else => break,
         }
@@ -585,6 +639,7 @@ fn picker_cwd_filter(
 
 fn spawn_app_server_page_loader(
     app_server: AppServerSession,
+    archive_request_handle: AppServerRequestHandle,
     include_non_interactive: bool,
     raw_reasoning_visibility: RawReasoningVisibility,
     codex_home: Option<PathBuf>,
@@ -598,16 +653,16 @@ fn spawn_app_server_page_loader(
             match request {
                 PickerLoadRequest::Page(request) => {
                     let cursor = request.cursor.map(|PageCursor::AppServer(cursor)| cursor);
-                    let page = load_app_server_page(
-                        &mut app_server,
+                    let params = thread_list_params(
                         cursor,
                         request.cwd_filter.as_deref(),
+                        request.status,
                         request.provider_filter,
                         request.sort_key,
                         include_non_interactive,
                         matches!(request.mode, PageLoadMode::StateDbOnly),
-                    )
-                    .await;
+                    );
+                    let page = load_app_server_page(&mut app_server, params).await;
                     let _ = bg_tx.send(BackgroundEvent::Page {
                         request_token: request.request_token,
                         search_token: request.search_token,
@@ -620,18 +675,59 @@ fn spawn_app_server_page_loader(
                             .await;
                     let _ = bg_tx.send(BackgroundEvent::Preview { thread_id, preview });
                 }
-                PickerLoadRequest::Transcript { thread_id } => {
-                    let transcript = load_session_transcript(
-                        &mut app_server,
-                        thread_id,
-                        raw_reasoning_visibility,
-                        codex_home.as_deref(),
-                    )
-                    .await;
-                    let _ = bg_tx.send(BackgroundEvent::Transcript {
-                        thread_id,
-                        transcript,
-                    });
+                PickerLoadRequest::Transcript {
+                    thread_id,
+                    cancellation,
+                } => {
+                    tokio::select! {
+                        transcript = load_session_transcript(
+                            &mut app_server,
+                            thread_id,
+                            raw_reasoning_visibility,
+                            codex_home.as_deref(),
+                        ) => {
+                            let _ = bg_tx.send(BackgroundEvent::Transcript {
+                                thread_id,
+                                transcript,
+                            });
+                        }
+                        _ = cancellation => {}
+                    }
+                }
+                PickerLoadRequest::Archive { thread_id } => {
+                    let result = archive_request_handle
+                        .request_typed::<ThreadArchiveResponse>(ClientRequest::ThreadArchive {
+                            request_id: RequestId::String(format!(
+                                "resume-picker-archive-{}",
+                                Uuid::new_v4()
+                            )),
+                            params: ThreadArchiveParams {
+                                thread_id: thread_id.to_string(),
+                            },
+                        })
+                        .await
+                        .map(|_| ())
+                        .map_err(std::io::Error::other);
+                    let _ = bg_tx.send(BackgroundEvent::Archive { thread_id, result });
+                }
+                PickerLoadRequest::Unarchive { thread_id } => {
+                    let result = archive_request_handle
+                        .request_typed::<ThreadUnarchiveResponse>(ClientRequest::ThreadUnarchive {
+                            request_id: RequestId::String(format!(
+                                "resume-picker-unarchive-{}",
+                                Uuid::new_v4()
+                            )),
+                            params: ThreadUnarchiveParams {
+                                thread_id: thread_id.to_string(),
+                            },
+                        })
+                        .await
+                        .map(|response| SessionTarget {
+                            path: response.thread.path,
+                            thread_id,
+                        })
+                        .map_err(std::io::Error::other);
+                    let _ = bg_tx.send(BackgroundEvent::Unarchive { thread_id, result });
                 }
             }
         }
@@ -693,6 +789,7 @@ struct PickerState {
     view_width: Option<u16>,
     provider_filter: ProviderFilter,
     filter_mode: SessionFilterMode,
+    status: SessionStatus,
     filter_cwd: Option<PathBuf>,
     local_filter_cwd: Option<PathBuf>,
     toolbar_focus: ToolbarControl,
@@ -702,10 +799,12 @@ struct PickerState {
     action: SessionPickerAction,
     sort_key: ThreadSortKey,
     inline_error: Option<String>,
+    archive_state: archive::ArchiveState,
     expanded_thread_id: Option<ThreadId>,
     transcript_previews: HashMap<ThreadId, TranscriptPreviewState>,
     transcript_cells: HashMap<ThreadId, SessionTranscriptState>,
     pending_transcript_open: Option<ThreadId>,
+    pending_transcript_cancellation: Option<oneshot::Sender<()>>,
     transcript_loading_frame_shown: bool,
     overlay: Option<Overlay>,
     pager_keymap: PagerKeymap,
@@ -735,7 +834,7 @@ enum SessionTranscriptState {
 }
 
 #[derive(Clone)]
-struct TranscriptPreviewLine {
+pub(crate) struct TranscriptPreviewLine {
     speaker: TranscriptPreviewSpeaker,
     text: String,
 }
@@ -753,22 +852,10 @@ enum LoadTrigger {
 
 async fn load_app_server_page(
     app_server: &mut AppServerSession,
-    cursor: Option<String>,
-    cwd_filter: Option<&Path>,
-    provider_filter: ProviderFilter,
-    sort_key: ThreadSortKey,
-    include_non_interactive: bool,
-    use_state_db_only: bool,
+    params: ThreadListParams,
 ) -> std::io::Result<PickerPage> {
     let response = app_server
-        .thread_list(thread_list_params(
-            cursor,
-            cwd_filter,
-            provider_filter,
-            sort_key,
-            include_non_interactive,
-            use_state_db_only,
-        ))
+        .thread_list(params)
         .await
         .map_err(std::io::Error::other)?;
     let num_scanned_files = response.data.len();
@@ -785,79 +872,143 @@ async fn load_app_server_page(
     })
 }
 
-async fn load_transcript_preview(
+pub(crate) async fn load_transcript_preview(
     app_server: &mut AppServerSession,
     thread_id: ThreadId,
     codex_home: Option<&Path>,
 ) -> std::io::Result<Vec<TranscriptPreviewLine>> {
     const MAX_PREVIEW_LINES: usize = 6;
 
-    let thread = app_server
-        .thread_read(thread_id, /*include_turns*/ true)
+    let mut thread = app_server
+        .thread_read(thread_id, /*include_turns*/ false)
         .await
         .map_err(std::io::Error::other)?;
+    if thread.history_mode == ThreadHistoryMode::Legacy {
+        app_server
+            .hydrate_initial_thread_history(
+                &mut thread,
+                /*turn_cursor*/ None,
+                /*item_cursor*/ None,
+                /*config*/ None,
+                crate::app_server_session::HistoryHydrationScope::Initial,
+            )
+            .await
+            .map_err(std::io::Error::other)?;
+    }
     let cwd = thread.cwd.as_path();
     let inline_visualization_context = codex_home.and_then(|codex_home| {
         ThreadId::from_string(&thread.id)
             .ok()
             .and_then(|thread_id| InlineVisualizationContext::new(codex_home, thread_id))
     });
-    let mut lines = thread
-        .turns
-        .iter()
-        .flat_map(|turn| turn.items.iter())
-        .filter_map(|item| match item {
-            ThreadItem::UserMessage { content, .. } => Some(TranscriptPreviewLine {
-                speaker: TranscriptPreviewSpeaker::User,
-                text: content
-                    .iter()
-                    .filter_map(|input| match input {
-                        codex_app_server_protocol::UserInput::Text { text, .. } => {
-                            Some(text.as_str())
-                        }
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" "),
-            }),
-            ThreadItem::AgentMessage { text, .. } => {
-                let visible_markdown = parse_assistant_markdown(text, cwd).visible_markdown;
-                let rewritten = crate::inline_visualization::rewrite_inline_visualizations(
-                    &visible_markdown,
+    let mut lines = if thread.history_mode == ThreadHistoryMode::Paginated {
+        let mut groups = Vec::new();
+        let mut visible_lines = 0_usize;
+        let mut scanned_items = 0_usize;
+        let mut cursor = None;
+        let mut seen_cursors = HashSet::new();
+        loop {
+            let page = app_server
+                .thread_items_page(
+                    thread_id,
+                    /*turn_id*/ None,
+                    cursor.clone(),
+                    HISTORY_ITEM_PAGE_LIMIT,
+                )
+                .await
+                .map_err(std::io::Error::other)?;
+            scanned_items = scanned_items.saturating_add(page.data.len());
+            for entry in page.data {
+                let item_lines = transcript_preview_lines_for_item(
+                    &entry.item,
+                    cwd,
                     inline_visualization_context.as_ref(),
                 );
-                let mut text = rewritten.markdown.into_owned();
-                for (placeholder, link) in &rewritten.trusted_file_links {
-                    text = text.replace(
-                        &format!(
-                            "{}  \n[{}]({placeholder})",
-                            link.markdown_label, link.markdown_destination_label
-                        ),
-                        &format!("{}  \n{}", link.display_label, link.destination),
-                    );
+                visible_lines = visible_lines.saturating_add(item_lines.len());
+                if !item_lines.is_empty() {
+                    groups.push(item_lines);
                 }
-                Some(TranscriptPreviewLine {
-                    speaker: TranscriptPreviewSpeaker::Assistant,
-                    text,
-                })
+                if visible_lines >= MAX_PREVIEW_LINES {
+                    break;
+                }
             }
-            _ => None,
-        })
-        .flat_map(|line| {
-            line.text
-                .lines()
-                .filter(|text| !text.trim().is_empty())
-                .map(move |text| TranscriptPreviewLine {
-                    speaker: line.speaker,
-                    text: text.trim().to_string(),
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
+            if visible_lines >= MAX_PREVIEW_LINES || scanned_items >= HISTORY_ITEM_SCAN_LIMIT {
+                break;
+            }
+            let Some(next_cursor) = page
+                .next_cursor
+                .filter(|next| seen_cursors.insert(next.clone()))
+            else {
+                break;
+            };
+            cursor = Some(next_cursor);
+        }
+        groups.into_iter().rev().flatten().collect::<Vec<_>>()
+    } else {
+        thread
+            .turns
+            .iter()
+            .flat_map(|turn| turn.items.iter())
+            .flat_map(|item| {
+                transcript_preview_lines_for_item(item, cwd, inline_visualization_context.as_ref())
+            })
+            .collect::<Vec<_>>()
+    };
     if lines.len() > MAX_PREVIEW_LINES {
         lines.drain(..lines.len() - MAX_PREVIEW_LINES);
     }
     Ok(lines)
+}
+
+fn transcript_preview_lines_for_item(
+    item: &ThreadItem,
+    cwd: &Path,
+    inline_visualization_context: Option<&InlineVisualizationContext>,
+) -> Vec<TranscriptPreviewLine> {
+    let line = match item {
+        ThreadItem::UserMessage { content, .. } => TranscriptPreviewLine {
+            speaker: TranscriptPreviewSpeaker::User,
+            text: content
+                .iter()
+                .filter_map(|input| match input {
+                    codex_app_server_protocol::UserInput::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
+        },
+        ThreadItem::AgentMessage { text, .. } => {
+            let visible_markdown = parse_assistant_markdown(text, cwd).visible_markdown;
+            let rewritten = crate::inline_visualization::rewrite_inline_visualizations(
+                &visible_markdown,
+                inline_visualization_context,
+            );
+            let mut text = rewritten.markdown.into_owned();
+            for (placeholder, link) in &rewritten.trusted_file_links {
+                text = text.replace(
+                    &format!(
+                        "{}  \n[{}]({placeholder})",
+                        link.markdown_label, link.markdown_destination_label
+                    ),
+                    &format!("{}  \n{}", link.display_label, link.destination),
+                );
+            }
+            TranscriptPreviewLine {
+                speaker: TranscriptPreviewSpeaker::Assistant,
+                text,
+            }
+        }
+        _ => return Vec::new(),
+    };
+
+    line.text
+        .lines()
+        .filter(|text| !text.trim().is_empty())
+        .map(|text| TranscriptPreviewLine {
+            speaker: line.speaker,
+            text: text.trim().to_string(),
+        })
+        .collect()
 }
 
 impl SearchState {
@@ -965,6 +1116,7 @@ impl PickerState {
             view_width: None,
             provider_filter,
             filter_mode: SessionFilterMode::from_show_all(show_all, filter_cwd.as_deref()),
+            status: SessionStatus::Active,
             local_filter_cwd: filter_cwd.clone(),
             filter_cwd,
             toolbar_focus: ToolbarControl::Filter,
@@ -974,10 +1126,12 @@ impl PickerState {
             action,
             sort_key: ThreadSortKey::UpdatedAt,
             inline_error: None,
+            archive_state: archive::ArchiveState::default(),
             expanded_thread_id: None,
             transcript_previews: HashMap::new(),
             transcript_cells: HashMap::new(),
             pending_transcript_open: None,
+            pending_transcript_cancellation: None,
             transcript_loading_frame_shown: false,
             overlay: None,
             pager_keymap: RuntimeKeymap::defaults().pager,
@@ -1084,7 +1238,12 @@ impl PickerState {
                 self.transcript_cells
                     .insert(thread_id, SessionTranscriptState::Loading);
                 self.begin_transcript_loading(thread_id);
-                (self.picker_loader)(PickerLoadRequest::Transcript { thread_id });
+                let (cancellation_tx, cancellation) = oneshot::channel();
+                self.pending_transcript_cancellation = Some(cancellation_tx);
+                (self.picker_loader)(PickerLoadRequest::Transcript {
+                    thread_id,
+                    cancellation,
+                });
             }
         }
     }
@@ -1096,6 +1255,22 @@ impl PickerState {
                 modifiers,
                 ..
             } if modifiers.contains(KeyModifiers::CONTROL) => Some(SessionSelection::Exit),
+            key if self.list_keymap.cancel.is_pressed(key) => {
+                if let Some(thread_id) = self.pending_transcript_open.take()
+                    && matches!(
+                        self.transcript_cells.get(&thread_id),
+                        Some(SessionTranscriptState::Loading)
+                    )
+                {
+                    self.transcript_cells.remove(&thread_id);
+                }
+                if let Some(cancellation) = self.pending_transcript_cancellation.take() {
+                    let _ = cancellation.send(());
+                }
+                self.transcript_loading_frame_shown = false;
+                self.request_frame();
+                None
+            }
             _ => None,
         }
     }
@@ -1168,6 +1343,8 @@ impl PickerState {
             } /* ^O */ => {
                 self.toggle_density().await;
             }
+            _ if self.list_keymap.accept.is_pressed(key)
+                && !matches!(self.archive_state, archive::ArchiveState::Idle) => {}
             _ if self.list_keymap.accept.is_pressed(key) => {
                 if let Some(row) = self.filtered_rows.get(self.selected) {
                     let path = row.path.clone();
@@ -1182,6 +1359,10 @@ impl PickerState {
                         },
                     };
                     if let Some(thread_id) = thread_id {
+                        if self.status == SessionStatus::Archived {
+                            self.request_unarchive(thread_id);
+                            return Ok(None);
+                        }
                         return Ok(Some(self.action.selection(path, thread_id)));
                     }
                     self.inline_error = Some(match path {
@@ -1274,6 +1455,11 @@ impl PickerState {
                 new_query.pop();
                 self.set_query(new_query);
             }
+            _ if self.archive_shortcut_available()
+                && crate::key_hint::ctrl(KeyCode::Char('a')).is_press(key) =>
+            {
+                self.request_archive_for_selected_session();
+            }
             KeyEvent {
                 code: KeyCode::Char(c),
                 modifiers,
@@ -1338,12 +1524,16 @@ impl PickerState {
             search_token,
             mode,
             cwd_filter: self.active_cwd_filter(),
+            status: self.status,
             provider_filter: self.provider_filter.clone(),
             sort_key: self.sort_key,
         }));
     }
 
-    async fn handle_background_event(&mut self, event: BackgroundEvent) -> Result<()> {
+    async fn handle_background_event(
+        &mut self,
+        event: BackgroundEvent,
+    ) -> Result<Option<SessionSelection>> {
         match event {
             BackgroundEvent::Page {
                 request_token,
@@ -1351,7 +1541,7 @@ impl PickerState {
                 page,
             } => {
                 let Some(pending) = self.pagination.finish_load(request_token) else {
-                    return Ok(());
+                    return Ok(None);
                 };
                 let page_has_rows = matches!(&page, Ok(page) if !page.rows.is_empty());
                 // Fall back only when the initial DB listing is unusable. Once SQLite returns
@@ -1374,10 +1564,11 @@ impl PickerState {
                         search_token,
                         mode: PageLoadMode::StoreDefault,
                         cwd_filter: self.active_cwd_filter(),
+                        status: self.status,
                         provider_filter: self.provider_filter.clone(),
                         sort_key: self.sort_key,
                     }));
-                    return Ok(());
+                    return Ok(None);
                 }
                 let page = page.map_err(color_eyre::Report::from)?;
                 self.ingest_page(page);
@@ -1404,6 +1595,7 @@ impl PickerState {
                     self.transcript_cells
                         .insert(thread_id, SessionTranscriptState::Loaded(cells.clone()));
                     if should_open {
+                        self.pending_transcript_cancellation = None;
                         self.open_pending_transcript_if_ready();
                     }
                     self.request_frame();
@@ -1412,6 +1604,7 @@ impl PickerState {
                     self.transcript_cells
                         .insert(thread_id, SessionTranscriptState::Failed);
                     if self.pending_transcript_open == Some(thread_id) {
+                        self.pending_transcript_cancellation = None;
                         self.pending_transcript_open = None;
                         self.transcript_loading_frame_shown = false;
                         self.inline_error = Some("Could not load transcript preview".to_string());
@@ -1419,8 +1612,14 @@ impl PickerState {
                     self.request_frame();
                 }
             },
+            BackgroundEvent::Archive { thread_id, result } => {
+                self.handle_archive_result(thread_id, result);
+            }
+            BackgroundEvent::Unarchive { thread_id, result } => {
+                return Ok(self.handle_unarchive_result(thread_id, result));
+            }
         }
-        Ok(())
+        Ok(None)
     }
 
     fn reset_pagination(&mut self) {
@@ -1655,6 +1854,7 @@ impl PickerState {
             search_token,
             mode,
             cwd_filter: self.active_cwd_filter(),
+            status: self.status,
             provider_filter: self.provider_filter.clone(),
             sort_key: self.sort_key,
         }));
@@ -1701,6 +1901,14 @@ impl PickerState {
         self.start_initial_load();
     }
 
+    fn toggle_status(&mut self) {
+        self.status = match self.status {
+            SessionStatus::Active => SessionStatus::Archived,
+            SessionStatus::Archived => SessionStatus::Active,
+        };
+        self.start_initial_load();
+    }
+
     fn active_cwd_filter(&self) -> Option<PathBuf> {
         match self.filter_mode {
             SessionFilterMode::Cwd => self.filter_cwd.clone(),
@@ -1709,17 +1917,18 @@ impl PickerState {
     }
 
     fn focus_previous_toolbar_control(&mut self) {
-        self.toolbar_focus = self.toolbar_focus.previous();
+        self.toolbar_focus = self.toolbar_focus.previous(self.action);
     }
 
     fn focus_next_toolbar_control(&mut self) {
-        self.toolbar_focus = self.toolbar_focus.next();
+        self.toolbar_focus = self.toolbar_focus.next(self.action);
     }
 
     fn change_focused_toolbar_value(&mut self) {
         match self.toolbar_focus {
             ToolbarControl::Sort => self.toggle_sort_key(),
             ToolbarControl::Filter => self.toggle_filter_mode(),
+            ToolbarControl::Status => self.toggle_status(),
         }
     }
 
@@ -1879,6 +2088,7 @@ fn row_from_app_server_thread(thread: Thread) -> Option<Row> {
 fn thread_list_params(
     cursor: Option<String>,
     cwd_filter: Option<&Path>,
+    status: SessionStatus,
     provider_filter: ProviderFilter,
     sort_key: ThreadSortKey,
     include_non_interactive: bool,
@@ -1894,7 +2104,7 @@ fn thread_list_params(
             ProviderFilter::MatchDefault(default_provider) => Some(vec![default_provider]),
         },
         source_kinds: Some(crate::resume_source_kinds(include_non_interactive)),
-        archived: Some(false),
+        archived: Some(status == SessionStatus::Archived),
         section_id: None,
         parent_thread_id: None,
         ancestor_thread_id: None,
@@ -1979,11 +2189,11 @@ fn search_line(state: &PickerState, width: u16) -> Line<'_> {
     } else {
         format!("Search: {}", state.query).into()
     };
+    let search_width = UnicodeWidthStr::width(search.content.as_ref());
     let mut toolbar = toolbar_line(state, /*compact*/ false);
-    if toolbar.width() as u16 > width.saturating_sub(2) {
+    if search_width.saturating_add(toolbar.width()) > usize::from(width.saturating_sub(2)) {
         toolbar = toolbar_line(state, /*compact*/ true);
     }
-    let search_width = UnicodeWidthStr::width(search.content.as_ref());
     let toolbar_width = toolbar.width();
     let spacer_width = width
         .saturating_sub((search_width + toolbar_width) as u16)
@@ -2009,8 +2219,40 @@ fn search_line(state: &PickerState, width: u16) -> Line<'_> {
 
 fn toolbar_line(state: &PickerState, compact: bool) -> Line<'static> {
     let mut spans = Vec::new();
+    let separator = if compact && matches!(state.action, SessionPickerAction::Resume) {
+        " "
+    } else {
+        "   "
+    };
     spans.extend(filter_control_spans(state, compact));
-    spans.push("   ".dim());
+    spans.push(separator.dim());
+    if matches!(state.action, SessionPickerAction::Resume) {
+        let status_focused = state.toolbar_focus == ToolbarControl::Status;
+        if compact {
+            let active_status = match state.status {
+                SessionStatus::Active => "Active",
+                SessionStatus::Archived => "Archived",
+            };
+            spans.push(toolbar_value(
+                active_status,
+                /*active*/ true,
+                status_focused,
+            ));
+        } else {
+            spans.push("Status: ".dim());
+            spans.push(toolbar_value(
+                "Active",
+                state.status == SessionStatus::Active,
+                status_focused,
+            ));
+            spans.push(toolbar_value(
+                "Archived",
+                state.status == SessionStatus::Archived,
+                status_focused,
+            ));
+        }
+        spans.push(separator.dim());
+    }
     spans.extend(sort_control_spans(state, compact));
     spans.into()
 }
@@ -2233,18 +2475,22 @@ fn footer_hint_lines(state: &PickerState, width: u16) -> Vec<Line<'static>> {
         return vec![line, Line::default()];
     }
 
-    let action_label = state.action.action_label();
+    let action_label = if state.status == SessionStatus::Archived {
+        "restore"
+    } else {
+        state.action.action_label()
+    };
     let (esc_label, esc_compact_label) = if state.query.is_empty() {
         match state.launch_context {
             SessionPickerLaunchContext::Startup => ("start new", "new"),
-            SessionPickerLaunchContext::ExistingSession => ("exit", "exit"),
+            SessionPickerLaunchContext::ExistingSession { .. } => ("exit", "exit"),
         }
     } else {
         ("clear search", "clear")
     };
     let ctrl_c_label = match state.launch_context {
         SessionPickerLaunchContext::Startup => "quit",
-        SessionPickerLaunchContext::ExistingSession => "exit",
+        SessionPickerLaunchContext::ExistingSession { .. } => "exit",
     };
     let density_label = match state.density {
         SessionListDensity::Comfortable => "dense view",
@@ -2261,6 +2507,14 @@ fn footer_hint_lines(state: &PickerState, width: u16) -> Vec<Line<'static>> {
             wide_label: action_label.to_string(),
             compact_label: action_label.to_string(),
             priority: 0,
+        });
+    }
+    if !state.filtered_rows.is_empty() && state.archive_shortcut_available() {
+        first_row_hints.push(PickerFooterHint {
+            key: "ctrl+a".to_string(),
+            wide_label: String::from("archive"),
+            compact_label: String::from("archive"),
+            priority: 2,
         });
     }
     if let Some(cancel) = state.list_keymap.primary_hint(ListAction::Cancel) {
@@ -3445,6 +3699,7 @@ mod tests {
         let params = thread_list_params(
             Some(String::from("cursor-1")),
             cwd_filter.as_deref(),
+            SessionStatus::Active,
             ProviderFilter::MatchDefault(String::from("openai")),
             ThreadSortKey::UpdatedAt,
             /*include_non_interactive*/ false,
@@ -3823,6 +4078,7 @@ mod tests {
         let params = thread_list_params(
             Some(String::from("cursor-1")),
             Some(Path::new("repo/on/server")),
+            SessionStatus::Active,
             ProviderFilter::Any,
             ThreadSortKey::UpdatedAt,
             /*include_non_interactive*/ false,
@@ -3846,6 +4102,7 @@ mod tests {
         let params = thread_list_params(
             Some(String::from("cursor-1")),
             /*cwd_filter*/ None,
+            SessionStatus::Active,
             ProviderFilter::Any,
             ThreadSortKey::UpdatedAt,
             /*include_non_interactive*/ true,
@@ -4062,7 +4319,9 @@ mod tests {
             /*filter_cwd*/ None,
             SessionPickerAction::Resume,
         );
-        state.launch_context = SessionPickerLaunchContext::ExistingSession;
+        state.launch_context = SessionPickerLaunchContext::ExistingSession {
+            current_thread_id: None,
+        };
 
         let wide = footer_lines_text(&state, /*width*/ 220);
         assert!(wide.contains("esc exit"));
@@ -4389,7 +4648,7 @@ mod tests {
         let recorded_requests: Arc<Mutex<Vec<ThreadId>>> = Arc::new(Mutex::new(Vec::new()));
         let request_sink = recorded_requests.clone();
         let loader: PickerLoader = Arc::new(move |request| {
-            if let PickerLoadRequest::Transcript { thread_id } = request {
+            if let PickerLoadRequest::Transcript { thread_id, .. } = request {
                 request_sink.lock().unwrap().push(thread_id);
             }
         });
@@ -4478,6 +4737,61 @@ mod tests {
 
         assert!(selection.is_none());
         assert_eq!(state.query, "");
+    }
+
+    #[tokio::test]
+    async fn escape_cancels_transcript_loading_and_restores_picker_navigation() {
+        let thread_id = ThreadId::new();
+        let cancellation = Arc::new(Mutex::new(None));
+        let cancellation_sink = cancellation.clone();
+        let loader: PickerLoader = Arc::new(move |request| {
+            if let PickerLoadRequest::Transcript { cancellation, .. } = request {
+                *cancellation_sink.lock().unwrap() = Some(cancellation);
+            }
+        });
+        let mut state = PickerState::new(
+            FrameRequester::test_dummy(),
+            loader,
+            ProviderFilter::MatchDefault(String::from("openai")),
+            /*show_all*/ true,
+            /*filter_cwd*/ None,
+            SessionPickerAction::Resume,
+        );
+        let mut first = make_row("/tmp/1.jsonl", "2026-05-02T12:00:00Z", "one");
+        first.thread_id = Some(thread_id);
+        state.filtered_rows = vec![
+            first,
+            make_row("/tmp/2.jsonl", "2026-05-02T12:00:00Z", "two"),
+        ];
+
+        state
+            .handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))
+            .await
+            .unwrap();
+        assert_eq!(state.pending_transcript_open, Some(thread_id));
+
+        state
+            .handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .unwrap();
+
+        assert_eq!(state.pending_transcript_open, None);
+        assert!(!state.transcript_cells.contains_key(&thread_id));
+        assert!(
+            cancellation
+                .lock()
+                .unwrap()
+                .as_mut()
+                .expect("transcript cancellation receiver")
+                .try_recv()
+                .is_ok()
+        );
+
+        state
+            .handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await
+            .unwrap();
+        assert_eq!(state.selected, 1);
     }
 
     #[tokio::test]
@@ -4571,7 +4885,7 @@ mod tests {
         let recorded_requests: Arc<Mutex<Vec<ThreadId>>> = Arc::new(Mutex::new(Vec::new()));
         let request_sink = recorded_requests.clone();
         let loader: PickerLoader = Arc::new(move |request| {
-            if let PickerLoadRequest::Transcript { thread_id } = request {
+            if let PickerLoadRequest::Transcript { thread_id, .. } = request {
                 request_sink.lock().unwrap().push(thread_id);
             }
         });
@@ -4959,6 +5273,7 @@ session_picker_view = "dense"
         let line = search_line(&state, /*width*/ 40).to_string();
 
         assert!(line.contains("Filter:[Cwd]"));
+        assert!(line.contains("[Active]"));
         assert!(line.contains("Sort:[Updated]"));
         assert!(line.find("Filter:[Cwd]") < line.find("Sort:[Updated]"));
     }
@@ -5637,6 +5952,10 @@ session_picker_view = "dense"
             .await
             .unwrap();
         state
+            .handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await
+            .unwrap();
+        state
             .handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL))
             .await
             .unwrap();
@@ -5715,7 +6034,7 @@ session_picker_view = "dense"
     }
 
     #[tokio::test]
-    async fn filter_stays_all_when_no_cwd_candidate_exists() {
+    async fn status_changes_when_directory_filter_is_unavailable() {
         let recorded_requests: Arc<Mutex<Vec<PageLoadRequest>>> = Arc::new(Mutex::new(Vec::new()));
         let request_sink = recorded_requests.clone();
         let loader = page_only_loader(move |req: PageLoadRequest| {
@@ -5744,10 +6063,21 @@ session_picker_view = "dense"
             .handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
             .await
             .unwrap();
+        state
+            .handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await
+            .unwrap();
+        state
+            .handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
+            .await
+            .unwrap();
 
         let guard = recorded_requests.lock().unwrap();
-        assert_eq!(guard.len(), 1);
+        assert_eq!(guard.len(), 2);
+        assert_eq!(guard[0].status, SessionStatus::Active);
         assert_eq!(guard[0].cwd_filter, None);
+        assert_eq!(guard[1].status, SessionStatus::Archived);
+        assert_eq!(guard[1].cwd_filter, None);
     }
 
     #[tokio::test]

@@ -13,16 +13,18 @@ use codex_core::config::CurrentTimeReminderConfig;
 use codex_core::sandboxing::SandboxPermissions;
 use codex_features::CurrentTimeSource;
 use codex_features::Feature;
+use codex_history::RolloutItem;
+use codex_history::RolloutLine;
+use codex_login::CodexAuth;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ApprovalsReviewer;
-use codex_protocol::openai_models::AutoReviewMessages;
+use codex_protocol::openai_models::MODEL_SPECIALTY_CYBER;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
-use codex_protocol::protocol::RolloutItem;
-use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SandboxPolicy;
+use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::user_input::UserInput;
 use core_test_support::fs_wait;
 use core_test_support::responses::ev_assistant_message;
@@ -51,6 +53,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 use tempfile::TempDir;
+use test_case::test_case;
 
 const CURRENT_TIME_AT: i64 = 1_781_717_655;
 
@@ -76,23 +79,47 @@ impl TimeProvider for RecordingTimeProvider {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn guardian_session_prewarms_and_is_reused_for_first_review() -> Result<()> {
+#[test_case(CodexAuth::from_api_key("test-api-key"), "gpt-5.6-luna"; "api_key_uses_luna_with_responses_lite")]
+#[test_case(CodexAuth::create_dummy_chatgpt_auth_for_testing(), "codex-auto-review"; "chatgpt_uses_codex_auto_review")]
+async fn guardian_session_prewarms_and_is_reused_for_first_review(
+    auth: CodexAuth,
+    expected_model: &str,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let catalog_template = "Catalog-provided Guardian template:\n{{ tenant_policy_config }}";
-    let mut review_model = codex_models_manager::bundled_models_response()?
-        .models
-        .into_iter()
+    let bundled_models = codex_models_manager::bundled_models_response()?.models;
+    let catalog_auto_review = bundled_models
+        .iter()
         .find(|model| model.slug == "codex-auto-review")
-        .expect("bundled auto-review model");
-    let model_messages = review_model
-        .model_messages
-        .as_mut()
-        .expect("auto-review model messages");
-    model_messages.auto_review = Some(AutoReviewMessages {
-        policy: None,
-        policy_template: Some(catalog_template.to_string()),
-    });
+        .and_then(|model| model.model_messages.as_ref())
+        .and_then(|messages| messages.auto_review.as_ref())
+        .expect("bundled auto-review model Guardian policy");
+    let catalog_policy = catalog_auto_review
+        .policy
+        .as_deref()
+        .expect("catalog Guardian policy");
+    let catalog_template = catalog_auto_review
+        .policy_template
+        .as_deref()
+        .expect("catalog Guardian policy template");
+    let expected_guardian_policy =
+        catalog_template.replace("{{ tenant_policy_config }}", catalog_policy.trim());
+    let review_model = bundled_models
+        .into_iter()
+        .find(|model| model.slug == expected_model)
+        .expect("bundled Guardian review model");
+    let use_responses_lite = review_model.use_responses_lite;
+    if expected_model == "gpt-5.6-luna" {
+        assert!(use_responses_lite, "Luna must use Responses Lite");
+        assert!(
+            review_model
+                .model_messages
+                .as_ref()
+                .and_then(|messages| messages.auto_review.as_ref())
+                .is_none(),
+            "Luna must exercise the bundled Guardian policy fallback"
+        );
+    }
 
     let tool_args = json!({
         "cmd": "true",
@@ -128,7 +155,23 @@ async fn guardian_session_prewarms_and_is_reused_for_first_review() -> Result<()
         thread_ids: Mutex::new(Vec::new()),
     });
     let mut builder = test_codex()
+        .with_auth(auth)
         .with_config(move |config| {
+            let rules_dir = config.codex_home.join("rules");
+            fs::create_dir_all(&rules_dir).expect("create execution policy directory");
+            let policy_justification = format!(
+                "Explicit policy approval required {} policy-justification-end",
+                "x".repeat(10_000)
+            );
+            let policy_justification =
+                serde_json::to_string(&policy_justification).expect("serialize policy justification");
+            fs::write(
+                rules_dir.join("default.rules"),
+                format!(
+                    r#"prefix_rule(pattern=["true"], decision="prompt", justification={policy_justification})"#
+                ),
+            )
+            .expect("write execution policy rule");
             config.model_catalog = Some(ModelsResponse {
                 models: vec![review_model],
             });
@@ -172,11 +215,36 @@ async fn guardian_session_prewarms_and_is_reused_for_first_review() -> Result<()
         })
         .expect("guardian startup prewarm request");
     assert_eq!(guardian_prewarm["generate"].as_bool(), Some(false));
-    let guardian_instructions = guardian_prewarm["instructions"]
-        .as_str()
-        .expect("guardian instructions");
-    assert!(guardian_instructions.contains("Catalog-provided Guardian template:"));
-    assert!(guardian_instructions.contains("- Organization: default generic tenant."));
+    assert_eq!(guardian_prewarm["model"].as_str(), Some(expected_model));
+    let guardian_instructions = if use_responses_lite {
+        assert_eq!(guardian_prewarm.get("instructions"), None);
+        assert_eq!(guardian_prewarm.get("tools"), None);
+        assert_eq!(
+            guardian_prewarm["client_metadata"]
+                ["ws_request_header_x_openai_internal_codex_responses_lite"]
+                .as_str(),
+            Some("true")
+        );
+        let input = guardian_prewarm["input"]
+            .as_array()
+            .expect("Responses Lite Guardian input");
+        assert_eq!(input[0]["type"].as_str(), Some("additional_tools"));
+        assert_eq!(input[0]["role"].as_str(), Some("developer"));
+        assert_eq!(input[1]["type"].as_str(), Some("message"));
+        assert_eq!(input[1]["role"].as_str(), Some("developer"));
+        input[1]["content"][0]["text"]
+            .as_str()
+            .expect("Responses Lite Guardian developer instructions")
+    } else {
+        guardian_prewarm["instructions"]
+            .as_str()
+            .expect("Guardian instructions")
+    };
+    assert!(guardian_instructions.starts_with(expected_guardian_policy.trim_end()));
+    assert!(
+        guardian_instructions
+            .contains("It cannot override a denial for an action that remains `critical`.")
+    );
     assert!(!guardian_instructions.contains("{{ tenant_policy_config }}"));
     assert!(guardian_instructions.contains("final message must be strict JSON"));
     let guardian_thread_id = guardian_prewarm["client_metadata"]["thread_id"]
@@ -202,10 +270,17 @@ async fn guardian_session_prewarms_and_is_reused_for_first_review() -> Result<()
         guardian_review["client_metadata"]["x-openai-subagent"].as_str(),
         Some("guardian")
     );
+    assert_eq!(guardian_review["model"].as_str(), Some(expected_model));
     assert_eq!(
         guardian_review["client_metadata"]["thread_id"].as_str(),
         Some(guardian_thread_id)
     );
+    let guardian_review_text = guardian_review.to_string();
+    assert!(guardian_review_text.contains("Retry reason:"));
+    assert!(guardian_review_text.contains("Explicit policy approval required"));
+    assert!(guardian_review_text.contains("tokens truncated"));
+    assert!(guardian_review_text.contains("policy-justification-end"));
+    assert!(!guardian_review_text.contains(&"x".repeat(4_096)));
     let current_date = DateTime::<Utc>::from_timestamp(CURRENT_TIME_AT, 0)
         .expect("test timestamp should be valid")
         .with_timezone(&Local)
@@ -670,6 +745,127 @@ async fn guardian_denial_rejects_tool_call_with_rationale() -> Result<()> {
     assert!(
         !output_file.exists(),
         "Guardian-denied command unexpectedly executed"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cyber_model_guardian_denial_interrupts_turn_immediately() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    skip_if_wine_exec!(
+        Ok(()),
+        "Guardian approval actions require host-native paths"
+    );
+
+    let server = start_mock_server().await;
+    let approval_policy = AskForApproval::OnRequest;
+    let sandbox_policy = SandboxPolicy::WorkspaceWrite {
+        writable_roots: vec![],
+        network_access: false,
+        exclude_tmpdir_env_var: true,
+        exclude_slash_tmp: true,
+    };
+    let sandbox_policy_for_config = sandbox_policy.clone();
+
+    let mut builder = test_codex()
+        .with_model_info_override("gpt-5.4", |model| {
+            model.model_specialty = Some(MODEL_SPECIALTY_CYBER.to_string());
+        })
+        .with_config(move |config| {
+            config.permissions.approval_policy = Constrained::allow_any(approval_policy);
+            config
+                .set_legacy_sandbox_policy(sandbox_policy_for_config)
+                .expect("set sandbox policy");
+        });
+    let test = builder.build_with_auto_env(&server).await?;
+
+    let output_file = test.cwd.path().join("cyber-guardian-denied.txt");
+    let command = format!("printf should-not-run > {}", output_file.display());
+    let tool_args = json!({
+        "cmd": command,
+        "yield_time_ms": 1_000_u64,
+        "sandbox_permissions": SandboxPermissions::RequireEscalated,
+        "justification": "Exercise immediate Guardian interruption for cyber models.",
+    });
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-cyber-parent-tool-denied"),
+                ev_function_call(
+                    "exec-cyber-call-denied",
+                    "exec_command",
+                    &serde_json::to_string(&tool_args)?,
+                ),
+                ev_completed("resp-cyber-parent-tool-denied"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-cyber-guardian-denied"),
+                ev_assistant_message(
+                    "msg-cyber-guardian-denied",
+                    &json!({
+                        "risk_level": "high",
+                        "user_authorization": "low",
+                        "outcome": "deny",
+                        "rationale": "The requested command has unacceptable test risk.",
+                    })
+                    .to_string(),
+                ),
+                ev_completed("resp-cyber-guardian-denied"),
+            ]),
+        ],
+    )
+    .await;
+
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "run a command that Guardian should deny for a cyber model".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
+                approval_policy: Some(approval_policy),
+                approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
+                sandbox_policy: Some(sandbox_policy),
+                ..Default::default()
+            },
+        })
+        .await?;
+
+    let warning = wait_for_event(&test.codex, |event| {
+        matches!(
+            event,
+            EventMsg::GuardianWarning(warning)
+                if warning.message.contains("too many approval requests")
+        )
+    })
+    .await;
+    let EventMsg::GuardianWarning(warning) = warning else {
+        unreachable!("wait_for_event returned a non-warning event")
+    };
+    assert!(
+        warning
+            .message
+            .contains("1 consecutive, 1 in the last 50 reviews")
+    );
+
+    let aborted = wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnAborted(_))
+    })
+    .await;
+    let EventMsg::TurnAborted(aborted) = aborted else {
+        unreachable!("wait_for_event returned a non-abort event")
+    };
+    assert_eq!(aborted.reason, TurnAbortReason::Interrupted);
+    assert_eq!(responses.requests().len(), 2);
+    assert!(
+        !output_file.exists(),
+        "Guardian-denied cyber-model command unexpectedly executed"
     );
 
     Ok(())
