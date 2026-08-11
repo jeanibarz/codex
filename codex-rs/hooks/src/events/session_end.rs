@@ -14,9 +14,9 @@ use codex_protocol::protocol::HookRunStatus;
 use codex_protocol::protocol::HookRunSummary;
 
 use super::common;
-use crate::engine::CommandShell;
+use crate::engine::ClaudeHooksEngine;
 use crate::engine::ConfiguredHandler;
-use crate::engine::command_runner::CommandRunResult;
+use crate::engine::HandlerRunResult;
 use crate::engine::dispatcher;
 use crate::schema::NullableString;
 use crate::schema::SessionEndCommandInput;
@@ -77,12 +77,11 @@ pub(crate) fn preview(
 }
 
 pub(crate) async fn run(
-    handlers: &[ConfiguredHandler],
-    shell: &CommandShell,
+    engine: &ClaudeHooksEngine,
     request: SessionEndRequest,
 ) -> SessionEndOutcome {
     let matched = dispatcher::select_handlers(
-        handlers,
+        &engine.handlers,
         HookEventName::SessionEnd,
         Some(request.reason.as_str()),
     );
@@ -112,7 +111,7 @@ pub(crate) async fn run(
     };
 
     let results = dispatcher::execute_handlers(
-        shell,
+        engine,
         matched,
         input_json,
         request.cwd.as_path(),
@@ -127,7 +126,7 @@ pub(crate) async fn run(
 
 fn parse_completed(
     handler: &ConfiguredHandler,
-    run_result: CommandRunResult,
+    run_result: HandlerRunResult,
     turn_id: Option<String>,
 ) -> dispatcher::ParsedHandler<()> {
     let (status, entries) = match (run_result.error.as_deref(), run_result.exit_code) {

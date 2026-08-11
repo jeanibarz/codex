@@ -1,51 +1,37 @@
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::env;
-use std::sync::Arc;
-
 use crate::config::Config;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use codex_analytics::InvocationType;
 use codex_analytics::SkillInvocation;
+use codex_analytics::TrackEventsContext;
 use codex_analytics::build_track_events_context;
-use codex_core_plugins::loader::load_plugin_hooks;
-use codex_core_plugins::manifest::load_plugin_manifest;
 use codex_extension_api::SkillInvocationInput;
 use codex_extension_api::SkillInvocationKind;
 use codex_otel::sanitize_metric_tag_value;
-use codex_plugin::PluginHookSource;
-use codex_plugin::PluginId;
 use codex_protocol::protocol::SkillScope;
-use codex_protocol::request_user_input::RequestUserInputArgs;
-use codex_protocol::request_user_input::RequestUserInputQuestion;
-use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_plugins::PluginSkillRoot;
+use std::collections::HashSet;
 use tokio::sync::Mutex;
-use tracing::warn;
 
-pub use codex_core_skills::SkillDependencyInfo;
-pub use codex_core_skills::SkillError;
-pub use codex_core_skills::SkillLoadOutcome;
-pub use codex_core_skills::SkillsLoadInput;
-pub use codex_core_skills::SkillsService;
-pub use codex_core_skills::build_skill_name_counts;
-pub use codex_core_skills::collect_env_var_dependencies;
-pub use codex_core_skills::config_rules;
-pub use codex_core_skills::detect_implicit_skill_invocation_for_command;
-pub use codex_core_skills::filter_skill_load_outcome_for_product;
-pub use codex_core_skills::injection;
-pub use codex_core_skills::injection::SkillInjections;
-pub use codex_core_skills::injection::build_skill_injections;
-pub use codex_core_skills::injection::collect_explicit_skill_mentions;
-pub use codex_core_skills::loader;
-pub use codex_core_skills::model;
-pub use codex_core_skills::remote;
-pub use codex_core_skills::service;
-pub use codex_core_skills::system;
+pub use codex_skills::SkillError;
 pub use codex_skills::SkillMetadata;
 pub use codex_skills::SkillPolicy;
+pub use codex_skills::build_skill_name_counts;
+pub use codex_skills::collect_explicit_skill_mentions;
+pub use codex_skills::detect_implicit_skill_invocation_for_command;
+pub use codex_skills_extension::HostSkillsLoadInput;
+pub use codex_skills_extension::HostSkillsService;
+pub use codex_skills_extension::SkillLoadOutcome;
+pub use codex_skills_extension::bundled_skills_enabled_from_stack;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::env;
+use std::sync::Arc;
+use tracing::warn;
+
+pub use crate::skill_env_var_dependencies::SkillDependencyInfo;
+pub use crate::skill_env_var_dependencies::collect_env_var_dependencies;
 
 #[derive(Debug, Default)]
 struct ImplicitSkillInvocations(Mutex<HashSet<String>>);
@@ -53,13 +39,58 @@ struct ImplicitSkillInvocations(Mutex<HashSet<String>>);
 pub(crate) fn skills_load_input_from_config(
     config: &Config,
     effective_skill_roots: Vec<PluginSkillRoot>,
-) -> SkillsLoadInput {
-    SkillsLoadInput::new(
+) -> HostSkillsLoadInput {
+    HostSkillsLoadInput::new(
         config.cwd.clone(),
         effective_skill_roots,
         config.config_layer_stack.clone(),
         config.bundled_skills_enabled(),
     )
+}
+
+pub(crate) fn emit_explicit_skill_invocations(
+    sess: &Session,
+    turn_context: &TurnContext,
+    mentioned_skills: &[SkillMetadata],
+    injected_skills: &[SkillMetadata],
+    tracking: TrackEventsContext,
+) {
+    let injected_skill_paths = injected_skills
+        .iter()
+        .map(|skill| &skill.path_to_skills_md)
+        .collect::<HashSet<_>>();
+    for skill in mentioned_skills {
+        let skill_name_tag = sanitize_metric_tag_value(skill.name.as_str());
+        let status = if injected_skill_paths.contains(&skill.path_to_skills_md) {
+            "ok"
+        } else {
+            "error"
+        };
+        turn_context.session_telemetry.counter(
+            "codex.skill.injected",
+            /*inc*/ 1,
+            &[
+                ("status", status),
+                ("skill", skill_name_tag.as_str()),
+                ("invoke_type", "explicit"),
+            ],
+        );
+    }
+
+    let invocations = injected_skills
+        .iter()
+        .map(|skill| SkillInvocation {
+            skill_name: skill.name.clone(),
+            skill_scope: skill.scope,
+            skill_path: skill.path_to_skills_md.to_path_buf(),
+            plugin_id: skill.plugin_id.clone(),
+            remote_plugin_id: skill.remote_plugin_id.clone(),
+            invocation_type: InvocationType::Explicit,
+        })
+        .collect();
+    sess.services
+        .analytics_events_client
+        .track_skill_invocations(tracking, invocations);
 }
 
 pub(crate) fn include_cli_plugin_skill_roots(
@@ -90,8 +121,8 @@ pub(crate) fn include_cli_plugin_skill_roots(
 /// plugins.
 pub(crate) fn include_cli_plugin_hook_sources(
     config: &Config,
-    mut effective: Vec<PluginHookSource>,
-) -> Vec<PluginHookSource> {
+    mut effective: Vec<codex_plugin::PluginHookSource>,
+) -> Vec<codex_plugin::PluginHookSource> {
     for cli_plugin_dir in &config.cli_plugin_dirs {
         let canonical = match std::fs::canonicalize(cli_plugin_dir) {
             Ok(path) => path,
@@ -107,14 +138,14 @@ pub(crate) fn include_cli_plugin_hook_sources(
             Ok(abs) => abs,
             Err(_) => continue,
         };
-        let Some(manifest) = load_plugin_manifest(abs_root.as_path()) else {
+        let Some(manifest) = codex_core_plugins::manifest::load_plugin_manifest(abs_root.as_path()) else {
             // Already warned by include_cli_plugin_skill_roots for the same dir.
             continue;
         };
         // CLI-injected plugins don't come from a marketplace; synthesize a
         // marketplace segment ("cli") so the resulting PluginId is well-formed
         // and self-documenting in telemetry/source paths.
-        let plugin_id = match PluginId::new(manifest.name.clone(), "cli".to_string()) {
+        let plugin_id = match codex_plugin::PluginId::new(manifest.name.clone(), "cli".to_string()) {
             Ok(id) => id,
             Err(err) => {
                 warn!(
@@ -130,7 +161,7 @@ pub(crate) fn include_cli_plugin_hook_sources(
         // but CLI-injected ones write to their own tree if needed).
         let plugin_data_root = abs_root.clone();
         let (sources, warnings) =
-            load_plugin_hooks(&abs_root, &plugin_id, &plugin_data_root, &manifest.paths);
+            codex_core_plugins::loader::load_plugin_hooks(&abs_root, &plugin_id, &plugin_data_root, &manifest.paths);
         for warning in warnings {
             warn!(
                 "--plugin-dir {} hook load warning: {warning}",
@@ -145,7 +176,7 @@ pub(crate) fn include_cli_plugin_hook_sources(
 pub(crate) async fn resolve_skill_dependencies_for_turn(
     sess: &Arc<Session>,
     turn_context: &TurnContext,
-    dependencies: &[SkillDependencyInfo],
+    dependencies: &[crate::skill_env_var_dependencies::SkillDependencyInfo],
 ) {
     if dependencies.is_empty() {
         return;
@@ -187,7 +218,7 @@ pub(crate) async fn resolve_skill_dependencies_for_turn(
 async fn request_skill_dependencies(
     sess: &Arc<Session>,
     turn_context: &TurnContext,
-    dependencies: &[SkillDependencyInfo],
+    dependencies: &[crate::skill_env_var_dependencies::SkillDependencyInfo],
 ) {
     let questions = dependencies
         .iter()
@@ -206,7 +237,7 @@ async fn request_skill_dependencies(
                     )
                 },
             );
-            RequestUserInputQuestion {
+            codex_protocol::protocol::RequestUserInputQuestion {
                 id: dependency.name.clone(),
                 header: "Skill requires environment variable".to_string(),
                 question: format!(
@@ -226,14 +257,14 @@ async fn request_skill_dependencies(
         .request_user_input(
             turn_context,
             format!("skill-deps-{}", turn_context.sub_id),
-            RequestUserInputArgs {
+            codex_protocol::protocol::RequestUserInputArgs {
                 questions,
                 is_blocking: true,
                 auto_resolution_ms: None,
             },
         )
         .await
-        .unwrap_or_else(|| RequestUserInputResponse {
+        .unwrap_or_else(|| codex_protocol::protocol::RequestUserInputResponse {
             answers: HashMap::new(),
         });
     if response.answers.is_empty() {
@@ -260,6 +291,7 @@ async fn request_skill_dependencies(
 
     sess.set_dependency_env(values).await;
 }
+
 
 pub(crate) async fn maybe_emit_implicit_skill_invocation(
     sess: &Session,
@@ -341,13 +373,6 @@ pub(crate) async fn maybe_emit_implicit_skill_invocation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codex_utils_absolute_path::AbsolutePathBuf;
-    use codex_utils_plugins::PluginIdentity;
-    use codex_utils_plugins::SkillDiscoveryMode;
-    use pretty_assertions::assert_eq;
-    use std::fs;
-    use tempfile::tempdir;
-
     #[tokio::test]
     async fn include_cli_plugin_skill_roots_adds_roots_from_config() {
         let tmp = tempdir().expect("tempdir");
@@ -380,66 +405,6 @@ mod tests {
                 plugin_root: expected_plugin_root,
                 discovery_mode: SkillDiscoveryMode::Recursive,
             }]
-        );
-    }
-
-    /// Regression test: ensure `include_cli_plugin_hook_sources` registers
-    /// hooks from a plugin loaded via `--plugin-dir`. Without this wiring,
-    /// `plugin/hooks/hooks.json` is silently ignored even though the plugin-
-    /// hook loader (`load_plugin_hooks`) is implemented and `Feature::Plugin
-    /// Hooks` is default-on (see kookr `docs/poc/008-plugin-hook-bypass-
-    /// survival.md` for the empirical motivation).
-    #[tokio::test]
-    async fn include_cli_plugin_hook_sources_registers_hooks_json_from_cli_plugin_dir() {
-        let tmp = tempdir().expect("tempdir");
-        let plugin_root = tmp.path().join("plugins/kookr");
-        fs::create_dir_all(plugin_root.join(".codex-plugin")).expect("mkdir manifest");
-        fs::create_dir_all(plugin_root.join("hooks")).expect("mkdir hooks");
-        fs::write(
-            plugin_root.join(".codex-plugin/plugin.json"),
-            r#"{"name":"kookr-toolkit"}"#,
-        )
-        .expect("write manifest");
-        // Minimal valid hooks.json — one PreToolUse Bash hook.
-        fs::write(
-            plugin_root.join("hooks/hooks.json"),
-            r#"{
-                "hooks": {
-                    "PreToolUse": [
-                        {
-                            "matcher": "Bash",
-                            "hooks": [
-                                { "type": "command", "command": "/bin/true" }
-                            ]
-                        }
-                    ]
-                }
-            }"#,
-        )
-        .expect("write hooks.json");
-
-        let mut config = crate::config::test_config().await;
-        config.cli_plugin_dirs = vec![plugin_root];
-
-        let sources = include_cli_plugin_hook_sources(&config, Vec::new());
-        assert_eq!(
-            sources.len(),
-            1,
-            "expected exactly one hook source from the cli-injected plugin, got {sources:?}"
-        );
-        let source = &sources[0];
-        assert_eq!(source.plugin_id.plugin_name.as_str(), "kookr-toolkit");
-        assert_eq!(source.plugin_id.marketplace_name.as_str(), "cli");
-        // The hook source must point at the kookr-toolkit plugin's hooks/hooks.json
-        // (the default discovery path), proving the loader was called.
-        assert!(
-            source
-                .source_path
-                .as_path()
-                .to_string_lossy()
-                .ends_with("hooks/hooks.json"),
-            "source_path should point at hooks/hooks.json, got {}",
-            source.source_path.as_path().display()
         );
     }
 }

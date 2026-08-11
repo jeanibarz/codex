@@ -365,6 +365,12 @@
     "CodeModeConfigToml": {
       "additionalProperties": false,
       "properties": {
+        "default_exec_yield_time_ms": {
+          "description": "Default yield timeout for code-mode exec calls, in milliseconds.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "direct_only_tool_namespaces": {
           "description": "Exact tool namespaces to expose only as direct model tools. These tools bypass deferral, remain top-level in code-mode-only sessions, and are omitted from the nested code-mode tool surface.",
           "items": {
@@ -428,6 +434,9 @@
             "apply_patch_freeform": {
               "type": "boolean"
             },
+            "apply_patch_preserve_line_endings": {
+              "type": "boolean"
+            },
             "apply_patch_streaming_events": {
               "type": "boolean"
             },
@@ -456,6 +465,9 @@
             "auth_elicitation": {
               "type": "boolean"
             },
+            "background_paginated_rollout_migration": {
+              "type": "boolean"
+            },
             "browser_use": {
               "type": "boolean"
             },
@@ -476,6 +488,9 @@
             },
             "code_mode_host": {
               "$ref": "#/definitions/FeatureToml_for_CodeModeHostConfigToml"
+            },
+            "code_mode_interrupt": {
+              "type": "boolean"
             },
             "code_mode_only": {
               "type": "boolean"
@@ -558,6 +573,9 @@
             "guardian_approval": {
               "type": "boolean"
             },
+            "guardian_reuse_parent_compaction": {
+              "type": "boolean"
+            },
             "guardianv2": {
               "type": "boolean"
             },
@@ -568,6 +586,9 @@
               "type": "boolean"
             },
             "image_generation": {
+              "type": "boolean"
+            },
+            "image_resize_notice": {
               "type": "boolean"
             },
             "imagegenext": {
@@ -726,6 +747,9 @@
             "tool_call_mcp_elicitation": {
               "type": "boolean"
             },
+            "tool_registry": {
+              "$ref": "#/definitions/ToolRegistryConfigToml"
+            },
             "tool_search": {
               "type": "boolean"
             },
@@ -750,6 +774,9 @@
             "unified_exec_zsh_fork": {
               "type": "boolean"
             },
+            "unified_image_budget": {
+              "type": "boolean"
+            },
             "use_agent_identity": {
               "type": "boolean"
             },
@@ -757,6 +784,9 @@
               "type": "boolean"
             },
             "use_linux_sandbox_bwrap": {
+              "type": "boolean"
+            },
+            "view_image": {
               "type": "boolean"
             },
             "web_search": {
@@ -1169,6 +1199,18 @@
       },
       "type": "object"
     },
+    "GoalsToml": {
+      "additionalProperties": false,
+      "properties": {
+        "max_goal_token_budget": {
+          "description": "Maximum token budget allowed for a goal and default budget for new goals.",
+          "format": "uint64",
+          "minimum": 1.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "GranularApprovalConfig": {
       "properties": {
         "mcp_elicitations": {
@@ -1282,6 +1324,43 @@
           },
           "required": [
             "command",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "input": {
+              "additionalProperties": true,
+              "default": {},
+              "type": "object"
+            },
+            "server": {
+              "type": "string"
+            },
+            "statusMessage": {
+              "default": null,
+              "type": "string"
+            },
+            "timeout": {
+              "default": null,
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "tool": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "mcp_tool"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "server",
+            "tool",
             "type"
           ],
           "type": "object"
@@ -3182,6 +3261,20 @@
         }
       ]
     },
+    "ToolRegistryConfigToml": {
+      "additionalProperties": false,
+      "properties": {
+        "error_on_tool_collisions": {
+          "description": "Fail the turn when multiple tools share the same effective name.",
+          "type": "boolean"
+        },
+        "turn_metadata_includes_tool_info": {
+          "description": "Include authoritative tool information in per-turn request metadata.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "ToolSuggestConfig": {
       "additionalProperties": false,
       "properties": {
@@ -5052,6 +5145,9 @@
         "apply_patch_freeform": {
           "type": "boolean"
         },
+        "apply_patch_preserve_line_endings": {
+          "type": "boolean"
+        },
         "apply_patch_streaming_events": {
           "type": "boolean"
         },
@@ -5080,6 +5176,9 @@
         "auth_elicitation": {
           "type": "boolean"
         },
+        "background_paginated_rollout_migration": {
+          "type": "boolean"
+        },
         "browser_use": {
           "type": "boolean"
         },
@@ -5100,6 +5199,9 @@
         },
         "code_mode_host": {
           "$ref": "#/definitions/FeatureToml_for_CodeModeHostConfigToml"
+        },
+        "code_mode_interrupt": {
+          "type": "boolean"
         },
         "code_mode_only": {
           "type": "boolean"
@@ -5182,6 +5284,9 @@
         "guardian_approval": {
           "type": "boolean"
         },
+        "guardian_reuse_parent_compaction": {
+          "type": "boolean"
+        },
         "guardianv2": {
           "type": "boolean"
         },
@@ -5192,6 +5297,9 @@
           "type": "boolean"
         },
         "image_generation": {
+          "type": "boolean"
+        },
+        "image_resize_notice": {
           "type": "boolean"
         },
         "imagegenext": {
@@ -5350,6 +5458,9 @@
         "tool_call_mcp_elicitation": {
           "type": "boolean"
         },
+        "tool_registry": {
+          "$ref": "#/definitions/ToolRegistryConfigToml"
+        },
         "tool_search": {
           "type": "boolean"
         },
@@ -5374,6 +5485,9 @@
         "unified_exec_zsh_fork": {
           "type": "boolean"
         },
+        "unified_image_budget": {
+          "type": "boolean"
+        },
         "use_agent_identity": {
           "type": "boolean"
         },
@@ -5381,6 +5495,9 @@
           "type": "boolean"
         },
         "use_linux_sandbox_bwrap": {
+          "type": "boolean"
+        },
+        "view_image": {
           "type": "boolean"
         },
         "web_search": {
@@ -5443,6 +5560,14 @@
       ],
       "default": null,
       "description": "Compatibility-only settings retained so legacy `ghost_snapshot` config still loads."
+    },
+    "goals": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/GoalsToml"
+        }
+      ],
+      "description": "Goal-related settings."
     },
     "hide_agent_reasoning": {
       "default": false,
@@ -5694,7 +5819,7 @@
     },
     "project_doc_max_bytes": {
       "default": 32768,
-      "description": "Maximum number of bytes to include from an AGENTS.md project doc file.",
+      "description": "Maximum total bytes of project instruction content across all selected environments.",
       "format": "uint",
       "minimum": 0.0,
       "type": "integer"
@@ -5721,6 +5846,13 @@
       ],
       "default": null,
       "description": "Experimental / do not use. Realtime websocket session selection. `version` controls v1/v2 and `type` controls conversational/transcription."
+    },
+    "responses_api_metadata": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Bounded, product-owned metadata attached to every Responses API request.",
+      "type": "object"
     },
     "review_model": {
       "description": "Review model override used by the `/review` feature.",

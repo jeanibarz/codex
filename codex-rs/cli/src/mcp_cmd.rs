@@ -17,7 +17,7 @@ use codex_core::config::LoaderOverrides;
 use codex_core::config::edit::ConfigEditsBuilder;
 use codex_core::config::find_codex_home;
 use codex_core::config::load_global_mcp_servers;
-use codex_core_plugins::PluginsManager;
+use codex_core::plugins_manager_for_config;
 use codex_exec_server::EnvironmentManager;
 use codex_exec_server::HttpClient;
 use codex_exec_server::RouteAwareHttpClient;
@@ -32,6 +32,7 @@ use codex_mcp::resolve_oauth_scopes;
 use codex_mcp::should_retry_without_scopes;
 use codex_protocol::protocol::McpAuthStatus;
 use codex_rmcp_client::OAuthDiscoveryTimeout;
+use codex_rmcp_client::StreamableHttpRedirectMode;
 use codex_rmcp_client::delete_oauth_tokens;
 use codex_rmcp_client::perform_oauth_login;
 use codex_utils_cli::CliConfigOverrides;
@@ -406,6 +407,7 @@ async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Re
         &transport,
         Arc::clone(&http_client),
         OAuthDiscoveryTimeout::LOCAL,
+        StreamableHttpRedirectMode::Legacy,
     )
     .await;
     match login_support {
@@ -476,7 +478,7 @@ async fn run_remove(config_overrides: &CliConfigOverrides, remove_args: RemoveAr
 }
 
 async fn load_mcp_manager(config: &Config) -> McpManager {
-    let plugins_manager = Arc::new(PluginsManager::new(config.codex_home.to_path_buf()));
+    let plugins_manager = Arc::new(plugins_manager_for_config(config));
     plugins_manager.set_auth_mode(load_cli_auth_mode(config).await);
     McpManager::new(plugins_manager)
 }
@@ -511,6 +513,7 @@ async fn run_login(config: &Config, login_args: LoginArgs) -> Result<()> {
             &server.transport,
             Arc::clone(&http_client),
             OAuthDiscoveryTimeout::LOCAL,
+            StreamableHttpRedirectMode::Legacy,
         )
         .await
     } else {

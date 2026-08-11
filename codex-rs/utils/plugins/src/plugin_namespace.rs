@@ -5,7 +5,6 @@ use crate::PluginSkillRoot;
 use crate::SkillDiscoveryMode;
 use codex_exec_server::ExecutorFileSystem;
 use codex_exec_server_protocol::DISCOVERABLE_PLUGIN_MANIFEST_PATHS;
-use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use std::path::Path;
 use std::path::PathBuf;
@@ -136,38 +135,15 @@ pub async fn plugin_namespace_for_root_uri(
     )
 }
 
-/// Returns the plugin manifest `name` for the nearest ancestor of `path` that contains a valid
-/// plugin manifest (same `name` rules as full manifest loading in codex-core).
-pub async fn plugin_namespace_for_skill_path(
-    fs: &dyn ExecutorFileSystem,
-    path: &AbsolutePathBuf,
-) -> Option<String> {
-    plugin_namespace_for_skill_uri(fs, &PathUri::from_abs_path(path)).await
-}
-
-/// Returns the plugin manifest `name` for the nearest URI ancestor of `path`.
-pub async fn plugin_namespace_for_skill_uri(
-    fs: &dyn ExecutorFileSystem,
-    path: &PathUri,
-) -> Option<String> {
-    let mut ancestor = Some(path.clone());
-    while let Some(path) = ancestor {
-        if let Some(name) = plugin_namespace_for_root_uri(fs, &path).await {
-            return Some(name);
-        }
-        ancestor = path.parent();
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::AGENT_PLUGIN_MANIFEST_RELATIVE_PATH;
     use super::AGENT_PLUGIN_SCHEMA_URI;
     use super::find_plugin_manifest_path;
-    use super::plugin_namespace_for_skill_path;
+    use super::plugin_namespace_for_root_uri;
     use codex_exec_server::LOCAL_FS;
     use codex_utils_absolute_path::test_support::PathBufExt;
+    use codex_utils_path_uri::PathUri;
     use std::fs;
     use tempfile::tempdir;
 
@@ -190,7 +166,11 @@ mod tests {
         fs::write(&skill_path, "---\ndescription: search\n---\n").expect("write skill");
 
         assert_eq!(
-            plugin_namespace_for_skill_path(LOCAL_FS.as_ref(), &skill_path.abs()).await,
+            plugin_namespace_for_root_uri(
+                LOCAL_FS.as_ref(),
+                &PathUri::from_abs_path(&plugin_root.abs()),
+            )
+            .await,
             Some("sample".to_string())
         );
     }
@@ -209,7 +189,11 @@ mod tests {
         fs::write(&skill_path, "---\ndescription: search\n---\n").expect("write skill");
 
         assert_eq!(
-            plugin_namespace_for_skill_path(LOCAL_FS.as_ref(), &skill_path.abs()).await,
+            plugin_namespace_for_root_uri(
+                LOCAL_FS.as_ref(),
+                &PathUri::from_abs_path(&plugin_root.abs()),
+            )
+            .await,
             Some("sample".to_string())
         );
         assert_eq!(find_plugin_manifest_path(&plugin_root), Some(manifest_path));
@@ -229,7 +213,11 @@ mod tests {
         fs::write(&skill_path, "---\ndescription: search\n---\n").expect("write skill");
 
         assert_eq!(
-            plugin_namespace_for_skill_path(LOCAL_FS.as_ref(), &skill_path.abs()).await,
+            plugin_namespace_for_root_uri(
+                LOCAL_FS.as_ref(),
+                &PathUri::from_abs_path(&plugin_root.abs()),
+            )
+            .await,
             Some("sample".to_string())
         );
         assert_eq!(find_plugin_manifest_path(&plugin_root), Some(manifest_path));

@@ -26,9 +26,9 @@ use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
-use codex_protocol::protocol::RolloutItem;
-use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SessionSource;
+use codex_rollout::RolloutItem;
+use codex_rollout::RolloutLine;
 use codex_state::Phase2JobClaimOutcome;
 use codex_utils_absolute_path::test_support::PathExt;
 use core_test_support::responses::ResponseMock;
@@ -399,6 +399,7 @@ async fn memories_startup_phase1_uses_live_thread_service_tier_and_detached_meta
     let metadata: serde_json::Value =
         serde_json::from_str(&metadata_header).expect("turn metadata json");
     assert_eq!(metadata["request_kind"].as_str(), Some("memory"));
+    assert_eq!(metadata["sandbox_mode"].as_str(), Some("read-only"));
     assert!(metadata.get("session_id").is_none());
     assert!(metadata.get("thread_id").is_none());
     assert!(metadata.get("turn_id").is_none());

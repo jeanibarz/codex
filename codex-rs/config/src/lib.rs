@@ -1,3 +1,4 @@
+mod auth_policy;
 mod cloud_config_bundle;
 mod cloud_config_layers;
 mod config_layer_source;
@@ -34,6 +35,7 @@ pub mod types;
 
 pub const CONFIG_TOML_FILE: &str = "config.toml";
 
+pub use auth_policy::ManagedAuthPolicy;
 pub use cloud_config_bundle::CloudConfigBundle;
 pub use cloud_config_bundle::CloudConfigBundleLayers;
 pub use cloud_config_bundle::CloudConfigBundleLoadError;
@@ -58,6 +60,7 @@ pub use config_requirements::AppRequirementToml;
 pub use config_requirements::AppToolRequirementToml;
 pub use config_requirements::AppToolsRequirementsToml;
 pub use config_requirements::AppsRequirementsToml;
+pub use config_requirements::AutoReviewRequirementsToml;
 pub use config_requirements::BrowserUseRequirementsToml;
 pub use config_requirements::ComputerUseRequirementsToml;
 pub use config_requirements::ConfigRequirements;
@@ -151,7 +154,11 @@ pub use requirements_layers::compose_requirements;
 pub use shell_environment_policy::validate_shell_environment_policy_filter_config;
 pub use skills_config::BundledSkillsConfig;
 pub use skills_config::SkillConfig;
+pub use skills_config::SkillConfigRule;
+pub use skills_config::SkillConfigRuleSelector;
+pub use skills_config::SkillConfigRules;
 pub use skills_config::SkillsConfig;
+pub use skills_config::skill_config_rules_from_stack;
 pub use state::ConfigLayerEntry;
 pub use state::ConfigLayerStack;
 pub use state::ConfigLoadOptions;

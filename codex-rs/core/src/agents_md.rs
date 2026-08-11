@@ -64,7 +64,12 @@ pub(crate) async fn load_project_instructions(
     environments: &TurnEnvironmentSnapshot,
 ) -> Option<LoadedAgentsMd> {
     let mut loaded = LoadedAgentsMd::from_user_instructions(user_instructions);
+    let mut remaining = config.project_doc_max_bytes;
     for turn_environment in environments.turn_environments() {
+        if remaining == 0 {
+            break;
+        }
+
         let filesystem = turn_environment.environment.get_filesystem();
         // TODO(anp): Migrate AGENTS.md discovery to PathUri so instructions can be loaded from
         // environment-native foreign working directories.
@@ -77,12 +82,17 @@ pub(crate) async fn load_project_instructions(
             filesystem.as_ref(),
             &turn_environment.environment_id,
             turn_environment.cwd(),
+            remaining,
         )
         .await
         {
             Ok(Some(docs)) => {
                 project_doc_bytes_used =
                     docs.entries.iter().map(|entry| entry.contents.len()).sum();
+                // Preserve fork per-env AGENTS budget semantics: do not share a
+                // single remaining counter across turn environments. Conditional
+                // rules still consume leftover of project_doc_max_bytes after
+                // this environment's AGENTS.md entries.
                 loaded.entries.extend(docs.entries);
             }
             Ok(None) => {}
@@ -204,9 +214,8 @@ async fn read_agents_md(
     fs: &dyn ExecutorFileSystem,
     environment_id: &str,
     cwd: &PathUri,
+    max_total: usize,
 ) -> io::Result<Option<LoadedAgentsMd>> {
-    let max_total = config.project_doc_max_bytes;
-
     if max_total == 0 {
         return Ok(None);
     }

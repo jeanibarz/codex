@@ -19,6 +19,7 @@ use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::ResponsesApiTool;
 use codex_extension_api::ToolCall as ExtensionToolCall;
 use codex_extension_api::ToolExecutor;
+use codex_protocol::DEFAULT_FUNCTION_NAMESPACE;
 use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
 use codex_protocol::dynamic_tools::DynamicToolNamespaceSpec;
 use codex_protocol::dynamic_tools::DynamicToolNamespaceTool;
@@ -268,6 +269,42 @@ async fn build_custom_tool_call_uses_namespace_for_registry_name() -> anyhow::Re
     Ok(())
 }
 
+#[test]
+fn build_tool_call_normalizes_default_function_and_custom_namespaces() -> anyhow::Result<()> {
+    for namespace in [None, Some(""), Some(DEFAULT_FUNCTION_NAMESPACE)] {
+        let function_call = ToolRouter::build_tool_call(ResponseItem::FunctionCall {
+            id: None,
+            name: "lookup".to_string(),
+            namespace: namespace.map(str::to_string),
+            arguments: "{}".to_string(),
+            encrypted_function_args: None,
+            call_id: "call-function".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        })?
+        .expect("function_call should produce a tool call");
+        let custom_call = ToolRouter::build_tool_call(ResponseItem::CustomToolCall {
+            id: None,
+            status: None,
+            call_id: "call-custom".to_string(),
+            name: "apply_patch".to_string(),
+            namespace: namespace.map(str::to_string),
+            input: "patch".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        })?
+        .expect("custom_tool_call should produce a tool call");
+
+        assert_eq!(
+            [function_call.tool_name, custom_call.tool_name],
+            [
+                ToolName::namespaced(DEFAULT_FUNCTION_NAMESPACE, "lookup"),
+                ToolName::namespaced(DEFAULT_FUNCTION_NAMESPACE, "apply_patch"),
+            ]
+        );
+    }
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn mcp_parallel_support_uses_handler_data() -> anyhow::Result<()> {
     let (_, turn) = make_session_and_context().await;
@@ -434,15 +471,22 @@ async fn specs_filter_deferred_dynamic_tools() -> anyhow::Result<()> {
         Vec::new(),
         &dynamic_tools,
     );
+    let visible_specs = router.model_visible_specs();
 
+    assert!(Arc::ptr_eq(&visible_specs, &router.model_visible_specs()));
     assert_eq!(
-        namespace_function_names(&router.model_visible_specs(), "codex_app"),
+        namespace_function_names(&visible_specs, "codex_app"),
         vec![visible_tool.to_string()]
     );
     assert_eq!(
         router.deferred_tool_namespaces(),
         BTreeMap::from([("codex_app".to_string(), "Codex app tools.".to_string())])
     );
+
+    let updated_router = test_tool_router(step_context.as_ref(), Vec::new(), Vec::new(), &[]);
+    let updated_specs = updated_router.model_visible_specs();
+    assert!(!Arc::ptr_eq(&visible_specs, &updated_specs));
+    assert!(namespace_function_names(&updated_specs, "codex_app").is_empty());
 
     Ok(())
 }
@@ -582,6 +626,7 @@ fn namespace_function_names(specs: &[ToolSpec], namespace_name: &str) -> Vec<Str
                     .iter()
                     .map(|tool| match tool {
                         ResponsesApiNamespaceTool::Function(tool) => tool.name.clone(),
+                        ResponsesApiNamespaceTool::Custom(tool) => tool.name.clone(),
                     })
                     .collect(),
             ),

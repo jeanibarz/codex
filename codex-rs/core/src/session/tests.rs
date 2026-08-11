@@ -1,5 +1,4 @@
 use super::mcp_refresh::McpRefresh;
-use super::turn_context::EnvironmentConfig;
 use super::turn_context::TurnEnvironment;
 use super::*;
 use crate::agents_md_manager::AgentsMdManager;
@@ -12,6 +11,7 @@ use crate::context::TurnAborted;
 use crate::environment_selection::ThreadEnvironments;
 use crate::environment_selection::TurnEnvironmentState;
 use crate::function_tool::FunctionCallError;
+use crate::plugins::plugins_manager_for_config;
 use crate::session::step_context::StepContext;
 use crate::shell::default_user_shell;
 use crate::shell_snapshot::ShellSnapshot;
@@ -39,6 +39,7 @@ use codex_http_client::OutboundProxyPolicy;
 use codex_http_client::RouteAwareClientPool;
 use codex_login::CodexAuth;
 use codex_login::auth::AgentIdentityAuthPolicy;
+use codex_model_provider::create_model_provider;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_models_manager::bundled_models_response;
 use codex_models_manager::model_info;
@@ -92,6 +93,8 @@ use crate::tools::handlers::ShellCommandHandler;
 use crate::tools::registry::ToolExecutor;
 use crate::tools::router::ToolCallSource;
 use crate::turn_diff_tracker::TurnDiffTracker;
+use crate::user_message_admission::PendingUserMessageAdmissionState;
+use crate::user_message_admission::UserMessageAdmissionError;
 use codex_config::config_toml::ConfigToml;
 use codex_config::config_toml::ProjectConfig;
 use codex_config::permissions_toml::FilesystemPermissionToml;
@@ -102,6 +105,10 @@ use codex_config::permissions_toml::PermissionsToml;
 use codex_execpolicy::Decision;
 use codex_execpolicy::NetworkRuleProtocol;
 use codex_execpolicy::Policy;
+use codex_history::CompactedItem;
+use codex_history::InitialHistory;
+use codex_history::ResumedHistory;
+use codex_history::RolloutItem;
 use codex_network_proxy::NetworkProxyConfig;
 use codex_otel::MetricsClient;
 use codex_otel::MetricsConfig;
@@ -117,11 +124,9 @@ use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::CodexErrorInfo;
-use codex_protocol::protocol::CompactedItem;
 use codex_protocol::protocol::ConversationAudioParams;
 use codex_protocol::protocol::CreditsSnapshot;
 use codex_protocol::protocol::GranularApprovalConfig;
-use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::NetworkApprovalProtocol;
@@ -131,8 +136,6 @@ use codex_protocol::protocol::RealtimeAudioFrame;
 use codex_protocol::protocol::RealtimeConversationListVoicesResponseEvent;
 use codex_protocol::protocol::RealtimeVoice;
 use codex_protocol::protocol::RealtimeVoicesList;
-use codex_protocol::protocol::ResumedHistory;
-use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::Submission;
@@ -759,15 +762,19 @@ async fn write_project_trust_config(
 async fn preview_session_start_hooks(
     config: &crate::config::Config,
 ) -> std::io::Result<Vec<codex_protocol::protocol::HookRunSummary>> {
-    let hooks = Hooks::new(HooksConfig {
-        feature_enabled: true,
-        config_layer_stack: Some(config.config_layer_stack.clone()),
-        ..HooksConfig::default()
-    });
+    let thread_id = ThreadId::new();
+    let (hooks, _result_receiver) = Hooks::new(
+        HooksConfig {
+            feature_enabled: true,
+            config_layer_stack: Some(config.config_layer_stack.clone()),
+            ..HooksConfig::default()
+        },
+        thread_id,
+    );
 
     Ok(
         hooks.preview_session_start(&codex_hooks::SessionStartRequest {
-            session_id: ThreadId::new(),
+            session_id: thread_id,
             cwd: config.cwd.clone(),
             transcript_path: None,
             model: "gpt-5.2".to_string(),
@@ -1195,35 +1202,22 @@ async fn danger_full_access_tool_attempts_do_not_enforce_managed_network() -> an
         enforce_managed_network: Vec<bool>,
     }
 
-    impl crate::tools::sandboxing::Approvable<()> for ProbeToolRuntime {
-        type ApprovalKey = String;
-
-        fn approval_keys(&self, _req: &()) -> Vec<Self::ApprovalKey> {
-            vec!["probe".to_string()]
-        }
-
-        fn start_approval_async<'a>(
-            &'a mut self,
-            _req: &'a (),
-            _ctx: crate::tools::sandboxing::ApprovalCtx<'a>,
-        ) -> futures::future::BoxFuture<'a, ReviewDecision> {
-            Box::pin(async { ReviewDecision::Approved })
-        }
-
+    impl crate::tools::sandboxing::Approvable<TurnEnvironment> for ProbeToolRuntime {
         fn approval_action(
             &self,
-            _req: &(),
-            ctx: &crate::tools::sandboxing::ApprovalCtx<'_>,
+            _req: &TurnEnvironment,
+            call_id: &str,
         ) -> std::io::Result<crate::tools::sandboxing::ApprovalAction> {
             Ok(crate::tools::sandboxing::ApprovalAction::Shell {
-                id: ctx.call_id.to_string(),
+                id: call_id.to_string(),
                 environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
                 command: Vec::new(),
-                #[allow(deprecated)]
-                cwd: PathUri::from_abs_path(&ctx.turn.cwd),
+                hook_command: String::new(),
+                cwd: PathUri::from_abs_path(&std::env::temp_dir().abs()),
                 sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
                 additional_permissions: None,
                 justification: None,
+                proposed_execpolicy_amendment: None,
             })
         }
     }
@@ -1234,14 +1228,14 @@ async fn danger_full_access_tool_attempts_do_not_enforce_managed_network() -> an
         }
     }
 
-    impl crate::tools::sandboxing::ToolRuntime<(), ()> for ProbeToolRuntime {
-        fn workspace_roots<'a>(&self, _req: &'a ()) -> &'a [PathUri] {
-            &[]
+    impl crate::tools::sandboxing::ToolRuntime<TurnEnvironment, ()> for ProbeToolRuntime {
+        fn turn_environment<'a>(&self, req: &'a TurnEnvironment) -> &'a TurnEnvironment {
+            req
         }
 
         async fn run(
             &mut self,
-            _req: &(),
+            _req: &TurnEnvironment,
             attempt: &crate::tools::sandboxing::SandboxAttempt<'_>,
             _ctx: &crate::tools::sandboxing::ToolCtx,
         ) -> Result<(), crate::tools::sandboxing::ToolError> {
@@ -1297,7 +1291,7 @@ async fn danger_full_access_tool_attempts_do_not_enforce_managed_network() -> an
     let mut tool = ProbeToolRuntime::default();
     let tool_ctx = crate::tools::sandboxing::ToolCtx {
         session: Arc::clone(&session),
-        turn: Arc::clone(&turn),
+        step_context: StepContext::for_test(Arc::clone(&turn)),
         call_id: "probe-call".to_string(),
         tool_name: codex_tools::ToolName::plain("probe"),
     };
@@ -1305,7 +1299,9 @@ async fn danger_full_access_tool_attempts_do_not_enforce_managed_network() -> an
     orchestrator
         .run(
             &mut tool,
-            &(),
+            turn.environments
+                .primary()
+                .expect("turn should have a primary environment"),
             &tool_ctx,
             turn.as_ref(),
             AskForApproval::Never,
@@ -2655,6 +2651,7 @@ async fn recompute_token_usage_uses_session_base_instructions() {
     let history = session.clone_history().await;
     let session_base_instructions = BaseInstructions {
         text: override_instructions,
+        provenance: None,
     };
     let expected_tokens = history
         .estimate_token_count_with_base_instructions(&session_base_instructions)
@@ -3426,7 +3423,7 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
         workspace_roots: None,
         current_date: turn_context.current_date.clone(),
         timezone: turn_context.timezone.clone(),
-        approval_policy: turn_context.approval_policy.value(),
+        approval_policy: turn_context.approval_policy(),
         approvals_reviewer: None,
         sandbox_policy: turn_context.sandbox_policy(),
         permission_profile: None,
@@ -4092,7 +4089,7 @@ async fn set_rate_limits_retains_previous_credits() {
         },
     };
     let session_configuration = SessionConfiguration {
-        provider: config.model_provider.clone(),
+        provider: create_model_provider(config.model_provider.clone(), /*auth_manager*/ None),
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
         developer_instructions: config.developer_instructions.clone(),
@@ -4114,6 +4111,7 @@ async fn set_rate_limits_retains_previous_credits() {
         metrics_service_name: None,
         app_server_client_name: None,
         app_server_client_version: None,
+        trusted_guardian_reviewer: false,
         session_source: SessionSource::Exec,
         history_mode: Default::default(),
         forked_from_thread_id: None,
@@ -4201,7 +4199,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
         },
     };
     let session_configuration = SessionConfiguration {
-        provider: config.model_provider.clone(),
+        provider: create_model_provider(config.model_provider.clone(), /*auth_manager*/ None),
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
         developer_instructions: config.developer_instructions.clone(),
@@ -4223,6 +4221,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
         metrics_service_name: None,
         app_server_client_name: None,
         app_server_client_version: None,
+        trusted_guardian_reviewer: false,
         session_source: SessionSource::Exec,
         history_mode: Default::default(),
         forked_from_thread_id: None,
@@ -4513,7 +4512,9 @@ async fn open_thread_persistence(session: &mut Session) -> PathBuf {
 
 async fn attach_thread_persistence(session: &mut Session) -> PathBuf {
     let rollout_path = open_thread_persistence(session).await;
-    session.ensure_rollout_materialized().await;
+    session
+        .ensure_rollout_materialized(PersistContext::Standard)
+        .await;
     session
         .flush_rollout()
         .await
@@ -4747,7 +4748,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
     };
 
     SessionConfiguration {
-        provider: config.model_provider.clone(),
+        provider: create_model_provider(config.model_provider.clone(), /*auth_manager*/ None),
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
         developer_instructions: config.developer_instructions.clone(),
@@ -4769,6 +4770,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
         metrics_service_name: None,
         app_server_client_name: None,
         app_server_client_version: None,
+        trusted_guardian_reviewer: false,
         session_source: SessionSource::Exec,
         history_mode: Default::default(),
         forked_from_thread_id: None,
@@ -4870,17 +4872,15 @@ async fn resolved_environments_for_configuration(
     let turn_environments = ThreadEnvironments::new(
         Arc::clone(&environment_manager),
         default_user_shell(),
-        EnvironmentConfig {
-            allow_login_shell: session_configuration
-                .original_config_do_not_use
-                .permissions
-                .allow_login_shell,
-        },
+        session_configuration.turn_environment_config(),
         ShellSnapshot::disabled(),
         TurnEnvironmentSnapshot::default(),
         /*non_blocking_snapshots*/ false,
     );
-    turn_environments.update_selections(session_configuration.environment_selections());
+    turn_environments.update_selections(
+        session_configuration.environment_selections(),
+        &session_configuration.turn_environment_config(),
+    );
     (environment_manager, turn_environments.snapshot().await)
 }
 
@@ -5185,6 +5185,7 @@ async fn new_default_turn_uses_config_aware_skills_for_role_overrides() {
     let parent_snapshot = session
         .services
         .skills_service
+        .for_request()
         .snapshot_for_cwd(
             &crate::skills_load_input_from_config(&parent_config, Vec::new()),
             /*force_reload*/ true,
@@ -5363,6 +5364,61 @@ async fn session_update_settings_does_not_rewrite_sticky_environment_cwds() {
 }
 
 #[tokio::test]
+async fn permission_profile_updates_apply_to_next_turn_environment() {
+    for apply_on_turn_start in [false, true] {
+        let (session, active_turn) = make_session_and_context().await;
+        let active_environment_config = active_turn
+            .environments
+            .primary()
+            .expect("active turn environment")
+            .config
+            .clone();
+        let profile_root = active_turn.config.cwd.join("profile-root");
+        let active_profile = ActivePermissionProfile::read_only();
+        let updates = SessionSettingsUpdate {
+            permission_profile: Some(PermissionProfile::read_only()),
+            active_permission_profile: Some(active_profile.clone()),
+            profile_workspace_roots: Some(vec![profile_root.clone()]),
+            ..Default::default()
+        };
+
+        let next_turn = if apply_on_turn_start {
+            session
+                .new_turn_with_sub_id("permission-profile-update".to_string(), updates)
+                .await
+                .expect("turn permission profile update should succeed")
+        } else {
+            session
+                .update_settings(updates)
+                .await
+                .expect("permission profile update should succeed");
+            session.new_default_turn().await
+        };
+        let next_environment = next_turn
+            .environments
+            .primary()
+            .expect("next turn environment");
+        let mut expected_environment_config = active_environment_config.clone();
+        expected_environment_config.permission_profile =
+            PermissionProfileSnapshot::active_with_profile_workspace_roots(
+                PermissionProfile::read_only(),
+                active_profile,
+                vec![profile_root],
+            );
+
+        assert_eq!(next_environment.config, expected_environment_config);
+        assert_eq!(
+            active_turn
+                .environments
+                .primary()
+                .expect("active turn environment")
+                .config,
+            active_environment_config
+        );
+    }
+}
+
+#[tokio::test]
 async fn relative_cwd_update_without_environments_resolves_under_session_cwd() {
     let (session, _turn_context) = make_session_and_context().await;
     let original_cwd = {
@@ -5486,7 +5542,10 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         },
     };
     let session_configuration = SessionConfiguration {
-        provider: config.model_provider.clone(),
+        provider: create_model_provider(
+            config.model_provider.clone(),
+            Some(Arc::clone(&auth_manager)),
+        ),
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
         developer_instructions: config.developer_instructions.clone(),
@@ -5508,6 +5567,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         metrics_service_name: None,
         app_server_client_name: None,
         app_server_client_version: None,
+        trusted_guardian_reviewer: false,
         session_source: SessionSource::Exec,
         history_mode: Default::default(),
         forked_from_thread_id: None,
@@ -5520,9 +5580,9 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
 
     let (tx_event, _rx_event) = async_channel::unbounded();
     let (agent_status_tx, _agent_status_rx) = watch::channel(AgentStatus::PendingInit);
-    let plugins_manager = Arc::new(PluginsManager::new(config.codex_home.to_path_buf()));
+    let plugins_manager = Arc::new(plugins_manager_for_config(&config));
     let mcp_manager = Arc::new(McpManager::new(Arc::clone(&plugins_manager)));
-    let skills_service = Arc::new(SkillsService::new(
+    let skills_service = Arc::new(HostSkillsService::new(
         config.codex_home.clone(),
         /*bundled_skills_enabled*/ true,
     ));
@@ -5534,6 +5594,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         "11111111-1111-4111-8111-111111111111".to_string(),
         auth_manager,
         models_manager,
+        model_info,
         Arc::new(ExecPolicyManager::default()),
         tx_event,
         agent_status_tx,
@@ -5546,7 +5607,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         Arc::new(codex_code_mode::DisabledCodeModeSessionProvider),
         Arc::new(codex_extension_api::ExtensionRegistryBuilder::new().build()),
         codex_extension_api::ExtensionDataInit::default(),
-        /*supports_openai_form_elicitation*/ false,
+        ClientMcpExtensions::default(),
         AgentControl::default(),
         environment_manager,
         /*inherited_environments*/ None,
@@ -5623,7 +5684,10 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
     };
     let default_environments = vec![local(config.cwd.clone())];
     let session_configuration = SessionConfiguration {
-        provider: config.model_provider.clone(),
+        provider: create_model_provider(
+            config.model_provider.clone(),
+            Some(Arc::clone(&auth_manager)),
+        ),
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
         developer_instructions: config.developer_instructions.clone(),
@@ -5645,6 +5709,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         metrics_service_name: None,
         app_server_client_name: None,
         app_server_client_version: None,
+        trusted_guardian_reviewer: false,
         session_source: SessionSource::Exec,
         history_mode: Default::default(),
         forked_from_thread_id: None,
@@ -5674,9 +5739,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
     let turn_environments = Arc::new(ThreadEnvironments::new(
         environment_manager,
         default_user_shell(),
-        EnvironmentConfig {
-            allow_login_shell: config.permissions.allow_login_shell,
-        },
+        session_configuration.turn_environment_config(),
         ShellSnapshot::disabled(),
         resolved_environments,
         /*non_blocking_snapshots*/ false,
@@ -5687,9 +5750,9 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
             .expect("primary environment")
             .environment,
     );
-    let plugins_manager = Arc::new(PluginsManager::new(config.codex_home.to_path_buf()));
+    let plugins_manager = Arc::new(plugins_manager_for_config(&config));
     let mcp_manager = Arc::new(McpManager::new(Arc::clone(&plugins_manager)));
-    let skills_service = Arc::new(SkillsService::new(
+    let skills_service = Arc::new(HostSkillsService::new(
         config.codex_home.clone(),
         /*bundled_skills_enabled*/ true,
     ));
@@ -5699,8 +5762,16 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         .features
         .enabled(Feature::ExecutedToolCallMetadata)
         .then(|| Arc::new(crate::state::ExecutedToolCallRecorder::default()));
+    let (hooks, async_hook_results) = Hooks::new(
+        HooksConfig {
+            legacy_notify_argv: config.notify.clone(),
+            ..HooksConfig::default()
+        },
+        thread_id,
+    );
     let services = SessionServices {
         mcp_runtime,
+        mcp_handler_cache: Default::default(),
         unified_exec_manager: UnifiedExecProcessManager::new(
             config.background_terminal_max_timeout,
         ),
@@ -5712,10 +5783,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
             config.chatgpt_base_url.trim_end_matches('/').to_string(),
             config.analytics_enabled,
         ),
-        hooks: arc_swap::ArcSwap::from_pointee(Hooks::new(HooksConfig {
-            legacy_notify_argv: config.notify.clone(),
-            ..HooksConfig::default()
-        })),
+        hooks: arc_swap::ArcSwap::from_pointee(hooks),
         rollout_thread_trace: codex_rollout_trace::ThreadTraceContext::disabled(),
         user_shell: Arc::new(default_user_shell()),
         show_raw_agent_reasoning: config.show_raw_agent_reasoning,
@@ -5742,7 +5810,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         thread_extension_data: codex_extension_api::ExtensionData::new(thread_id.to_string()),
         selected_capability_roots: Vec::new(),
         mcp_thread_init: codex_extension_api::ExtensionDataInit::default(),
-        supports_openai_form_elicitation: std::sync::atomic::AtomicBool::new(false),
+        client_mcp_extensions: ClientMcpExtensions::default(),
         agent_control,
         network_proxy: arc_swap::ArcSwapOption::from(None),
         network_proxy_audit_metadata: crate::config::NetworkProxyAuditMetadata::default(),
@@ -5760,7 +5828,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
             Some(auth_manager.clone()),
             AgentIdentityAuthPolicy::JwtOnly,
             thread_id,
-            session_configuration.provider.clone(),
+            session_configuration.provider.info().clone(),
             session_configuration.session_source.clone(),
             session_configuration.originator.clone(),
             config.model_verbosity,
@@ -5777,7 +5845,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         executed_tool_calls,
         code_mode_service: crate::tools::code_mode::CodeModeService::new(
             Arc::new(codex_code_mode::DisabledCodeModeSessionProvider),
-            &config.features,
+            &config.code_mode,
         ),
         tool_search_handler_cache: Default::default(),
         turn_environments: Arc::clone(&turn_environments),
@@ -5839,6 +5907,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         mcp_prewarm_task: std::sync::Mutex::new(None),
         conversation: Arc::new(RealtimeConversationManager::new()),
         active_turn: Mutex::new(None),
+        async_hook_results,
         pending_user_message_admissions: Default::default(),
         input_queue: super::input_queue::InputQueue::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
@@ -5895,7 +5964,10 @@ async fn make_session_with_config_and_rx(
     };
     let default_environments = vec![local(config.cwd.clone())];
     let session_configuration = SessionConfiguration {
-        provider: config.model_provider.clone(),
+        provider: create_model_provider(
+            config.model_provider.clone(),
+            Some(Arc::clone(&auth_manager)),
+        ),
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
         developer_instructions: config.developer_instructions.clone(),
@@ -5917,6 +5989,7 @@ async fn make_session_with_config_and_rx(
         metrics_service_name: None,
         app_server_client_name: None,
         app_server_client_version: None,
+        trusted_guardian_reviewer: false,
         session_source: SessionSource::Exec,
         history_mode: Default::default(),
         forked_from_thread_id: None,
@@ -5929,9 +6002,9 @@ async fn make_session_with_config_and_rx(
 
     let (tx_event, rx_event) = async_channel::unbounded();
     let (agent_status_tx, _agent_status_rx) = watch::channel(AgentStatus::PendingInit);
-    let plugins_manager = Arc::new(PluginsManager::new(config.codex_home.to_path_buf()));
+    let plugins_manager = Arc::new(plugins_manager_for_config(&config));
     let mcp_manager = Arc::new(McpManager::new(Arc::clone(&plugins_manager)));
-    let skills_service = Arc::new(SkillsService::new(
+    let skills_service = Arc::new(HostSkillsService::new(
         config.codex_home.clone(),
         /*bundled_skills_enabled*/ true,
     ));
@@ -5944,6 +6017,7 @@ async fn make_session_with_config_and_rx(
         "11111111-1111-4111-8111-111111111111".to_string(),
         auth_manager,
         models_manager,
+        model_info,
         Arc::new(ExecPolicyManager::default()),
         tx_event,
         agent_status_tx,
@@ -5956,7 +6030,7 @@ async fn make_session_with_config_and_rx(
         Arc::new(codex_code_mode::DisabledCodeModeSessionProvider),
         Arc::new(codex_extension_api::ExtensionRegistryBuilder::new().build()),
         codex_extension_api::ExtensionDataInit::default(),
-        /*supports_openai_form_elicitation*/ false,
+        ClientMcpExtensions::default(),
         AgentControl::default(),
         environment_manager,
         /*inherited_environments*/ None,
@@ -6005,7 +6079,10 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
     };
     let default_environments = vec![local(config.cwd.clone())];
     let session_configuration = SessionConfiguration {
-        provider: config.model_provider.clone(),
+        provider: create_model_provider(
+            config.model_provider.clone(),
+            Some(Arc::clone(&auth_manager)),
+        ),
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
         developer_instructions: config.developer_instructions.clone(),
@@ -6027,6 +6104,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         metrics_service_name: None,
         app_server_client_name: None,
         app_server_client_version: None,
+        trusted_guardian_reviewer: false,
         session_source: session_source.clone(),
         history_mode: Default::default(),
         forked_from_thread_id: None,
@@ -6039,9 +6117,9 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
 
     let (tx_event, rx_event) = async_channel::unbounded();
     let (agent_status_tx, _agent_status_rx) = watch::channel(AgentStatus::PendingInit);
-    let plugins_manager = Arc::new(PluginsManager::new(config.codex_home.to_path_buf()));
+    let plugins_manager = Arc::new(plugins_manager_for_config(&config));
     let mcp_manager = Arc::new(McpManager::new(Arc::clone(&plugins_manager)));
-    let skills_service = Arc::new(SkillsService::new(
+    let skills_service = Arc::new(HostSkillsService::new(
         config.codex_home.clone(),
         /*bundled_skills_enabled*/ true,
     ));
@@ -6054,6 +6132,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         "11111111-1111-4111-8111-111111111111".to_string(),
         auth_manager,
         models_manager,
+        model_info,
         Arc::new(ExecPolicyManager::default()),
         tx_event,
         agent_status_tx,
@@ -6066,7 +6145,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         Arc::new(codex_code_mode::DisabledCodeModeSessionProvider),
         Arc::new(codex_extension_api::ExtensionRegistryBuilder::new().build()),
         codex_extension_api::ExtensionDataInit::default(),
-        /*supports_openai_form_elicitation*/ false,
+        ClientMcpExtensions::default(),
         agent_control,
         environment_manager,
         /*inherited_environments*/ None,
@@ -6362,8 +6441,9 @@ fn strict_auto_review_session_scope_grants_no_permissions() {
 async fn request_permissions_emits_event_when_granular_policy_allows_requests() {
     let (session, mut turn_context, rx) = make_session_and_context_with_rx().await;
     *session.active_turn.lock().await = Some(ActiveTurn::default());
-    Arc::get_mut(&mut turn_context)
-        .expect("single thread settings ref")
+    let turn_context_mut = Arc::get_mut(&mut turn_context).expect("single thread settings ref");
+    Arc::make_mut(&mut turn_context_mut.config)
+        .permissions
         .approval_policy
         .set(AskForApproval::Granular(GranularApprovalConfig {
             sandbox_approval: true,
@@ -6400,7 +6480,7 @@ async fn request_permissions_emits_event_when_granular_policy_allows_requests() 
                 .selection();
             session
                 .request_permissions_for_environment(
-                    &turn_context,
+                    turn_context.as_ref(),
                     call_id,
                     codex_protocol::request_permissions::RequestPermissionsArgs {
                         environment_id: None,
@@ -6458,7 +6538,8 @@ async fn request_permissions_tool_resolves_relative_paths_against_selected_envir
     };
     std::fs::create_dir_all(environment_cwd.as_path()).expect("create environment cwd");
     let turn_context_mut = Arc::get_mut(&mut turn_context).expect("single thread settings ref");
-    turn_context_mut
+    Arc::make_mut(&mut turn_context_mut.config)
+        .permissions
         .approval_policy
         .set(AskForApproval::Granular(GranularApprovalConfig {
             sandbox_approval: true,
@@ -6606,8 +6687,9 @@ async fn request_permissions_tool_rejects_unknown_environment_id() {
 async fn request_permissions_response_materializes_session_cwd_grants_before_recording() {
     let (session, mut turn_context, rx) = make_session_and_context_with_rx().await;
     *session.active_turn.lock().await = Some(ActiveTurn::default());
-    Arc::get_mut(&mut turn_context)
-        .expect("single thread settings ref")
+    let turn_context_mut = Arc::get_mut(&mut turn_context).expect("single thread settings ref");
+    Arc::make_mut(&mut turn_context_mut.config)
+        .permissions
         .approval_policy
         .set(AskForApproval::Granular(GranularApprovalConfig {
             sandbox_approval: true,
@@ -6648,7 +6730,7 @@ async fn request_permissions_response_materializes_session_cwd_grants_before_rec
                 .selection();
             session
                 .request_permissions_for_environment(
-                    &turn_context,
+                    turn_context.as_ref(),
                     call_id,
                     codex_protocol::request_permissions::RequestPermissionsArgs {
                         environment_id: None,
@@ -6717,8 +6799,9 @@ async fn request_permissions_response_materializes_session_cwd_grants_before_rec
 async fn request_permissions_is_auto_denied_when_granular_policy_blocks_tool_requests() {
     let (session, mut turn_context, rx) = make_session_and_context_with_rx().await;
     *session.active_turn.lock().await = Some(ActiveTurn::default());
-    Arc::get_mut(&mut turn_context)
-        .expect("single thread settings ref")
+    let turn_context_mut = Arc::get_mut(&mut turn_context).expect("single thread settings ref");
+    Arc::make_mut(&mut turn_context_mut.config)
+        .permissions
         .approval_policy
         .set(AskForApproval::Granular(GranularApprovalConfig {
             sandbox_approval: true,
@@ -6739,7 +6822,7 @@ async fn request_permissions_is_auto_denied_when_granular_policy_blocks_tool_req
         .selection();
     let response = session
         .request_permissions_for_environment(
-            &turn_context,
+            turn_context.as_ref(),
             call_id,
             codex_protocol::request_permissions::RequestPermissionsArgs {
                 environment_id: None,
@@ -7060,14 +7143,18 @@ async fn turn_environments_set_primary_environment() {
 
 #[tokio::test]
 async fn default_turn_does_not_overlay_legacy_fallback_cwd_onto_stored_thread_environments() {
-    let (session, _turn_context, _rx) = make_session_and_context_with_rx().await;
+    let (session, initial_turn, _rx) = make_session_and_context_with_rx().await;
     let session_cwd = session.get_config().await.cwd.clone();
     let selected_cwd =
         AbsolutePathBuf::try_from(session_cwd.as_path().join("selected")).expect("absolute path");
-    session
-        .services
-        .turn_environments
-        .update_selections(&[local(selected_cwd.clone())]);
+    session.services.turn_environments.update_selections(
+        &[local(selected_cwd.clone())],
+        &initial_turn
+            .environments
+            .primary()
+            .expect("initial turn environment")
+            .config,
+    );
     {
         let mut state = session.state.lock().await;
         state.session_configuration.environments.environments = vec![local(selected_cwd.clone())];
@@ -7096,10 +7183,17 @@ async fn default_turn_does_not_overlay_legacy_fallback_cwd_onto_stored_thread_en
 
 #[tokio::test]
 async fn default_turn_honors_empty_stored_thread_environments() {
-    let (session, _turn_context, _rx) = make_session_and_context_with_rx().await;
+    let (session, initial_turn, _rx) = make_session_and_context_with_rx().await;
     let session_cwd = session.get_config().await.cwd.clone();
 
-    session.services.turn_environments.update_selections(&[]);
+    session.services.turn_environments.update_selections(
+        &[],
+        &initial_turn
+            .environments
+            .primary()
+            .expect("initial turn environment")
+            .config,
+    );
     {
         let mut state = session.state.lock().await;
         state.session_configuration.environments.environments = Vec::new();
@@ -7351,9 +7445,41 @@ async fn shutdown_complete_does_not_append_to_thread_store_after_shutdown() {
     .expect("create thread persistence");
     session.services.thread_store = thread_store;
     session.services.live_thread = Some(live_thread);
+    let (result_sender, result_receiver) = async_channel::unbounded();
+    result_sender
+        .try_send(
+            serde_json::from_value::<codex_protocol::protocol::HookCompletedEvent>(json!({
+                "turn_id": "turn-1",
+                "run": {
+                    "id": "user_prompt_submit:0:hooks.json",
+                    "event_name": "user_prompt_submit",
+                    "handler_type": "command",
+                    "execution_mode": "async",
+                    "scope": "turn",
+                    "source_path": config.cwd.join("hooks.json"),
+                    "source": "user",
+                    "display_order": 0,
+                    "status": "completed",
+                    "status_message": null,
+                    "started_at": 0,
+                    "completed_at": 1,
+                    "duration_ms": 1,
+                    "entries": [{
+                        "kind": "context",
+                        "text": "must not be persisted during shutdown"
+                    }]
+                }
+            }))
+            .expect("valid buffered async hook result"),
+        )
+        .expect("buffer an async hook result before shutdown");
+    session.async_hook_results = result_receiver;
     let session = Arc::new(session);
 
     assert!(handlers::shutdown(&session, "sub-1".to_string()).await);
+    assert!(session.async_hook_results.is_closed());
+    assert!(session.async_hook_results.is_empty());
+    assert!(result_sender.is_closed());
 
     assert_eq!(
         codex_thread_store::InMemoryThreadStoreCalls {
@@ -7551,7 +7677,7 @@ async fn shutdown_and_wait_allows_multiple_waiters() {
     let (_tx_event, rx_event) = async_channel::unbounded();
     let session_loop_handle = tokio::spawn(async move {
         let shutdown: Submission = rx_sub.recv().await.expect("shutdown submission");
-        assert_eq!(shutdown.op, Op::Shutdown);
+        assert!(matches!(shutdown.op, Op::Shutdown));
         tokio::time::sleep(StdDuration::from_millis(50)).await;
     });
     let io = Arc::new(SessionIo {
@@ -7642,7 +7768,7 @@ async fn shutdown_and_wait_shuts_down_cached_guardian_subagent() {
             .recv()
             .await
             .expect("child shutdown submission");
-        assert_eq!(shutdown.op, Op::Shutdown);
+        assert!(matches!(shutdown.op, Op::Shutdown));
         child_shutdown_tx
             .send(())
             .expect("child shutdown signal should be delivered");
@@ -7727,7 +7853,7 @@ async fn shutdown_and_wait_shuts_down_tracked_ephemeral_guardian_review() {
             .recv()
             .await
             .expect("child shutdown submission");
-        assert_eq!(shutdown.op, Op::Shutdown);
+        assert!(matches!(shutdown.op, Op::Shutdown));
         child_shutdown_tx
             .send(())
             .expect("child shutdown signal should be delivered");
@@ -7818,7 +7944,10 @@ where
     };
     let default_environments = vec![local(config.cwd.clone())];
     let session_configuration = SessionConfiguration {
-        provider: config.model_provider.clone(),
+        provider: create_model_provider(
+            config.model_provider.clone(),
+            Some(Arc::clone(&auth_manager)),
+        ),
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
         developer_instructions: config.developer_instructions.clone(),
@@ -7840,6 +7969,7 @@ where
         metrics_service_name: None,
         app_server_client_name: None,
         app_server_client_version: None,
+        trusted_guardian_reviewer: false,
         session_source: SessionSource::Exec,
         history_mode: Default::default(),
         forked_from_thread_id: None,
@@ -7868,9 +7998,7 @@ where
     let turn_environments = Arc::new(ThreadEnvironments::new(
         environment_manager,
         default_user_shell(),
-        EnvironmentConfig {
-            allow_login_shell: config.permissions.allow_login_shell,
-        },
+        session_configuration.turn_environment_config(),
         ShellSnapshot::disabled(),
         resolved_turn_environments.clone(),
         /*non_blocking_snapshots*/ false,
@@ -7881,9 +8009,9 @@ where
             .expect("primary environment")
             .environment,
     );
-    let plugins_manager = Arc::new(PluginsManager::new(config.codex_home.to_path_buf()));
+    let plugins_manager = Arc::new(plugins_manager_for_config(&config));
     let mcp_manager = Arc::new(McpManager::new(Arc::clone(&plugins_manager)));
-    let skills_service = Arc::new(SkillsService::new(
+    let skills_service = Arc::new(HostSkillsService::new(
         config.codex_home.clone(),
         /*bundled_skills_enabled*/ true,
     ));
@@ -7893,8 +8021,16 @@ where
         .features
         .enabled(Feature::ExecutedToolCallMetadata)
         .then(|| Arc::new(crate::state::ExecutedToolCallRecorder::default()));
+    let (hooks, async_hook_results) = Hooks::new(
+        HooksConfig {
+            legacy_notify_argv: config.notify.clone(),
+            ..HooksConfig::default()
+        },
+        thread_id,
+    );
     let services = SessionServices {
         mcp_runtime,
+        mcp_handler_cache: Default::default(),
         unified_exec_manager: UnifiedExecProcessManager::new(
             config.background_terminal_max_timeout,
         ),
@@ -7906,10 +8042,7 @@ where
             config.chatgpt_base_url.trim_end_matches('/').to_string(),
             config.analytics_enabled,
         ),
-        hooks: arc_swap::ArcSwap::from_pointee(Hooks::new(HooksConfig {
-            legacy_notify_argv: config.notify.clone(),
-            ..HooksConfig::default()
-        })),
+        hooks: arc_swap::ArcSwap::from_pointee(hooks),
         rollout_thread_trace: codex_rollout_trace::ThreadTraceContext::disabled(),
         user_shell: Arc::new(default_user_shell()),
         show_raw_agent_reasoning: config.show_raw_agent_reasoning,
@@ -7936,7 +8069,7 @@ where
         thread_extension_data: codex_extension_api::ExtensionData::new(thread_id.to_string()),
         selected_capability_roots: Vec::new(),
         mcp_thread_init: codex_extension_api::ExtensionDataInit::default(),
-        supports_openai_form_elicitation: std::sync::atomic::AtomicBool::new(false),
+        client_mcp_extensions: ClientMcpExtensions::default(),
         agent_control,
         network_proxy: arc_swap::ArcSwapOption::from(None),
         network_proxy_audit_metadata: crate::config::NetworkProxyAuditMetadata::default(),
@@ -7954,7 +8087,7 @@ where
             Some(Arc::clone(&auth_manager)),
             AgentIdentityAuthPolicy::JwtOnly,
             thread_id,
-            session_configuration.provider.clone(),
+            session_configuration.provider.info().clone(),
             session_configuration.session_source.clone(),
             session_configuration.originator.clone(),
             config.model_verbosity,
@@ -7971,7 +8104,7 @@ where
         executed_tool_calls,
         code_mode_service: crate::tools::code_mode::CodeModeService::new(
             Arc::new(codex_code_mode::DisabledCodeModeSessionProvider),
-            &config.features,
+            &config.code_mode,
         ),
         tool_search_handler_cache: Default::default(),
         turn_environments: Arc::clone(&turn_environments),
@@ -8033,6 +8166,7 @@ where
         mcp_prewarm_task: std::sync::Mutex::new(None),
         conversation: Arc::new(RealtimeConversationManager::new()),
         active_turn: Mutex::new(None),
+        async_hook_results,
         pending_user_message_admissions: Default::default(),
         input_queue: super::input_queue::InputQueue::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
@@ -8110,6 +8244,18 @@ async fn refresh_mcp_servers_uses_latest_state_for_existing_turns() {
         .capture_step_context(next_turn, &CancellationToken::new())
         .await
         .expect("a fresh cancellation token cannot be cancelled");
+    assert!(
+        !Arc::ptr_eq(&old_step.mcp, &new_step.mcp),
+        "publishing a new MCP runtime must invalidate cached bindings"
+    );
+    let refreshed_old_step = session
+        .capture_step_context(Arc::clone(&turn_context), &CancellationToken::new())
+        .await
+        .expect("capture an existing turn after its MCP runtime is republished");
+    assert!(
+        Arc::ptr_eq(&new_step.mcp, &refreshed_old_step.mcp),
+        "existing turns should reuse the newly published immutable MCP binding"
+    );
     let rematerialized_old = session
         .mcp_runtime_for_step(
             &turn_context,
@@ -8147,7 +8293,17 @@ async fn refresh_mcp_servers_uses_latest_state_for_existing_turns() {
 async fn refreshed_mcp_binding_captures_current_approval_authority() {
     let (session, old_turn) = make_session_and_context().await;
     let session = Arc::new(session);
-    let previous_policy = old_turn.approval_policy.value();
+    let old_turn = Arc::new(old_turn);
+    let previous_policy = old_turn.approval_policy();
+    assert_ne!(previous_policy, AskForApproval::Never);
+    assert_eq!(
+        old_turn.config.permissions.approval_policy.value(),
+        previous_policy
+    );
+    let old_step = session
+        .capture_step_context(Arc::clone(&old_turn), &CancellationToken::new())
+        .await
+        .expect("capture initial sampling step");
 
     session
         .update_settings(SessionSettingsUpdate {
@@ -8166,6 +8322,18 @@ async fn refreshed_mcp_binding_captures_current_approval_authority() {
         .current_binding()
         .await
         .expect("refreshed runtime should be available");
+    assert!(
+        !Arc::ptr_eq(&old_step.mcp, &binding),
+        "changed approval authority must invalidate the cached MCP binding"
+    );
+    let refreshed_step = session
+        .capture_step_context(Arc::clone(&old_turn), &CancellationToken::new())
+        .await
+        .expect("capture existing turn after its approval authority changes");
+    assert!(
+        Arc::ptr_eq(&binding, &refreshed_step.mcp),
+        "existing turns must use the MCP binding with current approval authority"
+    );
     let config = binding.config();
     assert_eq!(
         (
@@ -8179,7 +8347,18 @@ async fn refreshed_mcp_binding_captures_current_approval_authority() {
             ApprovalsReviewer::AutoReview,
         )
     );
-    assert_eq!(old_turn.approval_policy.value(), previous_policy);
+    assert_eq!(old_turn.approval_policy(), previous_policy);
+    assert_eq!(
+        old_turn.config.permissions.approval_policy.value(),
+        previous_policy
+    );
+
+    let new_turn = session.new_default_turn().await;
+    assert_eq!(new_turn.approval_policy(), AskForApproval::Never);
+    assert_eq!(
+        new_turn.config.permissions.approval_policy.value(),
+        AskForApproval::Never
+    );
 }
 
 #[tokio::test]
@@ -8441,20 +8620,19 @@ async fn conflicting_ready_environment_root_ids_keep_first_location() {
             environment_id,
             ..
         } = &selected_root.location;
-        let registration = environment_manager
-            .register_deferred_noise_environment(
-                environment_id.clone(),
-                Arc::new(PendingNoiseConnectProvider),
-            )
-            .expect("register deferred environment");
+        let provider = Arc::new(PendingNoiseConnectProvider);
         let environment = environment_manager
-            .get_environment(environment_id)
-            .expect("deferred environment");
-        registration
-            .complete(Ok(codex_exec_server::EnvironmentReadyInfo {
-                selected_capability_roots: vec![selected_root.clone()],
-            }))
-            .expect("complete deferred environment");
+            .materialize_pending_noise_environment(environment_id.clone(), provider.clone())
+            .expect("materialize deferred environment");
+        environment_manager
+            .report_environment_provisioning_status(
+                environment_id.clone(),
+                Ok(codex_exec_server::EnvironmentReadyInfo {
+                    selected_capability_roots: vec![selected_root.clone()],
+                }),
+                provider,
+            )
+            .expect("report environment ready");
         turn_environments.push(TurnEnvironment::new(
             environment_id.clone(),
             environment,
@@ -8492,6 +8670,52 @@ async fn conflicting_ready_environment_root_ids_keep_first_location() {
             .map(|_| Ok(()))
             .unwrap_or_else(|| Err("expected conflicting root location warning".to_string()))
     });
+}
+
+#[tokio::test]
+async fn capability_discovery_uses_environment_permission_profile() {
+    let (session, mut turn_context) = make_session_and_context().await;
+    Arc::make_mut(&mut turn_context.config)
+        .permissions
+        .set_permission_profile(PermissionProfile::Disabled)
+        .expect("unrestricted permission profile should be allowed");
+    let mut environment = turn_context
+        .environments
+        .primary()
+        .expect("primary environment")
+        .clone();
+    let mut file_system_policy = PermissionProfile::read_only().file_system_sandbox_policy();
+    file_system_policy.entries.push(FileSystemSandboxEntry {
+        path: FileSystemPath::GlobPattern {
+            pattern: "**/*.env".to_string(),
+        },
+        access: FileSystemAccessMode::Deny,
+        missing_path_behavior: None,
+    });
+    environment.config.permission_profile =
+        PermissionProfileSnapshot::legacy(PermissionProfile::from_runtime_permissions(
+            &file_system_policy,
+            NetworkSandboxPolicy::Restricted,
+        ));
+    let expected_sandbox = turn_context
+        .file_system_sandbox_context(/*additional_permissions*/ None, &environment);
+    let environment_id = environment.environment_id.clone();
+    turn_context.environments.environments[0] = TurnEnvironmentState::Ready(environment);
+
+    let discovery = session
+        .executor_capability_discovery_for_step(
+            &turn_context.config,
+            /*ready_selected_capability_roots*/ &[],
+            &turn_context.environments,
+            turn_context.windows_sandbox_level,
+        )
+        .await
+        .expect("restricted environment should trigger capability discovery");
+
+    assert_eq!(
+        discovery.sandbox_contexts().get(&environment_id),
+        Some(&expected_sandbox)
+    );
 }
 
 #[tokio::test]
@@ -8687,6 +8911,70 @@ async fn record_context_updates_emits_environment_item_for_cwd_changes() {
         "{environment_update}"
     );
     assert!(!environment_update.contains("<environments>"));
+}
+
+#[tokio::test]
+async fn record_context_updates_use_environment_permission_profile_and_workspace_roots() {
+    let (session, mut previous_context) = make_session_and_context().await;
+    Arc::make_mut(&mut previous_context.config)
+        .permissions
+        .set_permission_profile(PermissionProfile::Disabled)
+        .expect("unrestricted permission profile should be allowed");
+    let mut previous_environment = previous_context
+        .environments
+        .primary()
+        .expect("primary environment")
+        .clone();
+    previous_environment.config.permission_profile =
+        PermissionProfileSnapshot::legacy(PermissionProfile::Disabled);
+    previous_context.environments.environments[0] =
+        TurnEnvironmentState::Ready(previous_environment);
+    let previous_context = Arc::new(previous_context);
+    let mut current_context = previous_context
+        .with_model(
+            previous_context.model_info.slug.clone(),
+            &session.services.models_manager,
+        )
+        .await;
+    let environment = current_context
+        .environments
+        .primary()
+        .expect("primary environment")
+        .clone();
+    let cwd = environment.cwd().clone();
+    let workspace_root = current_context.config.cwd.join("selected-workspace");
+    let mut environment_config = environment.config;
+    environment_config.permission_profile =
+        PermissionProfileSnapshot::legacy(PermissionProfile::workspace_write());
+    current_context.environments.environments[0] =
+        TurnEnvironmentState::Ready(TurnEnvironment::new(
+            environment.environment_id,
+            environment.environment,
+            cwd,
+            vec![PathUri::from_abs_path(&workspace_root)],
+            environment.shell,
+            environment_config,
+        ));
+
+    let update_items =
+        record_context_update_items(&session, previous_context, current_context).await;
+    let permissions_update = developer_input_texts(&update_items)
+        .into_iter()
+        .find(|text| text.contains("<permissions instructions>"))
+        .expect("permissions update should be emitted");
+    assert!(
+        permissions_update.contains(workspace_root.to_string_lossy().as_ref()),
+        "selected workspace root should be visible in permissions: {permissions_update}"
+    );
+    let environment_update = user_input_texts(&update_items)
+        .into_iter()
+        .find(|text| text.contains("<environment_context>"))
+        .expect("environment update should be emitted");
+    assert!(
+        environment_update.contains("<permission_profile type=\"managed\">")
+            && environment_update.contains(workspace_root.to_string_lossy().as_ref()),
+        "selected environment permissions should be visible: {environment_update}"
+    );
 }
 
 #[tokio::test]
@@ -9069,7 +9357,9 @@ async fn build_initial_context_adds_multi_agent_v2_subagent_usage_hint_as_develo
     let turn_context_mut =
         Arc::get_mut(&mut turn_context).expect("thread settings should not be shared");
     turn_context_mut.session_source = session_source;
-    Arc::make_mut(&mut turn_context_mut.config)
+    let config = Arc::make_mut(&mut turn_context_mut.config);
+    config.token_budget = Some(crate::config::TokenBudgetConfig::default());
+    config
         .features
         .enable(Feature::TokenBudget)
         .expect("test config should allow token budget");
@@ -9226,11 +9516,15 @@ async fn turn_context_item_omits_legacy_equivalent_file_system_sandbox_policy() 
 async fn turn_context_item_stores_split_file_system_sandbox_policy_when_different() {
     let (_session, mut turn_context) = make_session_and_context().await;
     let file_system_sandbox_policy = file_system_policy_with_unreadable_glob(&turn_context);
-    turn_context.permission_profile = PermissionProfile::from_runtime_permissions_with_enforcement(
-        turn_context.permission_profile.enforcement(),
+    let permission_profile = PermissionProfile::from_runtime_permissions_with_enforcement(
+        turn_context.permission_profile().enforcement(),
         &file_system_sandbox_policy,
         turn_context.network_sandbox_policy(),
     );
+    Arc::make_mut(&mut turn_context.config)
+        .permissions
+        .set_permission_profile(permission_profile)
+        .expect("test setup should allow updating permission profile");
 
     let item = turn_context.to_turn_context_item();
 
@@ -9363,7 +9657,9 @@ async fn record_context_updates_and_set_reference_context_item_persists_baseline
         serde_json::to_value(Some(turn_context.to_turn_context_item()))
             .expect("serialize expected context item")
     );
-    session.ensure_rollout_materialized().await;
+    session
+        .ensure_rollout_materialized(PersistContext::Standard)
+        .await;
     session.flush_rollout().await.expect("rollout should flush");
 
     let InitialHistory::Resumed(resumed) = RolloutRecorder::get_rollout_history(&rollout_path)
@@ -9389,11 +9685,15 @@ async fn record_context_updates_and_set_reference_context_item_persists_split_fi
  {
     let (mut session, mut turn_context) = make_session_and_context().await;
     let file_system_sandbox_policy = file_system_policy_with_unreadable_glob(&turn_context);
-    turn_context.permission_profile = PermissionProfile::from_runtime_permissions_with_enforcement(
-        turn_context.permission_profile.enforcement(),
+    let permission_profile = PermissionProfile::from_runtime_permissions_with_enforcement(
+        turn_context.permission_profile().enforcement(),
         &file_system_sandbox_policy,
         turn_context.network_sandbox_policy(),
     );
+    Arc::make_mut(&mut turn_context.config)
+        .permissions
+        .set_permission_profile(permission_profile)
+        .expect("test setup should allow updating permission profile");
     let rollout_path = attach_thread_persistence(&mut session).await;
 
     let turn_context = Arc::new(turn_context);
@@ -9402,7 +9702,9 @@ async fn record_context_updates_and_set_reference_context_item_persists_split_fi
         .record_context_updates_and_set_reference_context_item(&step_context)
         .await
         .expect("world state should build");
-    session.ensure_rollout_materialized().await;
+    session
+        .ensure_rollout_materialized(PersistContext::Standard)
+        .await;
     session.flush_rollout().await.expect("rollout should flush");
 
     let InitialHistory::Resumed(resumed) = RolloutRecorder::get_rollout_history(&rollout_path)
@@ -9490,7 +9792,9 @@ async fn record_context_updates_and_set_reference_context_item_persists_full_rei
         .record_context_updates_and_set_reference_context_item(&step_context)
         .await
         .expect("world state should build");
-    session.ensure_rollout_materialized().await;
+    session
+        .ensure_rollout_materialized(PersistContext::Standard)
+        .await;
     session.flush_rollout().await.expect("rollout should flush");
 
     let InitialHistory::Resumed(resumed) = RolloutRecorder::get_rollout_history(&rollout_path)
@@ -9657,6 +9961,89 @@ async fn attach_in_memory_thread_store(
     session.services.thread_store = thread_store;
     session.services.live_thread = Some(live_thread);
     store
+}
+
+#[tokio::test]
+async fn failed_user_message_persistence_stops_turn_processing() {
+    let (mut session, turn_context, _events) = make_session_and_context_with_rx().await;
+    open_thread_persistence(
+        Arc::get_mut(&mut session).unwrap_or_else(|| panic!("session should be uniquely owned")),
+    )
+    .await;
+    session
+        .services
+        .live_thread
+        .as_ref()
+        .unwrap_or_else(|| panic!("session should have a live thread"))
+        .shutdown()
+        .await
+        .unwrap_or_else(|error| panic!("live thread should shut down: {error}"));
+
+    let client_id = "persistence-failure".to_string();
+    let (_pending_admission, admission) = session.pending_user_message_admissions.register(
+        turn_context.sub_id.clone(),
+        Some(client_id.clone()),
+        PendingUserMessageAdmissionState::WaitingForAdmission,
+    );
+    let failed_queued_prompt = vec![UserInput::Text {
+        text: "message with a failed rollout flush".to_string(),
+        text_elements: Vec::new(),
+    }];
+    let later_steer = vec![UserInput::Text {
+        text: "later ordinary steer".to_string(),
+        text_elements: Vec::new(),
+    }];
+    let later_response = user_message("later response item");
+    let later_mailbox = InterAgentCommunication::new(
+        AgentPath::root().join("worker").expect("worker path"),
+        AgentPath::root(),
+        Vec::new(),
+        "later mailbox message".to_string(),
+        /*trigger_turn*/ false,
+    );
+    let input = [
+        TurnInput::UserInput {
+            content: failed_queued_prompt,
+            client_id: Some(client_id),
+        },
+        TurnInput::UserInput {
+            content: later_steer.clone(),
+            client_id: None,
+        },
+        TurnInput::ResponseItem(later_response.clone()),
+        TurnInput::InterAgentCommunication(later_mailbox.clone()),
+    ];
+
+    assert!(
+        super::turn::run_hooks_and_record_inputs(
+            &session,
+            &turn_context,
+            &input,
+            PersistContext::Standard,
+        )
+        .await,
+        "a rollout flush failure should stop turn processing"
+    );
+    assert!(matches!(
+        admission.await,
+        Ok(Err(UserMessageAdmissionError::PersistenceFailed(_)))
+    ));
+    assert!(turn_context.terminal_error.lock().await.is_some());
+
+    let mut expected_suffix = vec![
+        session.response_item_from_user_input(later_steer),
+        later_response,
+        later_mailbox.to_model_input_item(),
+    ];
+    for item in &mut expected_suffix {
+        item.set_turn_id_if_missing(&turn_context.sub_id);
+    }
+    let history = session.clone_history().await;
+    let history_items = strip_response_item_ids(history.raw_items());
+    assert!(
+        history_items.ends_with(&strip_response_item_ids(&expected_suffix)),
+        "later steer, response, and mailbox inputs should survive the failed queued message"
+    );
 }
 
 #[tokio::test]
@@ -10255,7 +10642,9 @@ async fn thread_idle_lifecycle_waits_for_trigger_turn_mailbox_work() {
         )
         .await;
 
-    session.emit_thread_idle_lifecycle_if_idle().await;
+    session
+        .emit_thread_idle_lifecycle_if_idle(codex_extension_api::ThreadIdleCause::Completed)
+        .await;
 
     assert_eq!(0, calls.load(std::sync::atomic::Ordering::SeqCst));
 }
@@ -10273,7 +10662,7 @@ async fn try_start_turn_if_idle_rejects_active_turn_without_injecting() {
     )
     .await;
 
-    let item = user_message("synthetic idle input");
+    let item = TurnInput::ResponseItem(user_message("synthetic idle input"));
     let err = sess
         .try_start_turn_if_idle(vec![item.clone()])
         .await
@@ -10299,7 +10688,7 @@ async fn try_start_turn_if_idle_rejects_plan_mode_without_injecting() {
         state.session_configuration.collaboration_mode = collaboration_mode;
     }
 
-    let item = user_message("synthetic idle input");
+    let item = TurnInput::ResponseItem(user_message("synthetic idle input"));
     let err = sess
         .try_start_turn_if_idle(vec![item.clone()])
         .await
@@ -10312,6 +10701,59 @@ async fn try_start_turn_if_idle_rejects_plan_mode_without_injecting() {
         (Vec::<TurnInput>::new(), None),
         sess.input_queue.get_pending_input(&sess.active_turn).await
     );
+}
+
+#[tokio::test]
+async fn try_start_turn_if_idle_accepts_user_input_in_plan_mode() {
+    let (sess, _tc, _rx) = make_session_and_context_with_rx().await;
+    let mut collaboration_mode = sess.collaboration_mode().await;
+    collaboration_mode.mode = ModeKind::Plan;
+    {
+        let mut state = sess.state.lock().await;
+        state.session_configuration.collaboration_mode = collaboration_mode;
+        state.merge_connector_selection(["calendar".to_string()]);
+    }
+
+    sess.try_start_turn_if_idle(vec![TurnInput::UserInput {
+        content: vec![UserInput::Text {
+            text: "queued user input".to_string(),
+            text_elements: Vec::new(),
+        }],
+        client_id: Some("queued-user-message".to_string()),
+    }])
+    .await
+    .expect("plan mode should accept user-authored idle input");
+
+    assert!(sess.state.lock().await.get_connector_selection().is_empty());
+
+    sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
+}
+
+#[tokio::test]
+async fn try_start_turn_if_idle_rejects_empty_user_input_in_plan_mode() {
+    let (sess, _tc, _rx) = make_session_and_context_with_rx().await;
+    let mut collaboration_mode = sess.collaboration_mode().await;
+    collaboration_mode.mode = ModeKind::Plan;
+    {
+        let mut state = sess.state.lock().await;
+        state.session_configuration.collaboration_mode = collaboration_mode;
+    }
+
+    let input = vec![
+        TurnInput::UserInput {
+            content: Vec::new(),
+            client_id: Some("empty-queued-user-message".to_string()),
+        },
+        TurnInput::ResponseItem(user_message("automatic idle input")),
+    ];
+    let error = sess
+        .try_start_turn_if_idle(input.clone())
+        .await
+        .expect_err("empty user input should not bypass plan mode");
+
+    assert_eq!(TryStartTurnIfIdleRejectionReason::PlanMode, error.reason());
+    assert_eq!(input, error.into_input());
+    assert!(sess.active_turn.lock().await.is_none());
 }
 
 #[tokio::test]
@@ -10330,7 +10772,7 @@ async fn try_start_turn_if_idle_rejects_pending_trigger_turn_without_injecting()
         )
         .await;
 
-    let item = user_message("synthetic idle input");
+    let item = TurnInput::ResponseItem(user_message("synthetic idle input"));
     let err = sess
         .try_start_turn_if_idle(vec![item.clone()])
         .await
@@ -10358,7 +10800,7 @@ async fn try_start_turn_if_idle_rejects_active_review_turn_without_injecting() {
     )
     .await;
 
-    let item = user_message("synthetic idle input");
+    let item = TurnInput::ResponseItem(user_message("synthetic idle input"));
     let err = sess
         .try_start_turn_if_idle(vec![item.clone()])
         .await
@@ -10701,7 +11143,7 @@ async fn steered_input_reopens_mailbox_delivery_for_current_turn() {
                     text: "follow up".to_string(),
                     text_elements: Vec::new(),
                 }],
-                client_id: None
+                client_id: None,
             },
             TurnInput::InterAgentCommunication(communication),
         ],
@@ -10759,7 +11201,7 @@ async fn stale_defer_mailbox_delivery_does_not_override_steered_input() {
                     text: "follow up".to_string(),
                     text_elements: Vec::new(),
                 }],
-                client_id: None
+                client_id: None,
             },
             TurnInput::InterAgentCommunication(communication),
         ],
@@ -11134,7 +11576,8 @@ async fn rejects_escalated_permissions_when_policy_not_on_request() {
 
     let (session, mut turn_context_raw) = make_session_and_context().await;
     // Ensure policy is NOT OnRequest so the early rejection path triggers
-    turn_context_raw
+    Arc::make_mut(&mut turn_context_raw.config)
+        .permissions
         .approval_policy
         .set(AskForApproval::Never)
         .expect("test setup should allow updating approval policy");
@@ -11183,7 +11626,7 @@ async fn rejects_escalated_permissions_when_policy_not_on_request() {
 
     let expected = format!(
         "approval policy is {policy:?}; reject command — you should not ask for escalated permissions if the approval policy is {policy:?}",
-        policy = turn_context.approval_policy.value()
+        policy = turn_context.approval_policy()
     );
 
     pretty_assertions::assert_eq!(output, expected);
@@ -11198,7 +11641,10 @@ async fn rejects_escalated_permissions_when_policy_not_on_request() {
     // command. Force DangerFullAccess so this check stays focused on approval
     // policy rather than platform-specific sandbox behavior.
     let turn_context_mut = Arc::get_mut(&mut turn_context).expect("unique thread settings Arc");
-    turn_context_mut.permission_profile = PermissionProfile::Disabled;
+    Arc::make_mut(&mut turn_context_mut.config)
+        .permissions
+        .set_permission_profile(PermissionProfile::Disabled)
+        .expect("test setup should allow updating permission profile");
 
     let command = session.user_shell().derive_exec_args(
         command_script,
@@ -11209,11 +11655,12 @@ async fn rejects_escalated_permissions_when_policy_not_on_request() {
         .exec_policy
         .create_exec_approval_requirement_for_command(ExecApprovalRequest {
             command: &command,
-            approval_policy: turn_context.approval_policy.value(),
+            approval_policy: turn_context.approval_policy(),
             permission_profile: turn_context.permission_profile(),
             windows_sandbox_level: turn_context.windows_sandbox_level,
             sandbox_permissions: SandboxPermissions::UseDefault,
             prefix_rule: None,
+            allow_prefix_rules: turn_context.allow_prefix_rules(),
         })
         .await;
     assert!(matches!(
@@ -11300,7 +11747,8 @@ async fn unified_exec_rejects_escalated_permissions_when_policy_not_on_request()
     use codex_protocol::protocol::AskForApproval;
 
     let (session, mut turn_context_raw) = make_session_and_context().await;
-    turn_context_raw
+    Arc::make_mut(&mut turn_context_raw.config)
+        .permissions
         .approval_policy
         .set(AskForApproval::Never)
         .expect("test setup should allow updating approval policy");
@@ -11337,7 +11785,7 @@ async fn unified_exec_rejects_escalated_permissions_when_policy_not_on_request()
 
     let expected = format!(
         "approval policy is {policy:?}; reject command — you cannot ask for escalated permissions if the approval policy is {policy:?}",
-        policy = turn_context.approval_policy.value()
+        policy = turn_context.approval_policy()
     );
 
     pretty_assertions::assert_eq!(output, expected);

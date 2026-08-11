@@ -74,7 +74,7 @@ fn model_token_budget_config() -> ModelTokenBudgetConfig {
 }
 
 fn token_budget_contexts(request: &ResponsesRequest) -> Vec<String> {
-    let context_window_prefix = format!("{CONTEXT_WINDOW_OPEN_TAG}\nAgent name: ");
+    let context_window_prefix = format!("{CONTEXT_WINDOW_OPEN_TAG}\n");
     request
         .message_input_texts("developer")
         .into_iter()
@@ -236,7 +236,7 @@ async fn token_budget_context_is_only_emitted_with_full_context() -> Result<()> 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn token_budget_guidance_follows_context_window() -> Result<()> {
+async fn token_budget_guidance_precedes_standalone_context_window() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -271,12 +271,15 @@ async fn token_budget_guidance_follows_context_window() -> Result<()> {
         .iter()
         .position(|text| text.starts_with(CONTEXT_WINDOW_OPEN_TAG))
         .expect("context-window metadata should be present");
-    assert_eq!(
-        developer_texts.get(context_window_index + 1),
-        Some(&format!(
-            "{CONTEXT_WINDOW_GUIDANCE_OPEN_TAG}\n{guidance_message}\n{CONTEXT_WINDOW_GUIDANCE_CLOSE_TAG}"
-        ))
-    );
+    let guidance_index = developer_texts
+        .iter()
+        .position(|text| {
+            text == &format!(
+                "{CONTEXT_WINDOW_GUIDANCE_OPEN_TAG}\n{guidance_message}\n{CONTEXT_WINDOW_GUIDANCE_CLOSE_TAG}"
+            )
+        })
+        .expect("context-window guidance should be present");
+    assert!(guidance_index < context_window_index);
 
     Ok(())
 }
@@ -290,6 +293,13 @@ async fn token_budget_uses_model_message_defaults() -> Result<()> {
     let model_defaults = model_token_budget_config();
     let expected_guidance = model_defaults.guidance_message.clone();
     let test = test_codex()
+        .with_pre_build_hook(|home| {
+            std::fs::write(
+                home.join("config.toml"),
+                "[features.token_budget]\nenabled = true\n",
+            )
+            .expect("write token-budget configuration");
+        })
         .with_model_info_override("gpt-5.2", move |model_info| {
             model_info
                 .model_messages
@@ -310,7 +320,14 @@ async fn token_budget_uses_model_message_defaults() -> Result<()> {
     test.submit_turn("inspect model-owned context guidance")
         .await?;
 
-    let developer_texts = response.single_request().message_input_texts("developer");
+    let request = response.single_request();
+    let token_budget_context = token_budget_contexts(&request);
+    assert_eq!(token_budget_context.len(), 1);
+    assert!(
+        token_budget_context[0]
+            .starts_with(&format!("{CONTEXT_WINDOW_OPEN_TAG}\nAgent name: /root\n"))
+    );
+    let developer_texts = request.message_input_texts("developer");
     assert!(developer_texts.iter().any(|text| {
         text == &format!(
             "{CONTEXT_WINDOW_GUIDANCE_OPEN_TAG}\n{expected_guidance}\n{CONTEXT_WINDOW_GUIDANCE_CLOSE_TAG}"
@@ -453,18 +470,34 @@ async fn token_budget_model_defaults_survive_config_lock_replay() -> Result<()> 
         })
         .build_with_auto_env(&server)
         .await?;
+    core_test_support::submit_thread_settings(
+        &replay.codex,
+        ThreadSettingsOverrides {
+            model: Some("gpt-5.4".to_string()),
+            ..Default::default()
+        },
+    )
+    .await?;
     replay
-        .submit_turn("inspect guidance after lock replay")
+        .submit_text_turn("inspect guidance after lock replay and model switch")
         .await?;
 
     let requests = responses.requests();
     assert_eq!(requests.len(), 2);
-    for request in requests {
+    for request in &requests {
         assert!(
             request.body_contains_text("Use the model-owned context-window guidance."),
             "exporting and replaying a config lock must preserve model-owned guidance"
         );
     }
+    assert_eq!(requests[1].body_json()["model"], "gpt-5.4");
+    assert!(
+        requests[1]
+            .message_input_texts("developer")
+            .iter()
+            .any(|text| text.contains("<model_switch>")),
+        "replaying model-owned instructions must not override the new model's template"
+    );
 
     Ok(())
 }

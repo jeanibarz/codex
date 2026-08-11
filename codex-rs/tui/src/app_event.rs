@@ -32,6 +32,7 @@ use codex_app_server_protocol::PluginUninstallResponse;
 use codex_app_server_protocol::SkillsListResponse;
 use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadGoalStatus;
+use codex_app_server_protocol::ThreadItemsListResponse;
 use codex_connectors::AppInfo;
 use codex_file_search::FileMatch;
 use codex_message_history::HistoryBatchCursor;
@@ -183,6 +184,12 @@ pub(crate) enum KeymapCaptureMode {
     Chord,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TranscriptExportDestination {
+    Clipboard,
+    File(PathBuf),
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub(crate) enum AppEvent {
@@ -222,6 +229,26 @@ pub(crate) enum AppEvent {
     ThreadHistoryEntryResponse {
         thread_id: ThreadId,
         event: HistoryLookupResponse,
+    },
+
+    /// Refill terminal scrollback from older paginated history after its rows reflow.
+    RequestOlderScrollbackHistory {
+        thread_id: ThreadId,
+    },
+
+    /// One background-loaded page of older Ctrl+T transcript history.
+    OlderThreadHistoryLoaded {
+        thread_id: ThreadId,
+        cursor: String,
+        result: Result<ThreadItemsListResponse, String>,
+    },
+
+    /// Open the filename prompt for an on-demand Markdown transcript export.
+    OpenTranscriptExportFilePrompt,
+
+    /// Export all current-thread history to the selected destination.
+    ExportTranscript {
+        destination: TranscriptExportDestination,
     },
 
     /// Persist a submitted prompt in the cross-session message history.
@@ -791,6 +818,9 @@ pub(crate) enum AppEvent {
         model: String,
         effort: Option<ReasoningEffort>,
     },
+
+    /// Show the cyber auto-review notice after the model selection confirmation.
+    CyberModelAutoReviewNotice,
 
     /// Persist the selected personality to the appropriate config.
     PersistPersonalitySelection {

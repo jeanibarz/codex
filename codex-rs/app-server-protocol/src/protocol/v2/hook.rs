@@ -31,8 +31,11 @@ v2_enum_from_core!(
 );
 
 v2_enum_from_core!(
+    #[derive(Default)]
     pub enum HookExecutionMode from CoreHookExecutionMode {
-        Sync, Async
+        #[default]
+        Sync,
+        Async
     }
 );
 

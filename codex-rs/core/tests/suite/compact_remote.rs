@@ -5,11 +5,19 @@ use anyhow::Result;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use codex_core::StartThreadOptions;
+use codex_core::X_CODEX_ROUTING_HINT_HEADER;
 use codex_core::compact::SUMMARY_PREFIX;
 use codex_features::Feature;
+use codex_history::InitialHistory;
+use codex_history::RolloutItem;
+use codex_history::RolloutLine;
 use codex_login::CodexAuth;
 use codex_login::auth::AgentIdentityAuth;
 use codex_login::auth::AgentIdentityAuthRecord;
+use codex_login::auth::BedrockApiKeyAuth;
+use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_5_MODEL_ID;
+use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
+use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::AgentPath;
 use codex_protocol::account::PlanType as AccountPlanType;
 use codex_protocol::config_types::ServiceTier;
@@ -35,8 +43,6 @@ use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RealtimeConversationRealtimeEvent;
 use codex_protocol::protocol::RealtimeEvent;
 use codex_protocol::protocol::RealtimeOutputModality;
-use codex_protocol::protocol::RolloutItem;
-use codex_protocol::protocol::RolloutLine;
 use codex_protocol::user_input::UserInput;
 use core_test_support::PathBufExt;
 use core_test_support::apps_test_server::configure_search_capable_model;
@@ -345,6 +351,148 @@ async fn wait_for_turn_complete(codex: &codex_core::CodexThread) {
     .await;
 }
 
+fn amazon_bedrock_test_codex() -> TestCodexBuilder {
+    let auth = CodexAuth::BedrockApiKey(BedrockApiKeyAuth {
+        api_key: "bedrock-test-api-key".to_string(),
+        region: "us-east-1".to_string(),
+    });
+    test_codex()
+        .with_auth(auth)
+        .with_model(AMAZON_BEDROCK_GPT_5_5_MODEL_ID)
+        .with_config(|config| {
+            let _ = config.features.enable(Feature::RemoteCompactionV2);
+            config.model_provider = ModelProviderInfo {
+                base_url: config.model_provider.base_url.clone(),
+                ..ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None)
+            };
+            config.model_provider_id = AMAZON_BEDROCK_PROVIDER_ID.to_string();
+        })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn amazon_bedrock_uses_remote_compaction_endpoint() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let harness = TestCodexHarness::with_auto_env_builder(amazon_bedrock_test_codex()).await?;
+
+    let response_mock = responses::mount_sse_sequence(
+        harness.server(),
+        vec![
+            sse(vec![
+                responses::ev_assistant_message("message-1", "before compaction"),
+                responses::ev_completed("response-1"),
+            ]),
+            sse(vec![
+                responses::ev_assistant_message("message-2", "after compaction"),
+                responses::ev_completed("response-2"),
+            ]),
+        ],
+    )
+    .await;
+    let compact_mock = responses::mount_compact_user_history_with_summary_once(
+        harness.server(),
+        "BEDROCK_REMOTE_COMPACTED_SUMMARY",
+    )
+    .await;
+
+    harness.test().submit_turn("before compact").await?;
+    harness.test().codex.submit(Op::Compact).await?;
+    wait_for_turn_complete(&harness.test().codex).await;
+    harness.test().submit_turn("after compact").await?;
+
+    let compact_request = compact_mock.single_request();
+    assert_eq!(compact_request.path(), "/v1/responses/compact");
+    assert_eq!(
+        compact_request.header("authorization").as_deref(),
+        Some("Bearer bedrock-test-api-key")
+    );
+    assert_eq!(
+        compact_request
+            .header("x-amzn-mantle-client-agent")
+            .as_deref(),
+        Some("codex")
+    );
+    assert_eq!(
+        compact_request.body_json()["model"],
+        AMAZON_BEDROCK_GPT_5_5_MODEL_ID
+    );
+
+    let response_requests = response_mock.requests();
+    assert_eq!(response_requests.len(), 2);
+    assert!(
+        response_requests
+            .iter()
+            .all(|request| request.inputs_of_type("compaction_trigger").is_empty())
+    );
+    assert!(response_requests[1].input().iter().any(|item| {
+        item["type"] == "compaction"
+            && item["encrypted_content"] == "BEDROCK_REMOTE_COMPACTED_SUMMARY"
+    }));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn amazon_bedrock_automatic_compaction_uses_v1_endpoint_when_v2_is_enabled() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let harness = TestCodexHarness::with_auto_env_builder(amazon_bedrock_test_codex().with_config(
+        |config| {
+            config.model_auto_compact_token_limit = Some(200);
+        },
+    ))
+    .await?;
+    let response_mock = responses::mount_sse_sequence(
+        harness.server(),
+        vec![
+            sse(vec![
+                responses::ev_assistant_message("message-1", "before automatic compaction"),
+                responses::ev_completed_with_tokens("response-1", /*total_tokens*/ 500),
+            ]),
+            sse(vec![
+                responses::ev_assistant_message("message-2", "after automatic compaction"),
+                responses::ev_completed("response-2"),
+            ]),
+        ],
+    )
+    .await;
+    let compact_mock = responses::mount_compact_user_history_with_summary_once(
+        harness.server(),
+        "BEDROCK_AUTOMATIC_REMOTE_COMPACTED_SUMMARY",
+    )
+    .await;
+
+    harness
+        .test()
+        .submit_turn("before automatic compact")
+        .await?;
+    harness
+        .test()
+        .submit_turn("after automatic compact")
+        .await?;
+
+    let compact_request = compact_mock.single_request();
+    assert_eq!(compact_request.path(), "/v1/responses/compact");
+    assert_eq!(
+        compact_request.header("authorization").as_deref(),
+        Some("Bearer bedrock-test-api-key")
+    );
+
+    let response_requests = response_mock.requests();
+    assert_eq!(response_requests.len(), 2);
+    assert!(
+        response_requests
+            .iter()
+            .all(|request| request.inputs_of_type("compaction_trigger").is_empty())
+    );
+    assert!(response_requests[1].input().iter().any(|item| {
+        item["type"] == "compaction"
+            && item["encrypted_content"] == "BEDROCK_AUTOMATIC_REMOTE_COMPACTED_SUMMARY"
+    }));
+
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_compact_replaces_history_for_followups() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -452,6 +600,7 @@ async fn remote_compact_replaces_history_for_followups() -> Result<()> {
         compact_metadata["request_kind"].as_str(),
         Some("compaction")
     );
+    assert_eq!(compact_metadata["sandbox_mode"].as_str(), Some("read-only"));
     assert_eq!(
         compact_metadata["window_id"].as_str(),
         compact_request.header("x-codex-window-id").as_deref()
@@ -643,6 +792,14 @@ async fn remote_compact_uses_agent_identity_assertion() -> Result<()> {
         compact_request.header("chatgpt-account-id").as_deref(),
         Some("account-compact")
     );
+    let compact_body = compact_request.body_json();
+    let model = compact_body["model"]
+        .as_str()
+        .expect("missing request model");
+    assert_eq!(
+        compact_request.header(X_CODEX_ROUTING_HINT_HEADER),
+        Some(format!("model={model}"))
+    );
 
     Ok(())
 }
@@ -654,6 +811,7 @@ async fn assert_remote_manual_compact_request_parity(
     snapshot_name: &str,
     scenario: &str,
 ) -> Result<()> {
+    let uses_codex_backend = auth.uses_codex_backend();
     let mut builder = test_codex().with_auth(auth);
     if let Some(service_tier) = configured_service_tier {
         builder = builder.with_config(move |config| {
@@ -822,6 +980,25 @@ async fn assert_remote_manual_compact_request_parity(
     let compact_request = compact_mock.single_request();
     let normal_body = normal_request.body_json();
     let compact_body = compact_request.body_json();
+    let expected_routing_hint = |body: &Value| {
+        if !uses_codex_backend {
+            return None;
+        }
+
+        let model = body["model"].as_str().expect("missing request model");
+        match body.get("service_tier").and_then(Value::as_str) {
+            Some(tier) => Some(format!("model={model};tier={tier}")),
+            None => Some(format!("model={model}")),
+        }
+    };
+    assert_eq!(
+        normal_request.header(X_CODEX_ROUTING_HINT_HEADER),
+        expected_routing_hint(&normal_body)
+    );
+    assert_eq!(
+        compact_request.header(X_CODEX_ROUTING_HINT_HEADER),
+        expected_routing_hint(&compact_body)
+    );
 
     let mut expected_compact_body_without_input = normal_body.clone();
     let expected_compact_object = expected_compact_body_without_input
@@ -928,7 +1105,53 @@ async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<(
             }),
     )
     .await?;
-    let codex = harness.test().codex.clone();
+    let image_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=";
+    let user_notice = "<image_resize_notice>retained user image</image_resize_notice>";
+    let tool_notice = "<image_resize_notice>discarded tool image</image_resize_notice>";
+    let unlisted_notice = "<unlisted_notice>discarded developer notice</unlisted_notice>";
+    let developer_message = |text| {
+        json!({
+            "type": "message",
+            "role": "developer",
+            "content": [{ "type": "input_text", "text": text }]
+        })
+    };
+    let initial_history = [
+        json!({
+            "type": "message",
+            "role": "user",
+            "content": [
+                { "type": "input_text", "text": "retained image source" },
+                { "type": "input_image", "image_url": image_url }
+            ]
+        }),
+        developer_message(user_notice),
+        developer_message(unlisted_notice),
+        json!({
+            "type": "function_call",
+            "name": "view_image",
+            "arguments": "{}",
+            "call_id": "image-call"
+        }),
+        json!({
+            "type": "function_call_output",
+            "call_id": "image-call",
+            "output": [{ "type": "input_image", "image_url": image_url }]
+        }),
+        developer_message(tool_notice),
+    ]
+    .into_iter()
+    .map(|item| serde_json::from_value(item).map(RolloutItem::ResponseItem))
+    .collect::<serde_json::Result<Vec<_>>>()?;
+    let codex = harness
+        .test()
+        .thread_manager
+        .start_thread(StartThreadOptions {
+            initial_history: InitialHistory::Forked(initial_history),
+            ..StartThreadOptions::new(harness.test().config.clone())
+        })
+        .await?
+        .thread;
 
     let responses_mock = responses::mount_sse_sequence(
         harness.server(),
@@ -1108,6 +1331,23 @@ async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<(
     assert!(
         follow_up_body.contains("hello remote compact"),
         "expected v2 follow-up request to preserve retained original user messages"
+    );
+    assert!(
+        follow_up_request.input().windows(2).any(|items| {
+            items[0]["role"] == "user"
+                && items[0]["content"][0]["text"] == "retained image source"
+                && items[1]["role"] == "developer"
+                && items[1]["content"][0]["text"] == user_notice
+        }),
+        "expected v2 compaction to retain the user image and its adjacent resize notice"
+    );
+    assert!(
+        !follow_up_body.contains(unlisted_notice),
+        "expected v2 compaction to drop unlisted developer notices"
+    );
+    assert!(
+        !follow_up_body.contains(tool_notice),
+        "expected v2 compaction to drop the resize notice with its tool output"
     );
 
     Ok(())
