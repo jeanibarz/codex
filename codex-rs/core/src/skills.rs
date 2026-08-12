@@ -26,7 +26,7 @@ pub use codex_skills::detect_implicit_skill_invocation_for_command;
 pub use codex_skills_extension::HostSkillsLoadInput;
 pub use codex_skills_extension::HostSkillsService;
 pub use codex_skills_extension::SkillLoadOutcome;
-pub use codex_skills_extension::bundled_skills_enabled_from_stack;
+pub use codex_config::bundled_skills_enabled_from_stack;
 use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
