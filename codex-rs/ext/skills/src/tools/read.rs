@@ -1,3 +1,4 @@
+use codex_analytics::InvocationType;
 use codex_extension_api::FunctionCallError;
 use codex_extension_api::ToolCall;
 use codex_extension_api::ToolExecutor;
@@ -54,7 +55,7 @@ impl ToolExecutor<ToolCall> for ReadTool {
     fn spec(&self) -> ToolSpec {
         skill_function_tool::<ReadArgs, ReadResponse>(
             TOOL_NAME,
-            "Read one page from a skill resource. Pass the exact orchestrator package shown in the skill catalog, or the executor package from skills.list or resource_access metadata. The package determines its owning authority. Omit resource to read the main SKILL.md, or pass the exact identifier of another resource beneath that package. Pass next_cursor back as cursor to continue.",
+            "Read one page from a skill. Pass its provided package, expanding any root alias. Omit resource to read SKILL.md; to read another file, use the same package and pass the file's complete skill:// identifier as resource. If the package is not provided, use skills.list to find it. Pass next_cursor back as cursor to continue.",
         )
     }
 
@@ -177,7 +178,21 @@ impl ToolExecutor<ToolCall> for ReadTool {
                 ));
             }
             let response = page_response(result.resource.as_str(), &result.contents, start)?;
-            skill_json_output(&response, output_authority)
+            let output = skill_json_output(&response, output_authority)?;
+
+            if requested_resource == main_prompt
+                && args.cursor.is_none()
+                && let Some(analytics) = self.context.analytics.as_ref()
+            {
+                analytics.track_skill_invocation(
+                    &skill_entry,
+                    call.model.clone(),
+                    call.turn_id.clone(),
+                    InvocationType::Implicit,
+                );
+            }
+
+            Ok(output)
         })
     }
 }

@@ -439,7 +439,6 @@ pub struct AppServerRuntimeOptions {
     pub plugin_startup_tasks: PluginStartupTasks,
     pub remote_control_startup_mode: RemoteControlStartupMode,
     pub install_shutdown_signal_handler: bool,
-    pub psp: bool,
 }
 
 impl Default for AppServerRuntimeOptions {
@@ -449,7 +448,6 @@ impl Default for AppServerRuntimeOptions {
             plugin_startup_tasks: PluginStartupTasks::Start,
             remote_control_startup_mode: RemoteControlStartupMode::ResolvePersisted,
             install_shutdown_signal_handler: true,
-            psp: false,
         }
     }
 }

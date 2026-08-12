@@ -199,7 +199,6 @@ impl ConfigManager {
             .cloud_config_bundle(CloudConfigBundleLoader::default())
             .build()
             .await?;
-        config.psp = self.psp;
         self.apply_runtime_feature_enablement(&mut config);
         self.apply_arg0_paths(&mut config);
         Ok(config)

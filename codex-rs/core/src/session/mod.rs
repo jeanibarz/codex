@@ -205,8 +205,8 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::exec_output::StreamOutput;
 
 mod code_mode_warning;
-mod config_lock;
 pub(crate) mod context_window;
+mod environment;
 mod extension_metrics;
 mod handlers;
 mod inject;
@@ -228,8 +228,6 @@ pub(crate) mod turn;
 pub(crate) mod turn_context;
 mod world_state;
 use self::code_mode_warning::unsupported_code_mode_warning;
-use self::config_lock::export_config_lock_if_configured;
-use self::config_lock::validate_config_lock_if_configured;
 #[cfg(test)]
 use self::handlers::submission_dispatch_span;
 use self::handlers::submission_loop;
@@ -304,7 +302,6 @@ pub(crate) struct PreviousTurnSettings {
     pub(crate) realtime_active: Option<bool>,
 }
 
-use crate::HostSkillsService;
 use crate::exec_policy::ExecPolicyUpdateError;
 use crate::guardian::GuardianReviewOptions;
 use crate::guardian::GuardianReviewSessionManager;
@@ -340,6 +337,7 @@ use codex_core_plugins::RecommendedPluginCandidatesInput;
 use codex_git_utils::get_git_repo_root;
 use codex_history::CompactedItem;
 use codex_history::InitialHistory;
+use codex_history::ResponseItemEnvelope;
 use codex_mcp::McpConfig;
 use codex_mcp::effective_mcp_servers;
 use codex_otel::SessionTelemetry;
@@ -385,6 +383,7 @@ use codex_protocol::protocol::TokenUsageInfo;
 use codex_protocol::protocol::TurnModerationMetadataEvent;
 use codex_protocol::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
+use codex_skills_extension::HostSkillsService;
 use codex_tools::UnifiedExecShellMode;
 use codex_utils_absolute_path::AbsolutePathBuf;
 #[cfg(test)]
@@ -684,11 +683,6 @@ impl Session {
             .get_model_info(model.as_str(), &config.to_models_manager_config())
             .await;
         let configured_config = Arc::clone(&config);
-        if config.config_lock_export_dir.is_some()
-            && config.config_lock_save_fields_resolved_from_model_catalog
-        {
-            self::token_budget::apply_model_defaults(Arc::make_mut(&mut config), &model_info);
-        }
         let multi_agent_version = config.multi_agent_version_override().or_else(|| {
             resolve_multi_agent_version(&conversation_history, inherited_multi_agent_version)
         });
@@ -736,7 +730,6 @@ impl Session {
             developer_instructions: config.developer_instructions.clone(),
             personality: config.personality,
             base_instructions,
-            compact_prompt: config.compact_prompt.clone(),
             approval_policy: config.permissions.approval_policy.clone(),
             approvals_reviewer: config.approvals_reviewer,
             permission_profile_state: session_permission_profile_state_from_config(&config)?,
@@ -1501,17 +1494,31 @@ impl Session {
         // Keep the recorded rollout unchanged. Prepare its reconstructed history before
         // installing it, so legacy media is processed once for this resume or fork and
         // will be processed again if the rollout is reconstructed in a future session.
-        // Never backfill resize notices during replay; only newly recorded items may
-        // emit them, so the historical model prefix remains unchanged.
+        // Replay disables image-resize notices, so media preparation remains one-to-one. Keep
+        // the prior batch behavior and carry history-only metadata in a positional sidecar.
+        let (mut prepared_history, metadata): (Vec<_>, Vec<_>) = history
+            .into_iter()
+            .map(|envelope| (envelope.item, envelope.metadata))
+            .unzip();
         let _ = prepare_image_response_items(
-            &mut history,
+            &mut prepared_history,
             ImagePreparationMode::DetailBased,
             ImageResizeNoticeMode::Disabled,
         );
-        prepare_audio_response_items(&mut history);
+        prepare_audio_response_items(&mut prepared_history);
+        assert_eq!(
+            prepared_history.len(),
+            metadata.len(),
+            "replay media preparation must remain one-to-one when resize notices are disabled"
+        );
+        history = prepared_history
+            .into_iter()
+            .zip(metadata)
+            .map(|(item, metadata)| ResponseItemEnvelope { item, metadata })
+            .collect();
         {
             let mut state = self.state.lock().await;
-            state.replace_history(history, reference_context_item);
+            state.replace_annotated_history(history, reference_context_item);
             if let Some(world_state) = world_state_baseline {
                 state.history.set_world_state_baseline(world_state);
             }
@@ -2591,7 +2598,8 @@ impl Session {
                         strict_auto_review: false,
                     },
                 },
-                ReviewDecision::Abort
+                ReviewDecision::ApprovedMcpPolicyAmendment
+                | ReviewDecision::Abort
                 | ReviewDecision::Denied { .. }
                 | ReviewDecision::TimedOut => RequestPermissionsResponse {
                     permissions: RequestPermissionProfile::default(),
@@ -3037,7 +3045,7 @@ impl Session {
     fn assign_missing_rollout_response_item_ids(items: &mut [RolloutItem]) {
         for item in items {
             if let RolloutItem::ResponseItem(response_item) = item {
-                Self::assign_missing_response_item_id(response_item);
+                Self::assign_missing_response_item_id(&mut response_item.item);
             }
         }
     }
@@ -3243,7 +3251,7 @@ impl Session {
             RolloutItem::InterAgentCommunicationMetadata {
                 trigger_turn: communication.trigger_turn,
             },
-            RolloutItem::ResponseItem(response_item),
+            RolloutItem::ResponseItem(response_item.into()),
         ])
         .await;
         self.send_raw_response_items(turn_context, items).await;
@@ -3321,12 +3329,14 @@ impl Session {
 
     pub(crate) async fn replace_compacted_history(
         &self,
-        items: Vec<ResponseItem>,
+        mut items: Vec<ResponseItemEnvelope>,
         reference_context_item: Option<TurnContextItem>,
         world_state_baseline: Option<Arc<WorldState>>,
         metadata: CompactedHistoryMetadata,
     ) {
-        let items = Self::assign_missing_response_item_ids(Cow::Owned(items)).into_owned();
+        for envelope in &mut items {
+            Self::assign_missing_response_item_id(&mut envelope.item);
+        }
         let compacted_item = CompactedItem {
             message: metadata.message,
             replacement_history: Some(items.clone()),
@@ -3342,7 +3352,7 @@ impl Session {
         let mut world_state_item = None;
         {
             let mut state = self.state.lock().await;
-            state.replace_history(items, reference_context_item.clone());
+            state.replace_annotated_history(items, reference_context_item.clone());
             if let Some(world_state) = world_state_baseline {
                 let snapshot = world_state.snapshot();
                 world_state_item = Some(WorldStateItem::full(snapshot.clone().into_value()));
@@ -3371,6 +3381,7 @@ impl Session {
         let rollout_items: Vec<RolloutItem> = items
             .iter()
             .cloned()
+            .map(ResponseItemEnvelope::new)
             .map(RolloutItem::ResponseItem)
             .collect();
         self.persist_rollout_items(&rollout_items).await;
@@ -3726,7 +3737,10 @@ impl Session {
         let (window_number, window_ids) = window;
         let context_items = self
             .build_initial_context_with_world_state(turn_context, world_state.as_ref())
-            .await;
+            .await
+            .into_iter()
+            .map(ResponseItemEnvelope::new)
+            .collect();
         let turn_context_item = turn_context.to_turn_context_item();
         self.replace_compacted_history(
             context_items,
@@ -4131,10 +4145,6 @@ impl Session {
                 pending_input,
             )
             .await;
-        if let Some(client_id) = client_user_message_id.as_deref() {
-            self.pending_user_message_admissions
-                .associate_steered_by_client_id(client_id, active_turn_id);
-        }
         Ok(active_turn_id.clone())
     }
 

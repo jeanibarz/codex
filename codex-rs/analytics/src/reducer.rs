@@ -61,6 +61,7 @@ use crate::events::ToolItemTerminalStatus;
 use crate::events::TrackEventRequest;
 use crate::events::WebSearchActionKind;
 use crate::events::codex_app_metadata;
+use crate::events::codex_artifact_operation_event_request;
 use crate::events::codex_compaction_event_params;
 use crate::events::codex_goal_event_params;
 use crate::events::codex_hook_run_metadata;
@@ -74,6 +75,7 @@ use crate::facts::AnalyticsFact;
 use crate::facts::AnalyticsJsonRpcError;
 use crate::facts::AppMentionedInput;
 use crate::facts::AppUsedInput;
+use crate::facts::ArtifactOperationInput;
 use crate::facts::CodeModeToolCallFact;
 use crate::facts::CodeModeToolCallStatus;
 use crate::facts::CodexCompactionEvent;
@@ -84,11 +86,13 @@ use crate::facts::ExternalAgentConfigImportFailureInput;
 use crate::facts::HookRunInput;
 use crate::facts::ImagePreparationFact;
 use crate::facts::ImagePreparationMetadata;
+use crate::facts::InvocationType;
 use crate::facts::PluginInstallFailedInput;
 use crate::facts::PluginInstallRequestedInput;
 use crate::facts::PluginState;
 use crate::facts::PluginStateChangedInput;
 use crate::facts::PluginUsedInput;
+use crate::facts::SkillInvocationLocation;
 use crate::facts::SkillInvokedInput;
 use crate::facts::SubAgentThreadStartedInput;
 use crate::facts::ThreadInitializationMode;
@@ -151,6 +155,7 @@ use codex_protocol::request_permissions::PermissionGrantScope as CorePermissionG
 use codex_protocol::request_permissions::RequestPermissionsResponse as CoreRequestPermissionsResponse;
 use sha1::Digest;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::path::Path;
 use std::path::PathBuf;
@@ -392,6 +397,7 @@ struct TurnState {
     latest_diff: Option<String>,
     steer_count: usize,
     tool_counts: TurnToolCounts,
+    resource_skill_invocations: HashSet<String>,
 }
 
 #[derive(Clone, Hash, Eq, PartialEq)]
@@ -550,6 +556,9 @@ impl AnalyticsReducer {
                 self.ingest_server_request_aborted(completed_at_ms, request_id, out);
             }
             AnalyticsFact::Custom(input) => match input {
+                CustomAnalyticsFact::ArtifactOperation(input) => {
+                    self.ingest_artifact_operation(input, out);
+                }
                 CustomAnalyticsFact::CodeModeToolCall(input) => {
                     self.ingest_code_mode_tool_call(input, out);
                 }
@@ -614,6 +623,16 @@ impl AnalyticsReducer {
         }
     }
 
+    fn ingest_artifact_operation(
+        &mut self,
+        input: ArtifactOperationInput,
+        out: &mut Vec<TrackEventRequest>,
+    ) {
+        out.push(TrackEventRequest::ArtifactOperation(
+            codex_artifact_operation_event_request(input.tracking, input.operation),
+        ));
+    }
+
     fn ingest_code_mode_tool_call(
         &mut self,
         input: CodeModeToolCallFact,
@@ -628,8 +647,8 @@ impl AnalyticsReducer {
         };
         let has_thread_context = self.threads.get(thread_id).is_some_and(|thread| {
             thread.metadata.is_some()
-                && thread
-                    .connection_id
+                && self
+                    .thread_connection_id(thread_id)
                     .is_some_and(|connection_id| self.connections.contains_key(&connection_id))
         });
         if !has_thread_context {
@@ -921,9 +940,8 @@ impl AnalyticsReducer {
     ) {
         let parent_thread_id = input.parent_thread_id.clone();
         let parent_connection_id = parent_thread_id
-            .as_ref()
-            .and_then(|parent_thread_id| self.threads.get(parent_thread_id))
-            .and_then(|thread| thread.connection_id);
+            .as_deref()
+            .and_then(|parent_thread_id| self.thread_connection_id(parent_thread_id));
         let thread_state = self.threads.entry(input.thread_id.clone()).or_default();
         thread_state
             .originator
@@ -1063,26 +1081,54 @@ impl AnalyticsReducer {
             invocations,
         } = input;
         for invocation in invocations {
-            let skill_scope = match invocation.skill_scope {
-                SkillScope::User => "user",
-                SkillScope::Repo => "repo",
-                SkillScope::System => "system",
-                SkillScope::Admin => "admin",
+            let (skill_id, repo_url, skill_scope) = match invocation.location {
+                SkillInvocationLocation::Host { path, scope } => {
+                    let skill_scope = match scope {
+                        SkillScope::User => "user",
+                        SkillScope::Repo => "repo",
+                        SkillScope::System => "system",
+                        SkillScope::Admin => "admin",
+                    };
+                    let repo_root = get_git_repo_root(path.as_path());
+                    let repo_url = if let Some(root) = repo_root.as_ref() {
+                        collect_git_info(root)
+                            .await
+                            .and_then(|info| info.repository_url)
+                    } else {
+                        None
+                    };
+                    let skill_id = skill_id_for_local_skill(
+                        repo_url.as_deref(),
+                        repo_root.as_deref(),
+                        path.as_path(),
+                        invocation.skill_name.as_str(),
+                    );
+                    (skill_id, repo_url, Some(skill_scope.to_string()))
+                }
+                SkillInvocationLocation::Resource {
+                    id,
+                    skill_id,
+                    scope,
+                } => {
+                    if matches!(invocation.invocation_type, InvocationType::Implicit) {
+                        let turn_state = self.turns.entry(tracking.turn_id.clone()).or_default();
+                        if !turn_state.resource_skill_invocations.insert(id.clone()) {
+                            continue;
+                        }
+                    }
+                    let skill_id = skill_id
+                        .unwrap_or_else(|| format!("{:x}", sha1::Sha1::digest(id.as_bytes())));
+                    let skill_scope = scope
+                        .map(|scope| match scope {
+                            SkillScope::User => "user",
+                            SkillScope::Repo => "repo",
+                            SkillScope::System => "system",
+                            SkillScope::Admin => "admin",
+                        })
+                        .map(str::to_owned);
+                    (skill_id, None, skill_scope)
+                }
             };
-            let repo_root = get_git_repo_root(invocation.skill_path.as_path());
-            let repo_url = if let Some(root) = repo_root.as_ref() {
-                collect_git_info(root)
-                    .await
-                    .and_then(|info| info.repository_url)
-            } else {
-                None
-            };
-            let skill_id = skill_id_for_local_skill(
-                repo_url.as_deref(),
-                repo_root.as_deref(),
-                invocation.skill_path.as_path(),
-                invocation.skill_name.as_str(),
-            );
             out.push(TrackEventRequest::SkillInvocation(
                 SkillInvocationEventRequest {
                     event_type: "skill_invocation",
@@ -1095,7 +1141,7 @@ impl AnalyticsReducer {
                         model_slug: Some(tracking.model_slug.clone()),
                         product_client_id: Some(tracking.product_client_id.clone()),
                         repo_url,
-                        skill_scope: Some(skill_scope.to_string()),
+                        skill_scope,
                         plugin_id: invocation.plugin_id,
                         remote_plugin_id: invocation.remote_plugin_id,
                     },
@@ -2023,11 +2069,9 @@ impl AnalyticsReducer {
             return;
         };
         let drop_site = AnalyticsDropSite::turn(thread_id, turn_id);
-        let connection_id = turn_state.connection_id.or_else(|| {
-            self.threads
-                .get(drop_site.thread_id)
-                .and_then(|thread| thread.connection_id)
-        });
+        let connection_id = turn_state
+            .connection_id
+            .or_else(|| self.thread_connection_id(drop_site.thread_id));
         let Some(connection_id) = connection_id else {
             warn_missing_analytics_context(&drop_site, MissingAnalyticsContext::ThreadConnection);
             return;
@@ -2067,15 +2111,24 @@ impl AnalyticsReducer {
         self.turns.remove(turn_id);
     }
 
+    /// Resolve the parent connection lazily when a subagent fact arrives first.
+    ///
+    /// Parents are spawned before their children, so ancestor links cannot cycle.
+    fn thread_connection_id(&self, thread_id: &str) -> Option<u64> {
+        let mut thread = self.threads.get(thread_id)?;
+        while thread.connection_id.is_none() {
+            let thread_metadata = thread.metadata.as_ref()?;
+            let parent_thread_id = thread_metadata.parent_thread_id.as_deref()?;
+            thread = self.threads.get(parent_thread_id)?;
+        }
+        thread.connection_id
+    }
+
     fn thread_connection_or_warn(
         &self,
         drop_site: AnalyticsDropSite<'_>,
     ) -> Option<&ConnectionState> {
-        let Some(thread_state) = self.threads.get(drop_site.thread_id) else {
-            warn_missing_analytics_context(&drop_site, MissingAnalyticsContext::ThreadConnection);
-            return None;
-        };
-        let Some(connection_id) = thread_state.connection_id else {
+        let Some(connection_id) = self.thread_connection_id(drop_site.thread_id) else {
             warn_missing_analytics_context(&drop_site, MissingAnalyticsContext::ThreadConnection);
             return None;
         };
