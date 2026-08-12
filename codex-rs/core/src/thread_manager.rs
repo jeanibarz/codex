@@ -1,5 +1,4 @@
 use crate::CodexAppsToolsCache;
-use crate::HostSkillsService;
 use crate::agent::AgentControl;
 use crate::attestation::AttestationProvider;
 use crate::codex_thread::CodexThread;
@@ -68,6 +67,7 @@ use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::protocol::W3cTraceContext;
 use codex_rollout::state_db::StateDbHandle;
+use codex_skills_extension::HostSkillsService;
 use codex_thread_store::InMemoryThreadStore;
 use codex_thread_store::LoadThreadHistoryParams;
 use codex_thread_store::LocalThreadStore;
@@ -2120,14 +2120,14 @@ fn append_interrupted_boundary(
         InitialHistory::New | InitialHistory::Cleared => {
             let mut history = Vec::new();
             if let Some(marker) = interrupted_turn_history_marker(interrupted_marker) {
-                history.push(RolloutItem::ResponseItem(marker));
+                history.push(RolloutItem::ResponseItem(marker.into()));
             }
             history.push(aborted_event);
             InitialHistory::Forked(history)
         }
         InitialHistory::Forked(mut history) => {
             if let Some(marker) = interrupted_turn_history_marker(interrupted_marker) {
-                history.push(RolloutItem::ResponseItem(marker));
+                history.push(RolloutItem::ResponseItem(marker.into()));
             }
             history.push(aborted_event);
             InitialHistory::Forked(history)
@@ -2135,7 +2135,7 @@ fn append_interrupted_boundary(
         InitialHistory::Resumed(resumed) => {
             let mut history = Arc::unwrap_or_clone(resumed.history);
             if let Some(marker) = interrupted_turn_history_marker(interrupted_marker) {
-                history.push(RolloutItem::ResponseItem(marker));
+                history.push(RolloutItem::ResponseItem(marker.into()));
             }
             history.push(aborted_event);
             InitialHistory::Forked(history)

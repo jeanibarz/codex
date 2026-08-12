@@ -320,18 +320,15 @@ fn writes_mode_does_not_require_approval_for_read_only_tools() {
 fn prompting_modes_do_not_allow_persistent_remember() {
     for approval_mode in [AppToolApproval::Prompt, AppToolApproval::Writes] {
         assert_eq!(
-            normalize_approval_decision_for_mode(
-                McpToolApprovalDecision::AcceptForSession,
-                approval_mode,
-            ),
-            McpToolApprovalDecision::Accept
+            normalize_approval_decision_for_mode(ReviewDecision::ApprovedForSession, approval_mode,),
+            ReviewDecision::Approved
         );
         assert_eq!(
             normalize_approval_decision_for_mode(
-                McpToolApprovalDecision::AcceptAndRemember,
+                ReviewDecision::ApprovedMcpPolicyAmendment,
                 approval_mode,
             ),
-            McpToolApprovalDecision::Accept
+            ReviewDecision::Approved
         );
     }
 }
@@ -741,20 +738,13 @@ fn trusted_codex_apps_tool_question_offers_always_allow() {
 
 #[test]
 fn codex_apps_tool_question_without_elicitation_omits_always_allow() {
-    let session_key = McpToolApprovalKey {
-        server: CODEX_APPS_MCP_SERVER_NAME.to_string(),
-        connector_id: Some("calendar".to_string()),
-        tool_name: "run_action".to_string(),
-    };
-    let persistent_key = session_key.clone();
     let question = build_mcp_tool_approval_question(
         "q".to_string(),
         CODEX_APPS_MCP_SERVER_NAME,
         "run_action",
         Some("Calendar"),
         mcp_tool_approval_prompt_options(
-            Some(&session_key),
-            Some(&persistent_key),
+            /*allow_session_remember*/ true, /*allow_persistent_approval*/ true,
             /*tool_call_mcp_elicitation_enabled*/ false,
         ),
         /*question_override*/ None,
@@ -1107,6 +1097,7 @@ async fn mcp_sandbox_cwd_uses_matching_server_environment_uri() -> anyhow::Resul
                     .permissions
                     .permission_profile_state()
                     .snapshot(),
+                selected_capability_roots: None,
             },
         )));
 
@@ -1739,38 +1730,6 @@ fn guardian_mcp_review_request_ignores_untrusted_connected_account_email() {
 }
 
 #[test]
-fn guardian_review_decision_maps_to_mcp_tool_decision() {
-    assert_eq!(
-        mcp_tool_approval_decision_from_guardian(ReviewDecision::Approved),
-        McpToolApprovalDecision::Accept
-    );
-    let denial = mcp_tool_approval_decision_from_guardian(ReviewDecision::denied(
-        "This action was rejected due to unacceptable risk.\nReason: too risky\nThe agent must not attempt to achieve the same outcome",
-    ));
-    let McpToolApprovalDecision::Decline {
-        message: Some(message),
-    } = denial
-    else {
-        panic!("guardian denial should carry a rejection message");
-    };
-    assert!(message.contains("Reason: too risky"));
-    assert!(message.contains("The agent must not attempt to achieve the same outcome"));
-    let timeout = mcp_tool_approval_decision_from_guardian(ReviewDecision::TimedOut);
-    let McpToolApprovalDecision::Decline {
-        message: Some(message),
-    } = timeout
-    else {
-        panic!("guardian timeout should carry a timeout message");
-    };
-    assert!(message.contains("did not finish before its deadline"));
-    assert!(!message.contains("unacceptable risk"));
-    assert_eq!(
-        mcp_tool_approval_decision_from_guardian(ReviewDecision::Abort),
-        McpToolApprovalDecision::Decline { message: None }
-    );
-}
-
-#[test]
 fn approval_elicitation_meta_includes_connector_source_for_codex_apps() {
     assert_eq!(
         build_mcp_tool_approval_elicitation_meta(
@@ -1857,7 +1816,10 @@ fn declined_elicitation_response_stays_decline() {
         "approval",
     );
 
-    assert_eq!(response, McpToolApprovalDecision::Decline { message: None });
+    assert_eq!(
+        response,
+        ReviewDecision::denied("user rejected MCP tool call")
+    );
 }
 
 #[test]
@@ -1874,7 +1836,10 @@ fn synthetic_decline_request_user_input_response_stays_decline() {
         "approval",
     );
 
-    assert_eq!(response, McpToolApprovalDecision::Decline { message: None });
+    assert_eq!(
+        response,
+        ReviewDecision::denied("user rejected MCP tool call")
+    );
 }
 
 #[test]
@@ -1890,7 +1855,7 @@ fn accepted_elicitation_response_uses_always_persist_meta() {
         "approval",
     );
 
-    assert_eq!(response, McpToolApprovalDecision::AcceptAndRemember);
+    assert_eq!(response, ReviewDecision::ApprovedMcpPolicyAmendment);
 }
 
 #[test]
@@ -1906,7 +1871,7 @@ fn accepted_elicitation_response_uses_session_persist_meta() {
         "approval",
     );
 
-    assert_eq!(response, McpToolApprovalDecision::AcceptForSession);
+    assert_eq!(response, ReviewDecision::ApprovedForSession);
 }
 
 #[test]
@@ -1920,7 +1885,7 @@ fn accepted_elicitation_without_content_defaults_to_accept() {
         "approval",
     );
 
-    assert_eq!(response, McpToolApprovalDecision::Accept);
+    assert_eq!(response, ReviewDecision::Approved);
 }
 
 #[tokio::test]
@@ -2359,6 +2324,7 @@ async fn approve_mode_skips_when_annotations_do_not_require_approval() {
         &StepContext::for_test(Arc::clone(&turn_context)),
         "call-1",
         &invocation,
+        &ToolName::namespaced(&invocation.server, &invocation.tool),
         &HookToolName::new("mcp__test__tool"),
         &metadata,
         &approval_config(&turn_context),
@@ -2437,6 +2403,7 @@ async fn guardian_mode_skips_auto_when_annotations_do_not_require_approval() {
         &StepContext::for_test(Arc::clone(&turn_context)),
         "call-guardian",
         &invocation,
+        &ToolName::namespaced(&invocation.server, &invocation.tool),
         &HookToolName::new("mcp__test__tool"),
         &metadata,
         &approval_config(&turn_context),
@@ -2497,6 +2464,7 @@ async fn permission_request_hook_allows_mcp_tool_call() {
         &StepContext::for_test(Arc::clone(&turn_context)),
         "call-mcp-hook",
         &invocation,
+        &ToolName::namespaced(&invocation.server, &invocation.tool),
         &HookToolName::new("mcp__memory__create_entities"),
         &metadata,
         &approval_config(&turn_context),
@@ -2504,7 +2472,7 @@ async fn permission_request_hook_allows_mcp_tool_call() {
     )
     .await;
 
-    assert_eq!(decision, Some(McpToolApprovalDecision::Accept));
+    assert_eq!(decision, Some(ReviewDecision::Approved));
     let log = std::fs::read_to_string(log_path).expect("read MCP permission hook log");
     let inputs = log
         .lines()
@@ -2565,6 +2533,7 @@ async fn permission_request_hook_uses_hook_tool_name_without_metadata() {
         &StepContext::for_test(Arc::clone(&turn_context)),
         "call-mcp-hook-no-metadata",
         &invocation,
+        &ToolName::namespaced(&invocation.server, &invocation.tool),
         &HookToolName::new("mcp__memory__create_entities"),
         &metadata,
         &approval_config(&turn_context),
@@ -2572,7 +2541,7 @@ async fn permission_request_hook_uses_hook_tool_name_without_metadata() {
     )
     .await;
 
-    assert_eq!(decision, Some(McpToolApprovalDecision::Accept));
+    assert_eq!(decision, Some(ReviewDecision::Approved));
     let log = std::fs::read_to_string(log_path).expect("read MCP permission hook log");
     let inputs = log
         .lines()
@@ -2648,6 +2617,7 @@ async fn permission_request_hook_runs_after_remembered_mcp_approval() {
         &StepContext::for_test(Arc::clone(&turn_context)),
         "call-mcp-remembered",
         &invocation,
+        &ToolName::namespaced(&invocation.server, &invocation.tool),
         &HookToolName::new("mcp__memory__create_entities"),
         &metadata,
         &approval_config(&turn_context),
@@ -2655,7 +2625,7 @@ async fn permission_request_hook_runs_after_remembered_mcp_approval() {
     )
     .await;
 
-    assert_eq!(decision, Some(McpToolApprovalDecision::Accept));
+    assert_eq!(decision, Some(ReviewDecision::Approved));
     assert!(
         !log_path.exists(),
         "remembered approval should skip PermissionRequest hooks"
@@ -2663,7 +2633,7 @@ async fn permission_request_hook_runs_after_remembered_mcp_approval() {
 }
 
 #[tokio::test]
-async fn guardian_mode_mcp_denial_returns_rationale_message() {
+async fn guardian_mode_mcp_denial_uses_captured_policy_and_returns_rationale_message() {
     let server = start_mock_server().await;
     let guardian_request_log = mount_sse_once(
         &server,
@@ -2688,7 +2658,7 @@ async fn guardian_mode_mcp_denial_returns_rationale_message() {
     Arc::make_mut(&mut turn_context.config)
         .permissions
         .approval_policy
-        .set(AskForApproval::OnRequest)
+        .set(AskForApproval::UnlessTrusted)
         .expect("test setup should allow updating approval policy");
     let mut config = (*turn_context.config).clone();
     config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
@@ -2727,23 +2697,26 @@ async fn guardian_mode_mcp_denial_returns_rationale_message() {
         codex_apps_meta: None,
         openai_file_input_optional_fields: None,
     };
+    let mut captured_mcp_config = approval_config(&turn_context);
+    captured_mcp_config
+        .approval_policy
+        .set(AskForApproval::OnRequest)
+        .expect("captured MCP policy should allow updating approval policy");
 
     let decision = maybe_request_mcp_tool_approval(
         &session,
         &StepContext::for_test(Arc::clone(&turn_context)),
         "call-guardian-deny",
         &invocation,
+        &ToolName::namespaced(&invocation.server, &invocation.tool),
         &HookToolName::new("mcp__test__tool"),
         &metadata,
-        &approval_config(&turn_context),
+        &captured_mcp_config,
         McpToolApprovalPolicy::for_server(AppToolApproval::Auto),
     )
     .await;
 
-    let Some(McpToolApprovalDecision::Decline {
-        message: Some(message),
-    }) = decision
-    else {
+    let Some(ReviewDecision::Denied { rejection: message }) = decision else {
         panic!("guardian-denied MCP approval should carry a rejection message");
     };
     assert!(message.contains("Reason: The tool call would expose private calendar data"));
@@ -2751,6 +2724,107 @@ async fn guardian_mode_mcp_denial_returns_rationale_message() {
     assert_eq!(
         guardian_request_log.single_request().path(),
         "/v1/responses"
+    );
+}
+
+#[tokio::test]
+async fn session_approval_preserves_mcp_session_persistence_choice() {
+    assert_mcp_user_approval_persistence(
+        MCP_TOOL_APPROVAL_PERSIST_SESSION,
+        ReviewDecision::ApprovedForSession,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn session_approval_preserves_mcp_always_persistence_choice() {
+    assert_mcp_user_approval_persistence(
+        MCP_TOOL_APPROVAL_PERSIST_ALWAYS,
+        ReviewDecision::ApprovedMcpPolicyAmendment,
+    )
+    .await;
+}
+
+async fn assert_mcp_user_approval_persistence(
+    persistence: &'static str,
+    expected_decision: ReviewDecision,
+) {
+    let (session, turn_context, rx_event) = make_session_and_context_with_rx().await;
+    *session.active_turn.lock().await = Some(ActiveTurn::default());
+    let invocation = McpInvocation {
+        server: "memory".to_string(),
+        tool: "create_entities".to_string(),
+        arguments: Some(serde_json::json!({ "entities": [] })),
+    };
+    let metadata = McpToolApprovalMetadata {
+        annotations: Some(annotations(
+            Some(false),
+            Some(true),
+            /*open_world*/ None,
+        )),
+        connector_id: None,
+        link_id: None,
+        connector_name: None,
+        connector_description: None,
+        connected_account_email: None,
+        plugin_id: None,
+        tool_title: Some("Create entities".to_string()),
+        tool_description: None,
+        mcp_app_resource_uri: None,
+        codex_apps_meta: None,
+        openai_file_input_optional_fields: None,
+    };
+
+    let approval_task = tokio::spawn({
+        let session = Arc::clone(&session);
+        let turn_context = Arc::clone(&turn_context);
+        async move {
+            maybe_request_mcp_tool_approval(
+                &session,
+                &StepContext::for_test(Arc::clone(&turn_context)),
+                "call-mcp-persist",
+                &invocation,
+                &ToolName::namespaced(&invocation.server, &invocation.tool),
+                &HookToolName::new("mcp__memory__create_entities"),
+                &metadata,
+                &approval_config(&turn_context),
+                McpToolApprovalPolicy::for_server(AppToolApproval::Auto),
+            )
+            .await
+        }
+    });
+
+    let request = loop {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx_event.recv())
+            .await
+            .expect("MCP approval elicitation timed out")
+            .expect("expected MCP approval elicitation event");
+        if let EventMsg::ElicitationRequest(request) = event.msg {
+            break request;
+        }
+    };
+    assert_eq!(request.server_name, "memory");
+    session
+        .resolve_elicitation(
+            "memory".to_string(),
+            rmcp::model::RequestId::String("mcp_tool_call_approval_call-mcp-persist".into()),
+            ElicitationResponse {
+                action: ElicitationAction::Accept,
+                content: None,
+                meta: Some(serde_json::json!({
+                    MCP_TOOL_APPROVAL_PERSIST_KEY: persistence,
+                })),
+            },
+        )
+        .await
+        .expect("MCP approval elicitation should resolve");
+
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), approval_task)
+            .await
+            .expect("MCP approval task timed out")
+            .expect("MCP approval task failed"),
+        Some(expected_decision),
     );
 }
 
@@ -2794,6 +2868,7 @@ async fn prompt_mode_waits_for_approval_when_annotations_do_not_require_approval
                 &StepContext::for_test(Arc::clone(&turn_context)),
                 "call-prompt",
                 &invocation,
+                &ToolName::namespaced(&invocation.server, &invocation.tool),
                 &HookToolName::new("mcp__test__tool"),
                 &metadata,
                 &approval_config(&turn_context),
@@ -2857,6 +2932,7 @@ async fn full_access_mode_skips_mcp_tool_approval_for_all_approval_modes() {
             &StepContext::for_test(Arc::clone(&turn_context)),
             "call-2",
             &invocation,
+            &ToolName::namespaced(&invocation.server, &invocation.tool),
             &HookToolName::new("mcp__test__tool"),
             &metadata,
             &approval_config(&turn_context),
@@ -2948,6 +3024,7 @@ async fn approve_mode_skips_guardian_in_every_permission_mode() {
             &StepContext::for_test(Arc::clone(&turn_context)),
             "call-3",
             &invocation,
+            &ToolName::namespaced(&invocation.server, &invocation.tool),
             &HookToolName::new("mcp__test__tool"),
             &metadata,
             &approval_config(&turn_context),

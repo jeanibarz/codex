@@ -41,12 +41,16 @@ use crate::events::codex_app_metadata;
 use crate::events::codex_hook_run_metadata;
 use crate::events::codex_plugin_metadata;
 use crate::events::codex_plugin_used_metadata;
+use crate::events::current_runtime_metadata;
 use crate::events::subagent_thread_started_event_request;
 use crate::facts::AnalyticsFact;
 use crate::facts::AnalyticsJsonRpcError;
 use crate::facts::AppInvocation;
 use crate::facts::AppMentionedInput;
 use crate::facts::AppUsedInput;
+use crate::facts::ArtifactOperation;
+use crate::facts::ArtifactOperationInput;
+use crate::facts::ArtifactOperationLifecycle;
 use crate::facts::CodeModeToolCallFact;
 use crate::facts::CodeModeToolCallStatus;
 use crate::facts::CodexCompactionEvent;
@@ -77,6 +81,7 @@ use crate::facts::PluginState;
 use crate::facts::PluginStateChangedInput;
 use crate::facts::PluginUsedInput;
 use crate::facts::SkillInvocation;
+use crate::facts::SkillInvocationLocation;
 use crate::facts::SkillInvokedInput;
 use crate::facts::SubAgentThreadStartedInput;
 use crate::facts::ThreadInitializationMode;
@@ -3420,7 +3425,6 @@ async fn subagent_tool_items_inherit_parent_connection_metadata() {
     let mut reducer = AnalyticsReducer::default();
     let mut events = Vec::new();
 
-    ingest_review_prerequisites(&mut reducer, &mut events).await;
     reducer
         .ingest(
             AnalyticsFact::Custom(CustomAnalyticsFact::SubAgentThreadStarted(
@@ -3441,7 +3445,7 @@ async fn subagent_tool_items_inherit_parent_connection_metadata() {
             &mut events,
         )
         .await;
-    events.clear();
+    ingest_review_prerequisites(&mut reducer, &mut events).await;
     reducer
         .ingest(
             AnalyticsFact::Notification(Box::new(sample_turn_started_notification(
@@ -3487,8 +3491,25 @@ async fn subagent_tool_items_inherit_parent_connection_metadata() {
         )
         .await;
 
+    ingest_code_mode_facts(
+        &mut reducer,
+        &mut events,
+        [CodeModeToolCallFact::Completed {
+            thread_id: "thread-subagent".into(),
+            turn_id: "turn-subagent".into(),
+            call_id: "exec-1".into(),
+            cell_id: None,
+            tool_name: "exec".into(),
+            started_at_ms: 1_000,
+            completed_at_ms: 1_042,
+            status: CodeModeToolCallStatus::Completed,
+        }],
+    )
+    .await;
+    reducer.flush(&mut events);
+
     let payload = serde_json::to_value(&events).expect("serialize events");
-    assert_eq!(payload.as_array().expect("events array").len(), 1);
+    assert_eq!(payload.as_array().expect("events array").len(), 2);
     assert_eq!(payload[0]["event_type"], "codex_command_execution_event");
     assert_eq!(payload[0]["event_params"]["thread_id"], "thread-subagent");
     assert_eq!(payload[0]["event_params"]["session_id"], "session-thread-1");
@@ -3499,6 +3520,8 @@ async fn subagent_tool_items_inherit_parent_connection_metadata() {
         payload[0]["event_params"]["app_server_client"]["client_name"],
         "codex-tui"
     );
+    assert_eq!(payload[1]["event_type"], "codex_dynamic_tool_call_event");
+    assert_eq!(payload[1]["event_params"]["parent_thread_id"], "thread-1");
 }
 
 #[test]
@@ -3746,6 +3769,62 @@ fn plugin_used_dedupe_is_keyed_by_turn_and_plugin() {
 }
 
 #[tokio::test]
+async fn reducer_ingests_artifact_operation_fact() {
+    let mut reducer = AnalyticsReducer::default();
+    let mut events = Vec::new();
+    reducer
+        .ingest(
+            AnalyticsFact::Custom(CustomAnalyticsFact::ArtifactOperation(
+                ArtifactOperationInput {
+                    tracking: test_tracking_context("thread-1", "turn-1"),
+                    operation: ArtifactOperation {
+                        item_id: "call-1".to_string(),
+                        lifecycle: ArtifactOperationLifecycle::Started,
+                        occurred_at_ms: 1_786_000_000_000,
+                        plugin_id: "presentations@openai-primary-runtime".to_string(),
+                        script_path: "skills/presentations/container_tools/mark_artifact_operation_started.mjs".to_string(),
+                        skill: "presentations".to_string(),
+                        artifact_type: "presentation".to_string(),
+                        operation_kind: "create".to_string(),
+                        expected_output_count: 2,
+                        output_format: "pptx".to_string(),
+                        execution_backend: "unified_exec".to_string(),
+                    },
+                },
+            )),
+            &mut events,
+        )
+        .await;
+
+    assert!(events[0].can_send_with_api_key_auth());
+    assert_eq!(
+        serde_json::to_value(events).expect("serialize events"),
+        json!([{
+            "event_type": "codex_artifact_operation",
+            "event_params": {
+                "thread_id": "thread-1",
+                "turn_id": "turn-1",
+                "item_id": "call-1",
+                "lifecycle": "started",
+                "occurred_at_ms": 1_786_000_000_000_u64,
+                "product_client_id": TEST_PRODUCT_CLIENT_ID,
+                "runtime": serde_json::to_value(current_runtime_metadata())
+                    .expect("serialize runtime metadata"),
+                "model_slug": "gpt-5",
+                "plugin_id": "presentations@openai-primary-runtime",
+                "script_path": "skills/presentations/container_tools/mark_artifact_operation_started.mjs",
+                "skill": "presentations",
+                "artifact_type": "presentation",
+                "operation_kind": "create",
+                "expected_output_count": 2,
+                "output_format": "pptx",
+                "execution_backend": "unified_exec"
+            }
+        }])
+    );
+}
+
+#[tokio::test]
 async fn reducer_ingests_skill_invoked_fact() {
     let mut reducer = AnalyticsReducer::default();
     let mut events = Vec::new();
@@ -3764,8 +3843,10 @@ async fn reducer_ingests_skill_invoked_fact() {
                 tracking,
                 invocations: vec![SkillInvocation {
                     skill_name: "doc".to_string(),
-                    skill_scope: codex_protocol::protocol::SkillScope::User,
-                    skill_path,
+                    location: SkillInvocationLocation::Host {
+                        path: skill_path,
+                        scope: codex_protocol::protocol::SkillScope::User,
+                    },
                     plugin_id: None,
                     remote_plugin_id: None,
                     invocation_type: InvocationType::Explicit,
@@ -3811,8 +3892,10 @@ async fn reducer_includes_plugin_ids_for_plugin_skill_invocations() {
                 tracking,
                 invocations: vec![SkillInvocation {
                     skill_name: "sample:doc".to_string(),
-                    skill_scope: codex_protocol::protocol::SkillScope::User,
-                    skill_path,
+                    location: SkillInvocationLocation::Host {
+                        path: skill_path,
+                        scope: codex_protocol::protocol::SkillScope::User,
+                    },
                     plugin_id: Some("sample@test".to_string()),
                     remote_plugin_id: Some("plugins~Plugin_sample".to_string()),
                     invocation_type: InvocationType::Explicit,
@@ -4787,6 +4870,7 @@ async fn turn_event_counts_completed_tool_items() {
             revised_prompt: None,
             result: "ok".to_string(),
             transparent_background: None,
+            failure: None,
             saved_path: None,
         }),
     ];

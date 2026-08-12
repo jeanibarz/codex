@@ -39,7 +39,6 @@ pub(crate) struct ConfigManager {
     arg0_paths: Arg0DispatchPaths,
     thread_config_loader: Arc<RwLock<Arc<dyn ThreadConfigLoader>>>,
     process_settings_file: Option<PathBuf>,
-    pub(crate) psp: bool,
 }
 
 impl ConfigManager {
@@ -62,7 +61,6 @@ impl ConfigManager {
             arg0_paths,
             thread_config_loader: Arc::new(RwLock::new(thread_config_loader)),
             process_settings_file: None,
-            psp: false,
         }
     }
 
@@ -199,7 +197,6 @@ impl ConfigManager {
             .cloud_config_bundle(CloudConfigBundleLoader::default())
             .build()
             .await?;
-        config.psp = self.psp;
         self.apply_runtime_feature_enablement(&mut config);
         self.apply_arg0_paths(&mut config);
         Ok(config)
@@ -262,7 +259,6 @@ impl ConfigManager {
             .collect::<Vec<_>>();
         let mut typesafe_overrides = typesafe_overrides;
         apply_process_settings_file(&mut typesafe_overrides, &self.process_settings_file);
-        typesafe_overrides.psp = Some(self.psp);
 
         let mut config = codex_core::config::ConfigBuilder::default()
             .codex_home(self.codex_home.clone())

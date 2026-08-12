@@ -55,6 +55,7 @@ use crate::request_permissions::RequestPermissionsEvent;
 use crate::request_permissions::RequestPermissionsResponse;
 use crate::request_user_input::RequestUserInputResponse;
 use crate::user_input::UserInput;
+use codex_extension_items::image_generation::ImageGenerationFailure;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use schemars::JsonSchema;
@@ -2554,6 +2555,9 @@ pub struct ImageGenerationEndEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub transparent_background: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub failure: Option<ImageGenerationFailure>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub saved_path: Option<AbsolutePathBuf>,
@@ -2841,9 +2845,15 @@ impl SessionContextWindow {
     }
 }
 
-/// Exclusive position in another thread's paginated rollout history.
+/// Exclusive position in another rollout's paginated history.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, JsonSchema, TS)]
 pub struct HistoryPosition {
+    /// Rollout ID for the immutable prefix file.
+    ///
+    /// `HistoryPosition` predates `thread/revert`, so this field is named `thread_id`. Treat its
+    /// value as a `rollout_id`: ordinary rollouts use the thread ID as their rollout ID, while a
+    /// reverted thread's filename carries a distinct rollout ID. It is not necessarily
+    /// [`SessionMeta::id`], which remains the stable thread ID across revert.
     pub thread_id: ThreadId,
     /// First rollout ordinal not included from the prefix file.
     pub end_ordinal_exclusive: u64,
@@ -3862,6 +3872,10 @@ pub enum ReviewDecision {
     /// remainder of the session.
     ApprovedForSession,
 
+    /// User has approved this MCP tool call and wants to amend its policy so
+    /// matching future calls are automatically approved across sessions.
+    ApprovedMcpPolicyAmendment,
+
     /// User chose to persist a network policy rule (allow/deny) for future
     /// requests to the same host.
     NetworkPolicyAmendment {
@@ -3902,6 +3916,7 @@ impl ReviewDecision {
             ReviewDecision::Approved => "approved",
             ReviewDecision::ApprovedExecpolicyAmendment { .. } => "approved_with_amendment",
             ReviewDecision::ApprovedForSession => "approved_for_session",
+            ReviewDecision::ApprovedMcpPolicyAmendment => "approved_mcp_policy_amendment",
             ReviewDecision::NetworkPolicyAmendment {
                 network_policy_amendment,
             } => match network_policy_amendment.action {
