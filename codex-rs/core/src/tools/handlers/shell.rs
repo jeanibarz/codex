@@ -24,6 +24,7 @@ use crate::tools::runtimes::shell::ShellRequest;
 use crate::tools::runtimes::shell::ShellRuntime;
 use crate::tools::runtimes::shell::ShellRuntimeBackend;
 use crate::tools::sandboxing::ToolCtx;
+use codex_core_plugins::strip_output_env;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::protocol::ExecCommandSource;
 use codex_tools::ToolName;
@@ -92,7 +93,9 @@ async fn run_exec_like(args: RunExecLikeArgs) -> Result<FunctionToolOutput, Func
         &mut explicit_env_overrides,
         &session.dependency_env().await,
     );
-
+    let mut env = exec_params.env.clone();
+    strip_output_env(&mut env);
+    strip_output_env(&mut explicit_env_overrides);
     let exec_permission_approvals_enabled =
         session.features().enabled(Feature::ExecPermissionApprovals);
     let requested_additional_permissions = additional_permissions.clone();
@@ -206,7 +209,7 @@ async fn run_exec_like(args: RunExecLikeArgs) -> Result<FunctionToolOutput, Func
         cwd: exec_params.cwd.clone(),
         timeout_ms: exec_params.expiration.timeout_ms(),
         cancellation_token,
-        env: exec_params.env.clone(),
+        env,
         explicit_env_overrides,
         network: exec_params.network.clone(),
         sandbox_permissions: effective_additional_permissions.sandbox_permissions,
