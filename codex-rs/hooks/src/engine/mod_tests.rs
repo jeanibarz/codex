@@ -2047,6 +2047,7 @@ async fn mcp_tool_hooks_expand_event_input_and_apply_pre_tool_decisions() {
             args: Vec::new(),
         }),
         Arc::new(executor),
+        /*settings_file*/ None,
     );
     let outcome = engine.run_pre_tool_use(request).await;
 
