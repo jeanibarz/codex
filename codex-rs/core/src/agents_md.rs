@@ -118,7 +118,7 @@ pub(crate) async fn load_project_instructions(
             Ok(None) => {}
             Err(e) => {
                 error!(
-                    environment_id = turn_environment.environment_id,
+                    environment_id = turn_environment.selection.environment_id,
                     "error trying to discover conditional rules: {e:#}"
                 );
             }

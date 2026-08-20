@@ -34,8 +34,6 @@ use crate::events::session_end::SESSION_END_MAX_TIMEOUT_SEC;
 use crate::output_spill::AdditionalContextLimit;
 use crate::output_spill::DEFAULT_HOOK_OUTPUT_TOKEN_LIMIT;
 use codex_protocol::protocol::HookEventName;
-use codex_protocol::protocol::HookExecutionMode;
-use codex_protocol::protocol::HookHandlerType;
 use codex_protocol::protocol::HookSource;
 use codex_protocol::protocol::HookTrustStatus;
 
@@ -1084,6 +1082,7 @@ pub(crate) fn append_settings_file_handlers(result: &mut DiscoveryResult, settin
         key_source: source_path.display().to_string(),
         source: HookSource::SupervisorSettings,
         is_managed: true,
+        requirement: HookRequirement::Optional,
         bypass_hook_trust: false,
         hook_states: &hook_states,
         env: HashMap::new(),
