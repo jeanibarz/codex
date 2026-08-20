@@ -1,6 +1,7 @@
 use anyhow::Result;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;
 use core_test_support::responses::ev_apply_patch_custom_tool_call;
 use core_test_support::responses::ev_apply_patch_shell_command_call_via_heredoc;
@@ -31,6 +32,7 @@ use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::ThreadSettingsOverrides;
@@ -58,6 +60,7 @@ use core_test_support::skip_if_target_windows;
 use core_test_support::skip_if_wine_exec;
 use core_test_support::test_codex::TestCodexBuilder;
 use core_test_support::test_codex::TestCodexHarness;
+use core_test_support::test_codex::executor_path_uri;
 use core_test_support::test_codex::local;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
@@ -65,6 +68,7 @@ use core_test_support::test_target_os;
 use core_test_support::wait_for_event;
 use core_test_support::wait_for_event_with_timeout;
 use serde_json::json;
+use test_case::test_case;
 use wiremock::Mock;
 use wiremock::Respond;
 use wiremock::ResponseTemplate;
@@ -144,7 +148,7 @@ fn workspace_write_with_read_only_root(read_only_root: AbsolutePathBuf) -> Permi
     let file_system_sandbox_policy = FileSystemSandboxPolicy::restricted(vec![
         FileSystemSandboxEntry {
             path: FileSystemPath::Path {
-                path: read_only_root,
+                path: read_only_root.into(),
             },
             access: FileSystemAccessMode::Read,
             missing_path_behavior: None,
@@ -168,7 +172,7 @@ fn workspace_write_with_unreadable_path(unreadable_path: AbsolutePathBuf) -> Per
     let file_system_sandbox_policy = FileSystemSandboxPolicy::restricted(vec![
         FileSystemSandboxEntry {
             path: FileSystemPath::Path {
-                path: unreadable_path,
+                path: unreadable_path.into(),
             },
             access: FileSystemAccessMode::Deny,
             missing_path_behavior: None,
@@ -984,6 +988,71 @@ async fn apply_patch_cli_does_not_write_through_symlink_escape_outside_workspace
     Ok(())
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn apply_patch_cli_does_not_widen_permissions_for_workspace_directory_target() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_remote!(
+        Ok(()),
+        "link escape setup needs local filesystem link creation"
+    );
+
+    let test_root = tempfile::tempdir_in(std::env::current_dir()?)?;
+    let work_dir = AbsolutePathBuf::try_from(test_root.path().join("work"))?;
+    std::fs::create_dir_all(work_dir.as_path())?;
+    let outside_file = test_root.path().join("victim.txt");
+    let original_contents = "original outside content\n";
+    std::fs::write(&outside_file, original_contents)?;
+
+    let harness_work_dir = work_dir.clone();
+    let harness = apply_patch_harness_with(move |builder| {
+        builder.with_config(move |config| {
+            config.approvals_reviewer = codex_protocol::config_types::ApprovalsReviewer::User;
+            config.workspace_roots = vec![harness_work_dir.clone()];
+            config
+                .permissions
+                .set_workspace_roots(config.workspace_roots.clone());
+            config.cwd = harness_work_dir;
+        })
+    })
+    .await?;
+    let link_path = harness.path("link.txt");
+    create_file_symlink(&outside_file, &link_path)?;
+
+    // The second hunk names the already-writable workspace directory. It must
+    // not grant access to that directory's parent before the first hunk runs.
+    let patch = r#"*** Begin Patch
+*** Update File: link.txt
+@@
+-original outside content
++pwned
+*** Add File: ../work
++decoy
+*** End Patch"#;
+    let call_id = "apply-workspace-directory-decoy";
+    mount_apply_patch(&harness, call_id, patch, "fail").await;
+
+    harness
+        .submit_with_permission_profile(
+            "attempt to widen apply_patch permissions with a directory target",
+            restrictive_workspace_write_profile(),
+        )
+        .await?;
+
+    let out = harness.apply_patch_output(call_id).await;
+    assert_eq!(
+        std::fs::read_to_string(&outside_file)?,
+        original_contents,
+        "directory target must not make the outside victim writable; tool output: {out}",
+    );
+    assert!(
+        std::fs::symlink_metadata(&link_path)?
+            .file_type()
+            .is_symlink()
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn apply_patch_cli_preserves_existing_hard_link_outside_workspace() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -1573,6 +1642,103 @@ async fn apply_patch_turn_diff_paths_stay_repo_relative_when_session_cwd_is_nest
     Ok(())
 }
 
+#[test_case("codex_work_web", true, "work.txt"; "web work uses cwd when enabled")]
+#[test_case("codex_work_mobile", true, "work.txt"; "mobile work uses cwd when enabled")]
+#[test_case("codex_work_web", false, "subdir/work.txt"; "disabled feature keeps repository root")]
+#[test_case("codex_work_desktop", true, "work.txt"; "desktop uses cwd when enabled")]
+#[test_case("codex_work_cca", true, "work.txt"; "legacy cca uses cwd when enabled")]
+#[test_case("codex_cli_rs", true, "work.txt"; "coding originator uses cwd when enabled")]
+#[test_case("codex_cli_rs", false, "subdir/work.txt"; "coding originator keeps repository root when disabled")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn apply_patch_turn_diff_skips_git_root_when_feature_is_enabled(
+    originator: &str,
+    cwd_relative_turn_diffs: bool,
+    expected_path: &str,
+) -> Result<()> {
+    skip_if_wine_exec!(Ok(()), "asserts POSIX repository paths");
+    skip_if_no_network!(Ok(()));
+
+    let harness = apply_patch_harness_with(|builder| {
+        builder
+            .with_model("gpt-5.4")
+            .with_config(move |config| {
+                config.cwd = config.cwd.join("subdir");
+                if cwd_relative_turn_diffs {
+                    config
+                        .features
+                        .enable(Feature::CwdRelativeTurnDiffs)
+                        .expect("enable turn diff root feature");
+                }
+            })
+            .with_workspace_setup(|cwd, fs| async move {
+                let cwd_uri = PathUri::from_host_native_path(&cwd)?;
+                fs.create_directory(
+                    &cwd_uri,
+                    CreateDirectoryOptions { recursive: true },
+                    /*sandbox*/ None,
+                )
+                .await?;
+                let repo_root = cwd.parent().expect("nested cwd should have parent");
+                let git_uri = PathUri::from_host_native_path(repo_root.join(".git"))?;
+                let work_file_uri = PathUri::from_host_native_path(cwd.join("work.txt"))?;
+                fs.write_file(
+                    &git_uri,
+                    b"gitdir: /tmp/fake-worktree\n".to_vec(),
+                    /*sandbox*/ None,
+                )
+                .await?;
+                fs.write_file(&work_file_uri, b"before\n".to_vec(), /*sandbox*/ None)
+                    .await?;
+                Ok(())
+            })
+    })
+    .await?;
+    let test = harness.test();
+    let codex = test
+        .thread_manager
+        .start_thread(StartThreadOptions {
+            metrics_service_name: Some(originator.to_string()),
+            environments: Some(test.codex.environment_selections().await),
+            ..StartThreadOptions::new(test.config.clone())
+        })
+        .await?
+        .thread;
+    let patch = "*** Begin Patch\n*** Update File: work.txt\n@@\n-before\n+after\n*** End Patch";
+    mount_apply_patch(&harness, "apply-work-diff-root", patch, "updated work file").await;
+
+    codex
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
+                text: "update the work file".into(),
+                text_elements: Vec::new(),
+            }])
+            .with_thread_settings(ThreadSettingsOverrides {
+                approval_policy: Some(AskForApproval::Never),
+                sandbox_policy: Some(SandboxPolicy::DangerFullAccess),
+                ..Default::default()
+            }),
+        )
+        .await?;
+
+    let mut last_diff = None;
+    wait_for_event(&codex, |event| match event {
+        EventMsg::TurnDiff(event) => {
+            last_diff = Some(event.unified_diff.clone());
+            false
+        }
+        EventMsg::TurnComplete(_) => true,
+        _ => false,
+    })
+    .await;
+
+    let diff = last_diff.expect("expected TurnDiff event after update");
+    assert!(
+        diff.contains(&format!("diff --git a/{expected_path} b/{expected_path}")),
+        "unexpected turn diff path for {originator}: {diff:?}",
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn apply_patch_shell_command_failure_propagates_error_and_skips_diff() -> Result<()> {
     // TODO(anp): Remove after apply_patch shell fixtures use target-native commands.
@@ -1886,6 +2052,7 @@ async fn apply_patch_turn_diff_tracks_local_and_remote_environment_paths() -> Re
             environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
             cwd: PathUri::from_abs_path(&shared_cwd),
             workspace_roots: vec![PathUri::from_abs_path(&shared_cwd)],
+            config: EnvironmentConfigState::FromThread,
         },
     ];
     test.codex
@@ -2100,7 +2267,7 @@ async fn apply_patch_clears_aggregated_diff_after_inexact_delta() -> Result<()> 
 
     let harness = apply_patch_harness_with(|builder| {
         builder.with_workspace_setup(|cwd, fs| async move {
-            let binary_path_uri = PathUri::from_host_native_path(cwd.join("binary.dat"))?;
+            let binary_path_uri = executor_path_uri(cwd.join("binary.dat"))?;
             fs.write_file(
                 &binary_path_uri,
                 vec![0xff, 0xfe, 0xfd],

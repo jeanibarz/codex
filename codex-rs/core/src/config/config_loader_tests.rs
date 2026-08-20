@@ -103,7 +103,13 @@ async fn write_linked_worktree_pointer(
         worktree_root.join(".git"),
         format!("gitdir: {}\n", worktree_git_dir.display()),
     )
-    .await
+    .await?;
+    tokio::fs::write(
+        worktree_git_dir.join("gitdir"),
+        format!("{}\n", worktree_root.join(".git").display()),
+    )
+    .await?;
+    tokio::fs::write(worktree_git_dir.join("commondir"), "../..\n").await
 }
 
 async fn write_project_hook_config(
@@ -215,6 +221,68 @@ invalid = ["#,
         "expected ignored user config to preserve only layer metadata"
     );
     assert_eq!(layers.effective_config().get("model"), None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn ignore_project_config_skips_project_discovery() -> std::io::Result<()> {
+    let tmp = tempdir().expect("tempdir");
+    let codex_home = tmp.path().join("home");
+    let workspace = tmp.path().join("workspace");
+    tokio::fs::create_dir_all(codex_home.as_path()).await?;
+    tokio::fs::create_dir_all(workspace.join(".git")).await?;
+    make_config_for_test(
+        &codex_home,
+        &workspace,
+        TrustLevel::Trusted,
+        /*project_root_markers*/ None,
+    )
+    .await?;
+    let project_config_dir = workspace.join(".codex");
+    tokio::fs::create_dir_all(&project_config_dir).await?;
+    tokio::fs::write(
+        project_config_dir.join(CONFIG_TOML_FILE),
+        r#"model = "from-project"
+invalid = ["#,
+    )
+    .await?;
+
+    let cwd = AbsolutePathBuf::from_absolute_path(&workspace)?;
+    let layers = load_config_layers_state(
+        LOCAL_FS.as_ref(),
+        &codex_home,
+        Some(cwd),
+        &[(
+            "model".to_string(),
+            TomlValue::String("from-session".to_string()),
+        )],
+        ConfigLoadOptions {
+            loader_overrides: LoaderOverrides {
+                ignore_project_config: true,
+                ..LoaderOverrides::without_managed_config_for_tests()
+            },
+            cloud_config_bundle: CloudConfigBundleFixture::loader_with_enterprise_config(
+                r#"review_model = "from-cloud""#,
+            ),
+            ..Default::default()
+        },
+        &codex_config::NoopThreadConfigLoader,
+    )
+    .await?;
+
+    assert!(
+        layers
+            .layers_low_to_high()
+            .all(|layer| !matches!(layer.name, ConfigLayerSource::Project { .. }))
+    );
+    assert_eq!(
+        layers.effective_config().get("model"),
+        Some(&TomlValue::String("from-session".to_string()))
+    );
+    assert_eq!(
+        layers.effective_config().get("review_model"),
+        Some(&TomlValue::String("from-cloud".to_string()))
+    );
     Ok(())
 }
 
@@ -2774,6 +2842,59 @@ async fn linked_worktree_project_layers_keep_worktree_config_but_use_root_repo_h
 }
 
 #[tokio::test]
+async fn forged_linked_worktree_does_not_inherit_repo_trust() -> std::io::Result<()> {
+    let tmp = tempdir()?;
+    let trusted_root = tmp.path().join("trusted");
+    let attacker_root = tmp.path().join("attacker");
+    tokio::fs::create_dir_all(trusted_root.join(".git")).await?;
+    tokio::fs::create_dir_all(attacker_root.join(".codex")).await?;
+    tokio::fs::write(
+        attacker_root.join(".git"),
+        format!(
+            "gitdir: {}\n",
+            trusted_root.join(".git/worktrees/missing").display()
+        ),
+    )
+    .await?;
+    tokio::fs::write(
+        attacker_root.join(".codex").join(CONFIG_TOML_FILE),
+        r#"foo = "attacker"
+"#,
+    )
+    .await?;
+
+    let codex_home = tmp.path().join("home");
+    tokio::fs::create_dir_all(&codex_home).await?;
+    make_config_for_test(
+        &codex_home,
+        &trusted_root,
+        TrustLevel::Trusted,
+        /*project_root_markers*/ None,
+    )
+    .await?;
+
+    let layers = load_config_layers_state(
+        LOCAL_FS.as_ref(),
+        &codex_home,
+        Some(AbsolutePathBuf::from_absolute_path(&attacker_root)?),
+        &[] as &[(String, TomlValue)],
+        LoaderOverrides::default(),
+        &codex_config::NoopThreadConfigLoader,
+    )
+    .await?;
+    let project_layers = layers
+        .all_layers_high_to_low()
+        .filter(|layer| matches!(layer.name, ConfigLayerSource::Project { .. }))
+        .collect::<Vec<_>>();
+
+    assert_eq!(project_layers.len(), 1);
+    assert!(project_layers[0].disabled_reason.is_some());
+    assert_eq!(layers.effective_config().get("foo"), None);
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn malformed_untrusted_linked_worktree_does_not_read_root_hooks() -> std::io::Result<()> {
     let tmp = tempdir()?;
     let repo_root = tmp.path().join("repo");
@@ -3222,6 +3343,7 @@ async fn codex_home_within_project_tree_is_not_double_loaded() -> std::io::Resul
 
     tokio::fs::create_dir_all(&nested_dot_codex).await?;
     tokio::fs::create_dir_all(project_root.join(".git")).await?;
+    tokio::fs::write(project_root.join(".git/HEAD"), "ref: refs/heads/main\n").await?;
     tokio::fs::write(
         nested_dot_codex.join(CONFIG_TOML_FILE),
         r#"foo = "child"

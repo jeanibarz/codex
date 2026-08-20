@@ -69,6 +69,24 @@ impl ConfigManager {
         self
     }
 
+    pub(crate) fn replace_thread_config_loader(
+        &self,
+        thread_config_loader: Arc<dyn ThreadConfigLoader>,
+    ) {
+        if let Ok(mut guard) = self.thread_config_loader.write() {
+            *guard = thread_config_loader;
+        } else {
+            warn!("failed to update thread config loader");
+        }
+    }
+
+    fn current_thread_config_loader(&self) -> Arc<dyn ThreadConfigLoader> {
+        self.thread_config_loader
+            .read()
+            .map(|guard| Arc::clone(&*guard))
+            .unwrap_or_else(|_| Arc::new(codex_config::NoopThreadConfigLoader))
+    }
+
     pub(crate) fn codex_home(&self) -> &Path {
         self.codex_home.as_path()
     }
@@ -126,24 +144,6 @@ impl ConfigManager {
         } else {
             warn!("failed to clear cloud config bundle loader");
         }
-    }
-
-    pub(crate) fn replace_thread_config_loader(
-        &self,
-        thread_config_loader: Arc<dyn ThreadConfigLoader>,
-    ) {
-        if let Ok(mut guard) = self.thread_config_loader.write() {
-            *guard = thread_config_loader;
-        } else {
-            warn!("failed to update thread config loader");
-        }
-    }
-
-    fn current_thread_config_loader(&self) -> Arc<dyn ThreadConfigLoader> {
-        self.thread_config_loader
-            .read()
-            .map(|guard| Arc::clone(&*guard))
-            .unwrap_or_else(|_| Arc::new(codex_config::NoopThreadConfigLoader))
     }
 
     pub(crate) async fn sync_default_client_residency_requirement(&self) {

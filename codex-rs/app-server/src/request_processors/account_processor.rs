@@ -182,9 +182,6 @@ impl AccountRequestProcessor {
 
     pub(crate) fn clear_external_auth(&self) {
         self.auth_manager.clear_external_auth();
-        self.thread_manager
-            .plugins_manager()
-            .set_auth_mode(self.auth_manager.get_api_auth_mode());
     }
 
     fn current_account_updated_notification(&self) -> AccountUpdatedNotification {
@@ -217,9 +214,6 @@ impl AccountRequestProcessor {
         thread_manager: &Arc<ThreadManager>,
         auth: Option<CodexAuth>,
     ) {
-        thread_manager
-            .plugins_manager()
-            .set_auth_mode(auth.as_ref().map(CodexAuth::api_auth_mode));
         thread_manager
             .plugins_manager()
             .clear_recommended_plugins_cache();
@@ -284,6 +278,9 @@ impl AccountRequestProcessor {
         request_id: ConnectionRequestId,
         params: LoginAccountParams,
     ) -> Result<(), JSONRPCErrorError> {
+        if self.auth_manager.is_workload_identity_selected() {
+            return Err(self.configured_auth_owned_by_host_error());
+        }
         match params {
             LoginAccountParams::ApiKey { api_key } => {
                 self.login_api_key_v2(request_id, LoginApiKeyParams { api_key })
@@ -338,6 +335,12 @@ impl AccountRequestProcessor {
     fn external_auth_active_error(&self) -> JSONRPCErrorError {
         invalid_request(
             "External auth is active. Use account/login/start (chatgptAuthTokens) to update it or account/logout to clear it.",
+        )
+    }
+
+    fn configured_auth_owned_by_host_error(&self) -> JSONRPCErrorError {
+        invalid_request(
+            "Configured external authentication is owned by the app-server host and cannot be changed through account RPCs.",
         )
     }
 
@@ -868,6 +871,9 @@ impl AccountRequestProcessor {
     }
 
     async fn logout_common(&self) -> std::result::Result<Option<AuthMode>, JSONRPCErrorError> {
+        if self.auth_manager.is_workload_identity_selected() {
+            return Err(self.configured_auth_owned_by_host_error());
+        }
         let managed_bedrock_auth = matches!(
             self.auth_manager.auth_cached(),
             Some(CodexAuth::BedrockApiKey(_))
@@ -986,30 +992,31 @@ impl AccountRequestProcessor {
                     let permanent_refresh_failure =
                         self.auth_manager.refresh_failure_for_auth(&auth).is_some();
                     let auth_mode = auth_mode_to_api(auth.api_auth_mode());
-                    let (reported_auth_method, token_opt) = if matches!(
-                        auth,
-                        CodexAuth::Headers(_)
-                            | CodexAuth::AgentIdentity(_)
-                            | CodexAuth::PersonalAccessToken(_)
-                    ) || include_token
-                        && permanent_refresh_failure
-                    {
-                        // This response cannot represent the metadata needed to reuse these
-                        // credentials.
-                        (Some(auth_mode), None)
-                    } else {
-                        match auth.get_token() {
-                            Ok(token) if !token.is_empty() => {
-                                let tok = if include_token { Some(token) } else { None };
-                                (Some(auth_mode), tok)
+                    let (reported_auth_method, token_opt) =
+                        if self.auth_manager.is_workload_identity_selected()
+                            || matches!(
+                                auth,
+                                CodexAuth::Headers(_)
+                                    | CodexAuth::AgentIdentity(_)
+                                    | CodexAuth::PersonalAccessToken(_)
+                            )
+                            || include_token && permanent_refresh_failure
+                        {
+                            // Host-owned and metadata-bearing credentials are never exported.
+                            (Some(auth_mode), None)
+                        } else {
+                            match auth.get_token() {
+                                Ok(token) if !token.is_empty() => {
+                                    let tok = if include_token { Some(token) } else { None };
+                                    (Some(auth_mode), tok)
+                                }
+                                Ok(_) => (None, None),
+                                Err(err) => {
+                                    tracing::warn!("failed to get token for auth status: {err}");
+                                    (None, None)
+                                }
                             }
-                            Ok(_) => (None, None),
-                            Err(err) => {
-                                tracing::warn!("failed to get token for auth status: {err}");
-                                (None, None)
-                            }
-                        }
-                    };
+                        };
                     GetAuthStatusResponse {
                         auth_method: reported_auth_method,
                         auth_token: token_opt,
@@ -1399,6 +1406,7 @@ mod tests {
     use super::*;
     use codex_backend_client::TokenUsageProfileDailyBucket;
     use codex_backend_client::TokenUsageProfileStats;
+    use http::StatusCode;
     use pretty_assertions::assert_eq;
 
     #[test]
@@ -1470,9 +1478,9 @@ mod tests {
     #[test]
     fn workspace_messages_feature_disabled_only_for_not_found() {
         let cases = [
-            (reqwest::StatusCode::NOT_FOUND, true),
-            (reqwest::StatusCode::UNAUTHORIZED, false),
-            (reqwest::StatusCode::FORBIDDEN, false),
+            (StatusCode::NOT_FOUND, true),
+            (StatusCode::UNAUTHORIZED, false),
+            (StatusCode::FORBIDDEN, false),
         ];
 
         for (status, expected) in cases {
