@@ -1,6 +1,4 @@
-use crate::command_safety::is_safe_command::is_safe_git_command;
-use crate::command_safety::powershell_parser::PowershellParseOutcome;
-use crate::command_safety::powershell_parser::parse_with_powershell_ast;
+use crate::command_safety::try_parse_powershell_commands;
 use std::path::Path;
 
 /// On Windows, we conservatively allow only clearly read-only PowerShell invocations
@@ -93,14 +91,8 @@ fn parse_powershell_invocation(executable: &str, args: &[String]) -> Option<Vec<
 
 /// Tokenizes an inline PowerShell script and delegates to the command splitter.
 /// Examples of when this is called: pwsh.exe -Command '<script>' or pwsh.exe -Command:<script>
-fn parse_powershell_script(executable: &str, script: &str) -> Option<Vec<Vec<String>>> {
-    if let PowershellParseOutcome::Commands(commands) =
-        parse_with_powershell_ast(executable, script)
-    {
-        Some(commands)
-    } else {
-        None
-    }
+fn parse_powershell_script(_executable: &str, script: &str) -> Option<Vec<Vec<String>>> {
+    try_parse_powershell_commands(script)
 }
 
 /// Returns true when the executable name is one of the supported PowerShell binaries.
@@ -188,7 +180,8 @@ pub(crate) fn is_safe_powershell_words(words: &[String]) -> bool {
         "select-object" | "select" => true,
         "get-item" => true,
 
-        "git" => is_safe_git_command(words),
+        // Repository configuration can make even read-only Git commands execute helpers.
+        "git" => false,
 
         "rg" => is_safe_ripgrep(words),
 
@@ -225,7 +218,6 @@ fn is_safe_ripgrep(words: &[String]) -> bool {
 mod tests {
     use super::*;
     use crate::powershell::try_find_pwsh_executable_blocking;
-    use pretty_assertions::assert_eq;
     use std::string::ToString;
 
     /// Converts a slice of string literals into owned `String`s for the tests.
@@ -240,13 +232,6 @@ mod tests {
             "-NoLogo",
             "-Command",
             "Get-ChildItem -Path .",
-        ])));
-
-        assert!(is_safe_command_windows(&vec_str(&[
-            "powershell.exe",
-            "-NoProfile",
-            "-Command",
-            "git status",
         ])));
 
         assert!(is_safe_command_windows(&vec_str(&[
@@ -290,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn allows_read_only_pipelines_and_git_usage() {
+    fn allows_read_only_pipelines() {
         let Some(pwsh) = try_find_pwsh_executable_blocking() else {
             return;
         };
@@ -314,18 +299,6 @@ mod tests {
         ]));
 
         assert!(is_safe_command_windows(&[
-            pwsh.clone(),
-            "-Command".to_string(),
-            "git show HEAD:foo.rs".to_string()
-        ]));
-
-        assert!(is_safe_command_windows(&[
-            pwsh.clone(),
-            "-Command".to_string(),
-            "(Get-Content foo.rs -Raw)".to_string()
-        ]));
-
-        assert!(is_safe_command_windows(&[
             pwsh,
             "-Command".to_string(),
             "Get-Item foo.rs | Select-Object Length".to_string()
@@ -333,82 +306,36 @@ mod tests {
     }
 
     #[test]
-    fn rejects_git_global_override_options() {
-        let Some(pwsh) = try_find_pwsh_executable_blocking() else {
-            return;
-        };
-
-        let pwsh: String = pwsh.as_path().to_str().unwrap().into();
-        for script in [
-            "git -c core.pager=cat show HEAD:foo.rs",
-            "git --config-env core.pager=PAGER show HEAD:foo.rs",
-            "git --config-env=core.pager=PAGER show HEAD:foo.rs",
-            "git --git-dir .evil-git diff HEAD~1..HEAD",
-            "git --git-dir=.evil-git diff HEAD~1..HEAD",
-            "git --work-tree . status",
-            "git --work-tree=. status",
-            "git --exec-path .git/helpers show HEAD:foo.rs",
-            "git --exec-path=.git/helpers show HEAD:foo.rs",
-            "git --namespace attacker show HEAD:foo.rs",
-            "git --namespace=attacker show HEAD:foo.rs",
-            "git --super-prefix attacker/ show HEAD:foo.rs",
-            "git --super-prefix=attacker/ show HEAD:foo.rs",
+    fn rejects_git_commands() {
+        for args in [
+            vec_str(&["git", "status", "--short"]),
+            vec_str(&["git", "log", "-p", "-1"]),
+            vec_str(&["git", "diff"]),
+            vec_str(&["git", "show", "HEAD:foo.rs"]),
+            vec_str(&["git", "branch", "--show-current"]),
+            vec_str(&["git", "--version"]),
         ] {
+            assert!(!is_safe_powershell_words(&args));
+            let script = args.join(" ");
             assert!(
                 !is_safe_command_windows(&[
-                    pwsh.clone(),
-                    "-NoLogo".to_string(),
+                    "powershell.exe".to_string(),
                     "-NoProfile".to_string(),
                     "-Command".to_string(),
-                    script.to_string(),
+                    script.clone(),
                 ]),
-                "expected {script:?} to require approval due to unsafe git global option",
+                "Git must not be trusted from its arguments alone: {script:?}",
             );
         }
     }
 
     #[test]
-    fn rejects_git_subcommand_options_with_side_effects() {
-        let results: Vec<(&str, bool)> = [
-            "git diff --output codex_poc.txt",
-            "git diff --ext-diff HEAD",
-            "git log --textconv -1",
-            "git show --output=codex_poc.txt HEAD",
-            "git cat-file --filters HEAD:a.txt",
-        ]
-        .into_iter()
-        .map(|script| {
-            (
-                script,
-                is_safe_command_windows(&[
-                    "powershell.exe".to_string(),
-                    "-NoProfile".to_string(),
-                    "-Command".to_string(),
-                    script.to_string(),
-                ]),
-            )
-        })
-        .collect();
-
-        assert_eq!(
-            vec![
-                ("git diff --output codex_poc.txt", false),
-                ("git diff --ext-diff HEAD", false),
-                ("git log --textconv -1", false),
-                ("git show --output=codex_poc.txt HEAD", false),
-                ("git cat-file --filters HEAD:a.txt", false),
-            ],
-            results
-        );
-    }
-
-    #[test]
-    fn rejects_stop_parsing_git_forms() {
+    fn rejects_stop_parsing_forms() {
         assert!(!is_safe_command_windows(&vec_str(&[
             "powershell.exe",
             "-NoProfile",
             "-Command",
-            "git log --% HEAD --output=codex_poc.txt",
+            "rg --% pattern Cargo.toml",
         ])));
     }
 
@@ -529,13 +456,6 @@ mod tests {
             "ls @(calc.exe)"
         ])));
 
-        // Unsupported constructs that the AST parser refuses (no fallback to manual splitting).
-        assert!(!is_safe_command_windows(&vec_str(&[
-            "powershell.exe",
-            "-Command",
-            "ls && pwd"
-        ])));
-
         // Sub-expressions are rejected even if they contain otherwise safe commands.
         assert!(!is_safe_command_windows(&vec_str(&[
             "powershell.exe",
@@ -579,35 +499,5 @@ mod tests {
             "-Command",
             "Write-Output \"foo $bar\""
         ])));
-    }
-
-    #[test]
-    fn uses_invoked_powershell_variant_for_parsing() {
-        if !cfg!(windows) {
-            return;
-        }
-
-        let chain = "pwd && ls";
-        assert!(
-            !is_safe_command_windows(&vec_str(&[
-                "powershell.exe",
-                "-NoProfile",
-                "-Command",
-                chain,
-            ])),
-            "`{chain}` is not recognized by powershell.exe"
-        );
-
-        if let Some(pwsh) = try_find_pwsh_executable_blocking() {
-            assert!(
-                is_safe_command_windows(&[
-                    pwsh.as_path().to_str().unwrap().into(),
-                    "-NoProfile".to_string(),
-                    "-Command".to_string(),
-                    chain.to_string(),
-                ]),
-                "`{chain}` should be considered safe to pwsh.exe"
-            );
-        }
     }
 }

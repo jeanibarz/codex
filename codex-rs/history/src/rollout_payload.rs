@@ -4,9 +4,11 @@ use super::CodexHarnessMetadata;
 use super::CompactedItem;
 use super::EventMsg;
 use super::InterAgentCommunication;
+use super::McpResourceOriginCheckpoint;
 use super::ResponseItem;
 use super::ResponseItemEnvelope;
 use super::RolloutItem;
+use super::SecurityRiskScore;
 use super::SessionMetaLine;
 use super::TurnContextItem;
 use super::WorldStateItem;
@@ -40,6 +42,9 @@ pub(super) enum RolloutItemWire<'a> {
     },
     WorldState {
         payload: Cow<'a, WorldStateItem>,
+    },
+    SecurityRiskScore {
+        payload: Cow<'a, SecurityRiskScore>,
     },
     EventMsg {
         payload: Cow<'a, EventMsg>,
@@ -75,6 +80,9 @@ impl<'a> From<&'a RolloutItem> for RolloutItemWire<'a> {
             RolloutItem::WorldState(payload) => Self::WorldState {
                 payload: Cow::Borrowed(payload),
             },
+            RolloutItem::SecurityRiskScore(payload) => Self::SecurityRiskScore {
+                payload: Cow::Borrowed(payload),
+            },
             RolloutItem::EventMsg(payload) => Self::EventMsg {
                 payload: Cow::Borrowed(payload),
             },
@@ -103,6 +111,9 @@ impl From<RolloutItemWire<'_>> for RolloutItem {
             RolloutItemWire::Compacted { payload } => Self::Compacted(payload.into_owned()),
             RolloutItemWire::TurnContext { payload } => Self::TurnContext(payload.into_owned()),
             RolloutItemWire::WorldState { payload } => Self::WorldState(payload.into_owned()),
+            RolloutItemWire::SecurityRiskScore { payload } => {
+                Self::SecurityRiskScore(payload.into_owned())
+            }
             RolloutItemWire::EventMsg { payload } => Self::EventMsg(payload.into_owned()),
         }
     }
@@ -120,6 +131,8 @@ pub(super) struct CompactedItemWire<'a> {
     replacement_history: Option<Vec<Cow<'a, ResponseItem>>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     replacement_history_metadata: Option<Vec<Cow<'a, CodexHarnessMetadata>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mcp_resource_origins: Option<Cow<'a, McpResourceOriginCheckpoint>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     window_number: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -156,6 +169,7 @@ impl<'a> From<&'a CompactedItem> for CompactedItemWire<'a> {
                     .collect()
             }),
             replacement_history_metadata,
+            mcp_resource_origins: item.mcp_resource_origins.as_ref().map(Cow::Borrowed),
             window_number: item.window_number,
             first_window_id: item.first_window_id.as_deref().map(Cow::Borrowed),
             previous_window_id: item.previous_window_id.as_deref().map(Cow::Borrowed),
@@ -219,6 +233,7 @@ impl TryFrom<CompactedItemWire<'_>> for CompactedItem {
         Ok(Self {
             message: item.message.into_owned(),
             replacement_history,
+            mcp_resource_origins: item.mcp_resource_origins.map(Cow::into_owned),
             window_number,
             first_window_id: item.first_window_id.map(Cow::into_owned),
             previous_window_id: item.previous_window_id.map(Cow::into_owned),

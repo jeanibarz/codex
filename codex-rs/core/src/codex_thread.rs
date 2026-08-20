@@ -1,7 +1,6 @@
 use crate::agent::AgentStatus;
 use crate::config::ConstraintResult;
 use crate::elicitation::ElicitationRegistration;
-use crate::environment_config::EnvironmentConfig;
 use crate::session::SessionIo;
 use crate::session::SessionSettingsUpdate;
 use crate::session::session::Session;
@@ -21,12 +20,15 @@ use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::mcp::CallToolResult;
+use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::EnvironmentConfig;
+use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::Op;
@@ -101,29 +103,23 @@ impl ThreadConfigSnapshot {
         &self.environments.environments
     }
 
+    /// Whether the primary environment has resolved configuration, if one is selected.
+    pub fn is_primary_environment_configured(&self) -> bool {
+        self.environment_selections()
+            .first()
+            .is_none_or(|selection| {
+                matches!(
+                    selection.config,
+                    EnvironmentConfigState::FromThread | EnvironmentConfigState::Ready(_)
+                )
+            })
+    }
+
     pub fn sandbox_policy(&self) -> SandboxPolicy {
         codex_sandboxing::compatibility_sandbox_policy_for_permission_profile(
             &self.permission_profile,
             self.cwd().as_path(),
         )
-    }
-
-    pub fn into_thread_settings_snapshot(self) -> ThreadSettingsSnapshot {
-        let cwd = self.cwd().clone();
-        ThreadSettingsSnapshot {
-            model: self.model,
-            model_provider_id: self.model_provider_id,
-            service_tier: self.service_tier,
-            approval_policy: self.approval_policy,
-            approvals_reviewer: self.approvals_reviewer,
-            permission_profile: self.permission_profile,
-            active_permission_profile: self.active_permission_profile,
-            cwd,
-            reasoning_effort: self.reasoning_effort,
-            reasoning_summary: self.reasoning_summary,
-            personality: self.personality,
-            collaboration_mode: self.collaboration_mode,
-        }
     }
 }
 
@@ -406,6 +402,18 @@ impl CodexThread {
         self.session.preview_settings(&updates).await
     }
 
+    /// Restores thread-owned mutable settings captured from another loaded runtime.
+    ///
+    /// Runtime replacement uses this after resume so clients keep their current thread settings
+    /// rather than reverting to the original layer-backed config.
+    pub async fn restore_thread_settings(
+        &self,
+        settings: CodexThreadSettingsOverrides,
+    ) -> ConstraintResult<()> {
+        let updates = self.thread_settings_update(settings).await;
+        self.session.update_settings(updates).await
+    }
+
     async fn thread_settings_update(
         &self,
         overrides: CodexThreadSettingsOverrides,
@@ -617,6 +625,21 @@ impl CodexThread {
         self.session.thread_config_snapshot().await
     }
 
+    /// Returns thread-owned settings suitable for rollout persistence and resume.
+    pub async fn thread_settings_snapshot(&self) -> ThreadSettingsSnapshot {
+        self.session.thread_settings_snapshot().await
+    }
+
+    /// Captures thread-owned settings and environment selections for runtime restoration.
+    pub async fn restorable_thread_settings(&self) -> CodexThreadSettingsOverrides {
+        self.session.restorable_thread_settings().await
+    }
+
+    /// Returns the MCP extensions declared by the client that created this runtime.
+    pub fn client_mcp_extensions(&self) -> ClientMcpExtensions {
+        self.session.services.client_mcp_extensions.clone()
+    }
+
     /// Returns the files that supplied the thread's loaded model instructions.
     pub async fn instruction_sources(&self) -> Vec<PathUri> {
         self.session.instruction_sources().await
@@ -669,7 +692,7 @@ impl CodexThread {
     }
 
     pub async fn environment_selections(&self) -> Vec<TurnEnvironmentSelection> {
-        self.session.thread_environment_selections().await
+        self.session.services.turn_environments.selections()
     }
 
     /// Installs resolved environment configuration and capability roots on this thread.
@@ -681,6 +704,15 @@ impl CodexThread {
         self.session.environment_ready(selection, config).await
     }
 
+    /// Fails this thread's pending environment without affecting other attached threads.
+    pub async fn environment_failed(
+        &self,
+        selection: &TurnEnvironmentSelection,
+        error: String,
+    ) -> CodexResult<()> {
+        self.session.environment_failed(selection, error).await
+    }
+
     /// Passively inspects the selected capability roots whose environments are ready now.
     pub fn inspect_selected_capability_roots(&self) -> SelectedCapabilityRootsStatus {
         self.session.inspect_selected_capability_roots()
@@ -689,6 +721,23 @@ impl CodexThread {
     pub async fn read_mcp_resource(
         &self,
         server: &str,
+        params: ReadResourceRequestParams,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.session.refresh_mcp_if_dirty().await;
+        let result = self
+            .session
+            .services
+            .mcp_runtime
+            .latest_read_resource(server, params)
+            .await?;
+
+        Ok(serde_json::to_value(result)?)
+    }
+
+    /// Reads an app resource using the current authority of its originating tool call.
+    pub async fn read_mcp_resource_for_call(
+        &self,
+        call_id: &str,
         uri: &str,
     ) -> anyhow::Result<serde_json::Value> {
         self.session.refresh_mcp_if_dirty().await;
@@ -696,7 +745,7 @@ impl CodexThread {
             .session
             .services
             .mcp_runtime
-            .latest_read_resource(server, ReadResourceRequestParams::new(uri))
+            .read_resource_for_call(self.session.thread_id, call_id, uri)
             .await?;
 
         Ok(serde_json::to_value(result)?)
@@ -713,7 +762,10 @@ impl CodexThread {
         self.session
             .services
             .mcp_runtime
-            .latest_call_tool(server, tool, arguments, meta)
+            .latest_call_tool(
+                server, tool, arguments, meta, /*requested_timeout*/ None,
+                /*wait_for_server*/ true,
+            )
             .await
     }
 

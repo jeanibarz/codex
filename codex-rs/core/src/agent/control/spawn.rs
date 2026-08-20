@@ -1,7 +1,11 @@
 use super::residency::is_v2_resident_session_source;
 use super::*;
-use crate::agent::role::apply_role_to_config_for_multi_agent_v2;
+use crate::agent::role::apply_role_to_config;
 use crate::config::PermissionProfileSnapshot;
+use crate::context::ContextualUserFragment;
+use crate::context::CurrentTimeReminder;
+use crate::context::MultiAgentRoleInstructions;
+use crate::session::multi_agents::resolve_usage_hints;
 use codex_extension_api::ExtensionDataInit;
 
 const AGENT_NAMES: &str = include_str!("../agent_names.txt");
@@ -71,7 +75,8 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_reference_context_item:
             | ResponseItem::Other => false,
         },
         RolloutItem::InterAgentCommunication(_)
-        | RolloutItem::InterAgentCommunicationMetadata { .. } => false,
+        | RolloutItem::InterAgentCommunicationMetadata { .. }
+        | RolloutItem::SecurityRiskScore(_) => false,
         // Full-history forks preserve the cached prompt prefix and can keep diffing
         // from the parent's durable baseline. Truncated forks drop part of that prompt,
         // so they must rebuild context on their first child turn.
@@ -80,7 +85,7 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_reference_context_item:
     }
 }
 
-fn is_multi_agent_v2_usage_hint_message(item: &ResponseItem, usage_hint_texts: &[String]) -> bool {
+fn is_fork_excluded_developer_message(item: &ResponseItem, usage_hint_texts: &[String]) -> bool {
     let ResponseItem::Message { role, content, .. } = item else {
         return false;
     };
@@ -91,9 +96,11 @@ fn is_multi_agent_v2_usage_hint_message(item: &ResponseItem, usage_hint_texts: &
         return false;
     };
 
-    usage_hint_texts
-        .iter()
-        .any(|usage_hint_text| usage_hint_text == text)
+    MultiAgentRoleInstructions::matches_text(text)
+        || CurrentTimeReminder::matches_text(text)
+        || usage_hint_texts
+            .iter()
+            .any(|usage_hint_text| usage_hint_text == text)
 }
 
 async fn load_agent_model_context(
@@ -260,6 +267,7 @@ impl AgentControl {
         if self.state.agent_metadata_for_thread(thread_id).is_none() {
             return Err(CodexErr::ThreadNotFound(thread_id));
         }
+        let environment_selections = self.state.evicted_environments(thread_id);
 
         let stored_thread = state
             .read_stored_thread(ReadThreadParams {
@@ -303,7 +311,7 @@ impl AgentControl {
                 ),
             };
 
-            apply_role_to_config_for_multi_agent_v2(&mut config, Some(&role_name))
+            apply_role_to_config(&mut config, Some(&role_name))
                 .await
                 .map_err(CodexErr::InvalidRequest)?;
             config
@@ -358,18 +366,21 @@ impl AgentControl {
                 agent_control: self.clone(),
                 session_source,
                 parent_thread_id,
+                environment_selections,
                 inherited_environments,
                 inherited_exec_policy,
             })
             .await
         {
             Ok(reloaded_thread) => {
+                self.state.clear_evicted_environments(thread_id);
                 residency_slot.commit(reloaded_thread.thread_id);
                 state.notify_thread_created(reloaded_thread.thread_id);
                 Ok(())
             }
             Err(err) => {
                 if state.get_thread(thread_id).await.is_ok() {
+                    self.state.clear_evicted_environments(thread_id);
                     drop(residency_slot);
                     self.touch_loaded_v2_residency(&state, thread_id).await;
                     return Ok(());
@@ -680,19 +691,13 @@ impl AgentControl {
         let multi_agent_v2_usage_hint_texts_to_filter: Vec<String> =
             if multi_agent_version == MultiAgentVersion::V2 {
                 let parent_config = parent_thread.session.get_config().await;
-                [
-                    parent_config
-                        .multi_agent_v2
-                        .root_agent_usage_hint_text
-                        .clone(),
-                    parent_config
-                        .multi_agent_v2
-                        .subagent_usage_hint_text
-                        .clone(),
-                ]
-                .into_iter()
-                .flatten()
-                .collect()
+                let parent_usage_hints =
+                    resolve_usage_hints(&parent_config.multi_agent_v2, /*catalog*/ None);
+                [parent_usage_hints.root, parent_usage_hints.subagent]
+                    .into_iter()
+                    .flatten()
+                    .map(|instructions| instructions.render())
+                    .collect()
             } else {
                 Vec::new()
             };
@@ -719,7 +724,7 @@ impl AgentControl {
             if matches!(response_item, ResponseItem::AgentMessage { .. }) {
                 return false;
             }
-            if is_multi_agent_v2_usage_hint_message(
+            if is_fork_excluded_developer_message(
                 response_item,
                 &multi_agent_v2_usage_hint_texts_to_filter,
             ) {
@@ -788,12 +793,18 @@ impl AgentControl {
                     }
                     true
                 }
+                RolloutItem::WorldState(world_state) => {
+                    if multi_agent_version == MultiAgentVersion::V2 {
+                        world_state.state.remove("multi_agent_usage_hint");
+                    }
+                    true
+                }
                 RolloutItem::EventMsg(_)
                 | RolloutItem::SessionMeta(_)
                 | RolloutItem::TurnContext(_)
                 | RolloutItem::InterAgentCommunication(_)
-                | RolloutItem::InterAgentCommunicationMetadata { .. }
-                | RolloutItem::WorldState(_) => true,
+                | RolloutItem::InterAgentCommunicationMetadata { .. } => true,
+                RolloutItem::SecurityRiskScore(_) => false,
             }
         });
         // Full forks reuse the parent's reference context instead of rebuilding it. If that
@@ -817,13 +828,15 @@ impl AgentControl {
         }
         if preserve_reference_context_item
             && multi_agent_version == MultiAgentVersion::V2
-            && let Some(subagent_usage_hint_text) =
-                config.multi_agent_v2.subagent_usage_hint_text.clone()
-            && let Some(subagent_usage_hint_message) =
-                crate::context_manager::updates::build_developer_update_item(vec![
-                    subagent_usage_hint_text,
-                ])
+            && let Some(subagent_usage_hint) = options
+                .multi_agent_v2_usage_hints
+                .as_ref()
+                .map(|hints| hints.subagent.clone())
+                .unwrap_or_else(|| {
+                    resolve_usage_hints(&config.multi_agent_v2, /*catalog*/ None).subagent
+                })
         {
+            let subagent_usage_hint_message = ContextualUserFragment::into(subagent_usage_hint);
             forked_rollout_items.push(RolloutItem::ResponseItem(
                 subagent_usage_hint_message.into(),
             ));
@@ -1000,6 +1013,7 @@ impl AgentControl {
                 agent_control: self.clone(),
                 session_source,
                 parent_thread_id,
+                environment_selections: None,
                 inherited_environments,
                 inherited_exec_policy,
             })

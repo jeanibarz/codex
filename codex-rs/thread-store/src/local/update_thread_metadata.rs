@@ -18,6 +18,7 @@ use super::LocalThreadStore;
 use super::helpers::git_info_from_parts;
 use super::helpers::permission_profile_to_metadata_value;
 use super::live_writer;
+use super::pending_thread_metadata;
 use super::thread_rollout_resolver;
 use super::thread_rollout_resolver::ResolvedThreadRollout;
 use super::thread_rollout_resolver::RolloutLocation;
@@ -35,7 +36,21 @@ pub(super) async fn update_thread_metadata(
     params: UpdateThreadMetadataParams,
 ) -> ThreadStoreResult<StoredThread> {
     let thread_id = params.thread_id;
-    let patch = params.patch;
+    let mut pending_metadata = store.pending_thread_metadata.lock(thread_id).await;
+    let pending_patch = pending_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.as_ref().cloned());
+    let mut patch = params.patch;
+    if let Some(staged_patch) = pending_patch.as_ref() {
+        let mut merged_patch = staged_patch.clone();
+        merged_patch.merge(patch);
+        patch = merged_patch;
+    }
+    if patch.project_id.is_some() && store.state_db().await.is_none() {
+        return Err(ThreadStoreError::Unsupported {
+            operation: "projects",
+        });
+    }
     if patch.is_empty() {
         return read_thread::read_thread(
             store,
@@ -48,26 +63,35 @@ pub(super) async fn update_thread_metadata(
         .await;
     }
 
-    let requires_rollout_compat = requires_rollout_compatibility_update(&patch);
+    let staged_requires_rollout_compat = pending_patch
+        .as_ref()
+        .is_some_and(|patch| patch.memory_mode.is_some() || patch.git_info.is_some());
+    let requires_rollout_compat =
+        staged_requires_rollout_compat || requires_rollout_compatibility_update(&patch);
     let has_explicit_metadata = patch.name.is_some() || requires_rollout_compat;
     let history_mode = if has_explicit_metadata {
-        Some(
-            read_thread::read_thread(
-                store,
-                ReadThreadParams {
-                    thread_id,
-                    include_archived: params.include_archived,
-                    include_history: false,
-                },
-            )
-            .await?
-            .history_mode,
-        )
+        match live_writer::live_writer_parts(store, thread_id).await {
+            Ok((_recorder, _rollout_id, history_mode)) => Some(history_mode),
+            Err(ThreadStoreError::ThreadNotFound { .. }) => Some(
+                read_thread::read_thread(
+                    store,
+                    ReadThreadParams {
+                        thread_id,
+                        include_archived: params.include_archived,
+                        include_history: false,
+                    },
+                )
+                .await?
+                .history_mode,
+            ),
+            Err(err) => return Err(err),
+        }
     } else {
         None
     };
     let paginated = matches!(history_mode, Some(ThreadHistoryMode::Paginated));
-    let require_sqlite_write = sqlite_write_failure_should_block(&patch) || paginated;
+    let require_sqlite_write =
+        pending_patch.is_some() || sqlite_write_failure_should_block(&patch) || paginated;
     let mut updated = apply_metadata_update(
         store,
         thread_id,
@@ -112,10 +136,16 @@ pub(super) async fn update_thread_metadata(
         {
             warn!("failed to index paginated thread name for {thread_id}: {err}");
         }
+        if pending_patch.is_some() {
+            remove_pending_thread_metadata(store, thread_id, &mut pending_metadata).await;
+        }
         return Ok(updated);
     }
     let needs_rollout_compat = requires_rollout_compat || patch.name.is_some();
     if !needs_rollout_compat {
+        if pending_patch.is_some() {
+            remove_pending_thread_metadata(store, thread_id, &mut pending_metadata).await;
+        }
         return Ok(updated);
     }
 
@@ -239,7 +269,22 @@ pub(super) async fn update_thread_metadata(
     if let Some(((sha, branch, origin_url), _memory_mode)) = resolved_git_info {
         thread.git_info = git_info_from_parts(sha, branch, origin_url);
     }
+    if pending_patch.is_some() {
+        remove_pending_thread_metadata(store, thread_id, &mut pending_metadata).await;
+    }
     Ok(thread)
+}
+
+async fn remove_pending_thread_metadata(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    pending_metadata: &mut Option<pending_thread_metadata::LockedPendingThreadMetadata>,
+) {
+    if let Some(mut metadata) = pending_metadata.take() {
+        *metadata = None;
+        drop(metadata);
+        store.pending_thread_metadata.remove(thread_id).await;
+    }
 }
 
 async fn refresh_resolved_rollout_path(resolved: &mut ResolvedThreadRollout) {
@@ -272,6 +317,22 @@ async fn apply_metadata_update(
                     .map_err(|err| ThreadStoreError::Internal {
                         message: format!("failed to read thread metadata for {thread_id}: {err}"),
                     })?;
+            let project_id = if existing.is_none()
+                && let Some(Some(project_id)) = patch.project_id.as_ref()
+                && state_db
+                    .get_project(project_id)
+                    .await
+                    .map_err(|err| ThreadStoreError::Internal {
+                        message: format!(
+                            "failed to read initial thread project for {thread_id}: {err}"
+                        ),
+                    })?
+                    .is_none()
+            {
+                Some(None)
+            } else {
+                patch.project_id.clone()
+            };
             let advance_recency_at = patch.advance_recency_at;
             if existing.is_none() && rollout_path.is_none() {
                 let resolved = if include_archived {
@@ -385,12 +446,49 @@ async fn apply_metadata_update(
                 metadata.git_branch = branch;
                 metadata.git_origin_url = origin_url;
             }
-            state_db
-                .upsert_thread(&metadata)
-                .await
-                .map_err(|err| ThreadStoreError::Internal {
+            if let Some(project_id) = project_id.as_ref() {
+                metadata.project_id = project_id.clone();
+            }
+            let upsert_result = state_db.upsert_thread(&metadata).await;
+            if existing.is_none()
+                && metadata.project_id.is_some()
+                && matches!(&upsert_result, Err(err) if err.to_string().contains("FOREIGN KEY constraint failed"))
+            {
+                metadata.project_id = None;
+                state_db.upsert_thread(&metadata).await.map_err(|err| {
+                    ThreadStoreError::Internal {
+                        message: format!("failed to update thread metadata for {thread_id}: {err}"),
+                    }
+                })?;
+            } else {
+                upsert_result.map_err(|err| ThreadStoreError::Internal {
                     message: format!("failed to update thread metadata for {thread_id}: {err}"),
                 })?;
+            }
+            if existing.is_some()
+                && let Some(project_id) = project_id.as_ref()
+            {
+                state_db
+                    .set_thread_project(&thread_id.to_string(), project_id.as_deref())
+                    .await
+                    .map_err(|err| {
+                        let message = err.to_string();
+                        if message.contains("project not found") {
+                            ThreadStoreError::InvalidRequest { message }
+                        } else {
+                            ThreadStoreError::Internal {
+                                message: format!(
+                                    "failed to update thread project for {thread_id}: {err}"
+                                ),
+                            }
+                        }
+                    })?
+                    .ok_or_else(|| ThreadStoreError::Internal {
+                        message: format!(
+                            "thread metadata unavailable before project update: {thread_id}"
+                        ),
+                    })?;
+            }
             if let Some(name) = patch.name.as_ref() {
                 let history_mode = history_mode.ok_or_else(|| ThreadStoreError::Internal {
                     message: format!(
@@ -555,8 +653,9 @@ fn sqlite_write_failure_should_block(patch: &ThreadMetadataPatch) -> bool {
     // transcript-derived metadata, thread names, and memory-mode indexing were log-only. Keep that
     // failure isolation so a corrupted optional state DB does not make JSONL transcript durability
     // look broken. Explicit git-only updates still require SQLite because partial git patches need
-    // the existing SQLite value to preserve unspecified fields.
-    patch.git_info.is_some() && !has_observed_metadata_facts(patch)
+    // the existing SQLite value to preserve unspecified fields. Project updates always require
+    // SQLite because assignment only exists in the state database.
+    patch.project_id.is_some() || (patch.git_info.is_some() && !has_observed_metadata_facts(patch))
 }
 
 fn sqlite_write_error_is_best_effort(err: &ThreadStoreError) -> bool {
@@ -798,7 +897,8 @@ mod tests {
                 include_archived: false,
             })
             .await
-            .expect("set thread name");
+            .expect("set thread name")
+            .expect("local store returns updated thread");
 
         assert_eq!(thread.name.as_deref(), Some("A sharper name"));
         let latest_name = codex_rollout::find_thread_name_by_id(home.path(), &thread_id)
@@ -885,6 +985,7 @@ mod tests {
                 model_providers: None,
                 cwd_filters: None,
                 section: Some(Some(codex_state::PINNED_THREAD_SECTION_ID.to_string())),
+                project_id: None,
                 archived: false,
                 search_term: None,
                 relation_filter: None,
@@ -986,7 +1087,8 @@ mod tests {
                 include_archived: false,
             })
             .await
-            .expect("set paginated thread name");
+            .expect("set paginated thread name")
+            .expect("local store returns updated thread");
 
         assert_eq!(thread.name.as_deref(), Some("Canonical paginated name"));
         let metadata = runtime
@@ -1015,7 +1117,8 @@ mod tests {
                 include_archived: false,
             })
             .await
-            .expect("apply derived paginated metadata");
+            .expect("apply derived paginated metadata")
+            .expect("local store returns updated thread");
         assert_eq!(thread.name.as_deref(), Some("Canonical paginated name"));
 
         let session_index_path = home.path().join("session_index.jsonl");
@@ -1031,7 +1134,8 @@ mod tests {
                 include_archived: false,
             })
             .await
-            .expect("set paginated thread name with unavailable index");
+            .expect("set paginated thread name with unavailable index")
+            .expect("local store returns updated thread");
         assert_eq!(thread.name.as_deref(), Some("Updated SQLite name"));
 
         let err = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None)
@@ -1079,7 +1183,8 @@ mod tests {
                 include_archived: false,
             })
             .await
-            .expect("set thread memory mode");
+            .expect("set thread memory mode")
+            .expect("local store returns updated thread");
 
         assert_eq!(thread.thread_id, thread_id);
         let appended = last_rollout_item(path.as_path());
@@ -1149,7 +1254,8 @@ mod tests {
                 include_archived: false,
             })
             .await
-            .expect("paginated metadata update");
+            .expect("paginated metadata update")
+            .expect("local store returns updated thread");
 
         let git_info = thread.git_info.expect("git info");
         assert_eq!(git_info.commit_hash, None);
@@ -1237,7 +1343,8 @@ mod tests {
                 include_archived: false,
             })
             .await
-            .expect("set git metadata");
+            .expect("set git metadata")
+            .expect("local store returns updated thread");
 
         assert_eq!(
             thread.git_info.expect("git info").branch.as_deref(),
@@ -1296,7 +1403,8 @@ mod tests {
                 include_archived: false,
             })
             .await
-            .expect("set memory mode on external live thread");
+            .expect("set memory mode on external live thread")
+            .expect("local store returns updated thread");
 
         assert_eq!(thread.thread_id, thread_id);
         assert!(thread.rollout_path.is_some());
@@ -1334,7 +1442,8 @@ mod tests {
                 include_archived: false,
             })
             .await
-            .expect("set git metadata");
+            .expect("set git metadata")
+            .expect("local store returns updated thread");
 
         let git_info = thread.git_info.expect("git info should be present");
         assert_eq!(
@@ -1374,7 +1483,8 @@ mod tests {
                 include_archived: false,
             })
             .await
-            .expect("set permission profile");
+            .expect("set permission profile")
+            .expect("local store returns updated thread");
 
         assert_eq!(thread.permission_profile, PermissionProfile::Disabled);
         let thread = store
@@ -1387,7 +1497,8 @@ mod tests {
                 include_archived: false,
             })
             .await
-            .expect("clear reasoning effort");
+            .expect("clear reasoning effort")
+            .expect("local store returns updated thread");
 
         assert_eq!(thread.reasoning_effort, None);
         let metadata = runtime
@@ -1447,7 +1558,8 @@ mod tests {
                 include_archived: false,
             })
             .await
-            .expect("partially update git metadata");
+            .expect("partially update git metadata")
+            .expect("local store returns updated thread");
 
         let git_info = thread.git_info.expect("git info should be present");
         assert_eq!(
@@ -1507,7 +1619,8 @@ mod tests {
                 include_archived: false,
             })
             .await
-            .expect("clear git metadata");
+            .expect("clear git metadata")
+            .expect("local store returns updated thread");
 
         assert!(thread.git_info.is_none());
         let appended = last_rollout_item(path.as_path());
@@ -1588,7 +1701,8 @@ mod tests {
                 include_archived: false,
             })
             .await
-            .expect("partially update after clear with missing sqlite row");
+            .expect("partially update after clear with missing sqlite row")
+            .expect("local store returns updated thread");
         let git_info = thread.git_info.expect("branch should be present");
         assert_eq!(git_info.commit_hash, None);
         assert_eq!(git_info.branch.as_deref(), Some("feature"));
@@ -1695,7 +1809,8 @@ mod tests {
                 include_archived: false,
             })
             .await
-            .expect("combined patch should apply");
+            .expect("combined patch should apply")
+            .expect("local store returns updated thread");
 
         assert_eq!(thread.name.as_deref(), Some("Combined metadata"));
         assert_eq!(
@@ -1795,7 +1910,8 @@ mod tests {
                 include_archived: false,
             })
             .await
-            .expect("apply observed metadata");
+            .expect("apply observed metadata")
+            .expect("local store returns updated thread");
 
         assert_eq!(thread.name.as_deref(), Some("Derived first message"));
     }
@@ -1839,7 +1955,8 @@ mod tests {
                 include_archived: false,
             })
             .await
-            .expect("apply later observed metadata");
+            .expect("apply later observed metadata")
+            .expect("local store returns updated thread");
 
         assert_eq!(thread.preview, "Hello from user");
         assert_eq!(
@@ -1927,7 +2044,8 @@ mod tests {
                 include_archived: false,
             })
             .await
-            .expect("update paginated thread without sqlite row");
+            .expect("update paginated thread without sqlite row")
+            .expect("local store returns updated thread");
 
         assert_eq!(thread.history_mode, ThreadHistoryMode::Paginated);
         assert_eq!(
@@ -1967,7 +2085,8 @@ mod tests {
                 include_archived: true,
             })
             .await
-            .expect("update archived thread without sqlite row");
+            .expect("update archived thread without sqlite row")
+            .expect("local store returns updated thread");
 
         assert!(thread.archived_at.is_some());
         assert!(
@@ -2031,6 +2150,7 @@ mod tests {
                 model_providers: Some(Vec::new()),
                 cwd_filters: Some(vec![workspace]),
                 section: None,
+                project_id: None,
                 archived: false,
                 search_term: None,
                 relation_filter: None,
@@ -2096,7 +2216,8 @@ mod tests {
                 include_archived: true,
             })
             .await
-            .expect("set archived thread name");
+            .expect("set archived thread name")
+            .expect("local store returns updated thread");
 
         assert!(thread.archived_at.is_some());
         assert!(
@@ -2160,7 +2281,8 @@ mod tests {
                 include_archived: true,
             })
             .await
-            .expect("set archived thread name");
+            .expect("set archived thread name")
+            .expect("local store returns updated thread");
 
         assert!(thread.archived_at.is_some());
         assert!(

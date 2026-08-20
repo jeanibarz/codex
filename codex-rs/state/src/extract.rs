@@ -26,6 +26,7 @@ pub fn apply_rollout_item(
         | RolloutItem::InterAgentCommunicationMetadata { .. } => {}
         RolloutItem::Compacted(_) => {}
         RolloutItem::WorldState(_) => {}
+        RolloutItem::SecurityRiskScore(_) => {}
     }
     if metadata.model_provider.is_empty() {
         metadata.model_provider = default_provider.to_string();
@@ -52,6 +53,7 @@ pub fn rollout_item_affects_thread_metadata(item: &RolloutItem) -> bool {
         | RolloutItem::InterAgentCommunication(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. }
         | RolloutItem::Compacted(_)
+        | RolloutItem::SecurityRiskScore(_)
         | RolloutItem::WorldState(_) => false,
     }
 }
@@ -432,6 +434,7 @@ mod tests {
                 approvals_reviewer: None,
                 sandbox_policy: SandboxPolicy::DangerFullAccess,
                 permission_profile: None,
+                active_permission_profile: None,
                 network: None,
                 file_system_sandbox_policy: None,
                 model: "gpt-5".to_string(),
@@ -478,6 +481,7 @@ mod tests {
                 approvals_reviewer: None,
                 sandbox_policy: SandboxPolicy::DangerFullAccess,
                 permission_profile: Some(permission_profile.clone()),
+                active_permission_profile: None,
                 network: None,
                 file_system_sandbox_policy: None,
                 model: "gpt-5".to_string(),
@@ -520,6 +524,7 @@ mod tests {
                 approvals_reviewer: None,
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
                 permission_profile: None,
+                active_permission_profile: None,
                 network: None,
                 file_system_sandbox_policy: None,
                 model: "gpt-5".to_string(),
@@ -559,6 +564,7 @@ mod tests {
                 approvals_reviewer: None,
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
                 permission_profile: None,
+                active_permission_profile: None,
                 network: None,
                 file_system_sandbox_policy: None,
                 model: "gpt-5".to_string(),
@@ -701,6 +707,7 @@ mod tests {
             section: None,
             section_position: None,
             section_entered_at: None,
+            project_id: None,
             git_sha: None,
             git_branch: None,
             git_origin_url: None,

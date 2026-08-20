@@ -26,7 +26,7 @@ v2_enum_from_core!(
 
 v2_enum_from_core!(
     pub enum HookHandlerType from CoreHookHandlerType {
-        Command, Prompt, Agent
+        Command, McpTool, Prompt, Agent
     }
 );
 

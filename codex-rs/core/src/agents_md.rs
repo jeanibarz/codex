@@ -80,7 +80,7 @@ pub(crate) async fn load_project_instructions(
         match read_agents_md(
             config,
             filesystem.as_ref(),
-            &turn_environment.environment_id,
+            &turn_environment.selection.environment_id,
             turn_environment.cwd(),
             remaining,
         )
@@ -98,7 +98,7 @@ pub(crate) async fn load_project_instructions(
             Ok(None) => {}
             Err(e) => {
                 error!(
-                    environment_id = turn_environment.environment_id,
+                    environment_id = turn_environment.selection.environment_id,
                     "error trying to find AGENTS.md docs: {e:#}"
                 );
             }
@@ -118,7 +118,7 @@ pub(crate) async fn load_project_instructions(
             Ok(None) => {}
             Err(e) => {
                 error!(
-                    environment_id = turn_environment.environment_id,
+                    environment_id = turn_environment.selection.environment_id,
                     "error trying to discover conditional rules: {e:#}"
                 );
             }

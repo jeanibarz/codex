@@ -206,6 +206,37 @@ pub enum RefreshTokenError {
     Transient(#[from] std::io::Error),
 }
 
+/// Error returned when constructing an [`AuthManager`] from resolved configuration.
+#[derive(Debug, Error)]
+#[error(transparent)]
+pub struct AuthManagerInitializationError(AuthManagerInitializationErrorSource);
+
+#[derive(Debug, Error)]
+enum AuthManagerInitializationErrorSource {
+    #[error(transparent)]
+    WorkloadIdentityConfiguration(WorkloadIdentitySessionError),
+    #[error(transparent)]
+    InitialAuth(RefreshTokenError),
+}
+
+impl From<WorkloadIdentitySessionError> for AuthManagerInitializationError {
+    fn from(error: WorkloadIdentitySessionError) -> Self {
+        Self(AuthManagerInitializationErrorSource::WorkloadIdentityConfiguration(error))
+    }
+}
+
+impl From<RefreshTokenError> for AuthManagerInitializationError {
+    fn from(error: RefreshTokenError) -> Self {
+        Self(AuthManagerInitializationErrorSource::InitialAuth(error))
+    }
+}
+
+impl From<AuthManagerInitializationError> for std::io::Error {
+    fn from(error: AuthManagerInitializationError) -> Self {
+        Self::other(error)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExternalAuthRefreshReason {
     Unauthorized,
@@ -535,7 +566,12 @@ impl CodexAuth {
     /// Returns `None` if Codex backend auth does not expose an account id.
     pub fn get_account_id(&self) -> Option<String> {
         match self {
-            Self::Headers(_) => None,
+            Self::Headers(headers) => headers
+                .headers()
+                .get("chatgpt-account-id")
+                .and_then(|value| value.to_str().ok())
+                .filter(|account_id| !account_id.is_empty() && account_id.trim() == *account_id)
+                .map(ToOwned::to_owned),
             Self::AgentIdentity(auth) => Some(auth.account_id().to_string()),
             Self::PersonalAccessToken(auth) => Some(auth.account_id().to_string()),
             _ => self.get_current_token_data().and_then(|t| t.account_id),
@@ -1183,10 +1219,7 @@ fn validate_auth_restrictions(
     let Some(expected_workspaces) = expected_workspaces else {
         return Ok(());
     };
-    if matches!(
-        auth,
-        CodexAuth::ApiKey(_) | CodexAuth::Headers(_) | CodexAuth::BedrockApiKey(_)
-    ) {
+    if matches!(auth, CodexAuth::ApiKey(_) | CodexAuth::BedrockApiKey(_)) {
         return Ok(());
     }
 
@@ -1281,12 +1314,12 @@ async fn enforce_login_restrictions_with_agent_identity_authapi_base_url(
 
     if let Some(expected_account_ids) = config.forced_chatgpt_workspace_id.as_deref() {
         let chatgpt_account_id = match &auth {
-            CodexAuth::ApiKey(_) | CodexAuth::Headers(_) | CodexAuth::BedrockApiKey(_) => {
+            CodexAuth::ApiKey(_) | CodexAuth::BedrockApiKey(_) => {
                 return Ok(());
             }
-            CodexAuth::AgentIdentity(_) | CodexAuth::PersonalAccessToken(_) => {
-                auth.get_account_id()
-            }
+            CodexAuth::Headers(_)
+            | CodexAuth::AgentIdentity(_)
+            | CodexAuth::PersonalAccessToken(_) => auth.get_account_id(),
             CodexAuth::Chatgpt(_) | CodexAuth::ChatgptAuthTokens(_) => {
                 let token_data = match auth.get_token_data() {
                     Ok(data) => data,
@@ -2109,8 +2142,13 @@ impl AuthManager {
 
     /// Create an AuthManager with a specific CodexAuth, for testing only.
     pub fn from_auth_for_testing(auth: CodexAuth) -> Arc<Self> {
+        Self::from_optional_auth_for_testing(Some(auth))
+    }
+
+    /// Create an AuthManager with an optional CodexAuth, for testing only.
+    pub(crate) fn from_optional_auth_for_testing(auth: Option<CodexAuth>) -> Arc<Self> {
         let cached = CachedAuth {
-            auth: Some(auth),
+            auth,
             permanent_refresh_failure: None,
         };
         let (auth_change_tx, _auth_change_rx) = watch::channel(0);
@@ -2581,6 +2619,10 @@ impl AuthManager {
         self.external_auth_provider().is_some()
     }
 
+    pub fn is_workload_identity_selected(&self) -> bool {
+        self.workload_identity_selected
+    }
+
     pub fn is_external_chatgpt_auth_active(&self) -> bool {
         self.auth_cached()
             .as_ref()
@@ -2615,40 +2657,20 @@ impl AuthManager {
         )
     }
 
-    /// Convenience constructor returning an `Arc` wrapper from resolved config.
+    /// Builds a shared manager and activates process-configured workload identity when selected.
     pub async fn shared_from_config(
         config: &impl AuthManagerConfig,
         enable_codex_api_key_env: bool,
-    ) -> Arc<Self> {
+    ) -> Result<Arc<Self>, AuthManagerInitializationError> {
         Self::shared_from_auth_config(auth_config_from(config), enable_codex_api_key_env).await
     }
 
-    /// Builds a shared manager using restrictions resolved before authentication.
+    /// Activates workload identity against an auth config resolved before full runtime config.
     pub async fn shared_from_auth_config(
         auth_config: AuthConfig,
         enable_codex_api_key_env: bool,
-    ) -> Arc<Self> {
-        Arc::new(Self::new_from_auth_config(auth_config, enable_codex_api_key_env).await)
-    }
-
-    /// Constructs a manager and activates process-configured workload identity when selected.
-    pub async fn try_shared_from_config(
-        config: &impl AuthManagerConfig,
-        enable_codex_api_key_env: bool,
-    ) -> Result<Arc<Self>, RefreshTokenError> {
-        Self::try_shared_from_auth_config(auth_config_from(config), enable_codex_api_key_env).await
-    }
-
-    /// Activates workload identity against an auth config resolved before full runtime config.
-    pub async fn try_shared_from_auth_config(
-        auth_config: AuthConfig,
-        enable_codex_api_key_env: bool,
-    ) -> Result<Arc<Self>, RefreshTokenError> {
-        let external_auth = WorkloadIdentityExternalAuth::from_process_config(
-            &auth_config,
-            enable_codex_api_key_env,
-        )
-        .map_err(configured_workload_identity_error)?;
+    ) -> Result<Arc<Self>, AuthManagerInitializationError> {
+        let external_auth = WorkloadIdentityExternalAuth::from_process_config(&auth_config)?;
         let mut manager = Self::new_from_auth_config(auth_config, enable_codex_api_key_env).await;
         manager.workload_identity_selected = external_auth.is_some();
         let manager = Arc::new(manager);
@@ -2965,13 +2987,6 @@ fn auth_config_from(config: &impl AuthManagerConfig) -> AuthConfig {
         managed_auth_policy: config.managed_auth_policy(),
         auth_route_config: config.auth_route_config(),
     }
-}
-
-fn configured_workload_identity_error(error: WorkloadIdentitySessionError) -> RefreshTokenError {
-    RefreshTokenError::Permanent(RefreshTokenFailedError::new(
-        RefreshTokenFailedReason::Other,
-        error.to_string(),
-    ))
 }
 
 #[cfg(test)]

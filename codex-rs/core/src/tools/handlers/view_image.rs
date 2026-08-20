@@ -208,7 +208,11 @@ impl ViewImageHandler {
     }
 }
 
-impl CoreToolRuntime for ViewImageHandler {}
+impl CoreToolRuntime for ViewImageHandler {
+    fn is_builtin_control_tool(&self) -> bool {
+        true
+    }
+}
 
 pub struct ViewImageOutput {
     image_url: String,
@@ -285,13 +289,14 @@ mod tests {
             .next()
             .cloned()
             .expect("default local turn environment");
+        let mut selection = current.selection;
+        selection.cwd = PathUri::from_abs_path(&cwd);
+        selection.workspace_roots.clear();
         turn.environments.environments[0] = TurnEnvironmentState::Ready(TurnEnvironment::new(
-            current.environment_id,
+            selection,
+            current.config_origin,
             current.environment,
-            PathUri::from_abs_path(&cwd),
-            Vec::new(),
             current.shell,
-            current.config,
         ));
     }
 
@@ -357,7 +362,7 @@ mod tests {
         else {
             panic!("primary environment should be ready");
         };
-        environment.config.permission_profile =
+        environment.config_mut().permission_profile =
             PermissionProfileSnapshot::legacy(PermissionProfile::read_only());
         let turn = Arc::new(turn);
 
@@ -429,7 +434,7 @@ mod tests {
         else {
             panic!("primary environment should be ready");
         };
-        environment.config.permission_profile =
+        environment.config_mut().permission_profile =
             PermissionProfileSnapshot::legacy(PermissionProfile::Disabled);
         let turn = Arc::new(turn);
 
@@ -466,7 +471,7 @@ mod tests {
         else {
             panic!("primary environment should be ready");
         };
-        environment.config.permission_profile =
+        environment.config_mut().permission_profile =
             PermissionProfileSnapshot::legacy(PermissionProfile::Disabled);
         let turn = Arc::new(turn);
 

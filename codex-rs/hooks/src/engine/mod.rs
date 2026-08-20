@@ -1,6 +1,7 @@
 pub(crate) mod command_runner;
 pub(crate) mod discovery;
 pub(crate) mod dispatcher;
+pub(crate) mod mcp_runner;
 pub(crate) mod output_parser;
 pub(crate) mod schema_loader;
 
@@ -30,6 +31,7 @@ use crate::events::stop_failure::StopFailureOutcome;
 use crate::events::stop_failure::StopFailureRequest;
 use crate::events::user_prompt_submit::UserPromptSubmitOutcome;
 use crate::events::user_prompt_submit::UserPromptSubmitRequest;
+use crate::mcp::HookMcpExecutor;
 use crate::output_spill::AdditionalContextLimit;
 use codex_config::ConfigLayerStack;
 use codex_plugin::PluginHookSource;
@@ -41,6 +43,7 @@ use codex_protocol::protocol::HookSource;
 use codex_protocol::protocol::HookTrustStatus;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use command_runner::CommandHookRuntime;
@@ -71,6 +74,11 @@ pub(crate) enum ConfiguredHandlerKind {
         env: HashMap<String, String>,
         r#async: bool,
     },
+    McpTool {
+        server: String,
+        tool: String,
+        input: serde_json::Map<String, serde_json::Value>,
+    },
 }
 
 #[derive(Debug)]
@@ -88,7 +96,8 @@ impl ConfiguredHandler {
     pub(crate) fn execution_mode(&self) -> HookExecutionMode {
         match self.kind {
             ConfiguredHandlerKind::Command { r#async: true, .. } => HookExecutionMode::Async,
-            ConfiguredHandlerKind::Command { r#async: false, .. } => HookExecutionMode::Sync,
+            ConfiguredHandlerKind::Command { r#async: false, .. }
+            | ConfiguredHandlerKind::McpTool { .. } => HookExecutionMode::Sync,
         }
     }
 
@@ -129,17 +138,23 @@ impl ConfiguredHandler {
     fn handler_type(&self) -> HookHandlerType {
         match &self.kind {
             ConfiguredHandlerKind::Command { .. } => HookHandlerType::Command,
+            ConfiguredHandlerKind::McpTool { .. } => HookHandlerType::McpTool,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HookListEntryHandler {
+    Command { command: String, r#async: bool },
+    McpTool { server: String, tool: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookListEntry {
     pub key: String,
     pub event_name: HookEventName,
-    pub handler_type: HookHandlerType,
+    pub handler: HookListEntryHandler,
     pub matcher: Option<String>,
-    pub command: Option<String>,
     pub timeout_sec: u64,
     pub status_message: Option<String>,
     pub additional_context_limit: Option<usize>,
@@ -151,14 +166,15 @@ pub struct HookListEntry {
     pub is_managed: bool,
     pub current_hash: String,
     pub trust_status: HookTrustStatus,
-    pub execution_mode: codex_protocol::protocol::HookExecutionMode,
 }
 
 #[derive(Clone)]
 pub(crate) struct ClaudeHooksEngine {
     pub(crate) handlers: Vec<ConfiguredHandler>,
     warnings: Vec<String>,
+    required_load_errors: Vec<String>,
     pub(crate) command_runtime: CommandHookRuntime,
+    pub(crate) mcp_executor: Arc<dyn HookMcpExecutor>,
 }
 
 impl ClaudeHooksEngine {
@@ -169,13 +185,16 @@ impl ClaudeHooksEngine {
         plugin_hook_sources: Vec<PluginHookSource>,
         plugin_hook_load_warnings: Vec<String>,
         command_runtime: CommandHookRuntime,
+        mcp_executor: Arc<dyn HookMcpExecutor>,
         settings_file: Option<&std::path::Path>,
     ) -> Self {
         if !enabled {
             return Self {
                 handlers: Vec::new(),
                 warnings: Vec::new(),
+                required_load_errors: Vec::new(),
                 command_runtime,
+                mcp_executor,
             };
         }
 
@@ -193,12 +212,18 @@ impl ClaudeHooksEngine {
         Self {
             handlers: discovered.handlers,
             warnings: discovered.warnings,
+            required_load_errors: discovered.required_load_errors,
             command_runtime,
+            mcp_executor,
         }
     }
 
     pub(crate) fn warnings(&self) -> &[String] {
         &self.warnings
+    }
+
+    pub(crate) fn required_load_errors(&self) -> &[String] {
+        &self.required_load_errors
     }
 
     pub(crate) fn preview_session_start(

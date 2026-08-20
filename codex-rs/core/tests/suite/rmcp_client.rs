@@ -2,6 +2,7 @@ use anyhow::Context as _;
 use anyhow::ensure;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::ffi::OsString;
@@ -22,6 +23,8 @@ use codex_config::types::McpServerConfig;
 use codex_config::types::McpServerEnvVar;
 use codex_config::types::McpServerTransportConfig;
 use codex_config::types::OAuthCredentialsStoreMode;
+use codex_core::EnvironmentConfig;
+use codex_core::EnvironmentMcpPolicy;
 use codex_core::TurnInputRequest;
 use codex_core::config::Config;
 use codex_exec_server::CreateDirectoryOptions;
@@ -42,8 +45,12 @@ use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::Settings;
+use codex_protocol::mcp_policy::McpServerIdentity;
+use codex_protocol::mcp_policy::McpServerRequirement;
+use codex_protocol::mcp_policy::PluginMcpRequirements;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::models::PermissionProfileSnapshot;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ConfigShellToolType;
 use codex_protocol::openai_models::InputModality;
@@ -53,6 +60,7 @@ use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::openai_models::ReasoningEffortPreset;
 use codex_protocol::openai_models::TruncationPolicyConfig;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::McpInvocation;
 use codex_protocol::protocol::McpStartupFailureReason;
@@ -60,6 +68,8 @@ use codex_protocol::protocol::McpStartupStatus;
 use codex_protocol::protocol::McpToolCallBeginEvent;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ThreadSettingsOverrides;
+use codex_protocol::protocol::TurnEnvironmentSelection;
+use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::user_input::UserInput;
 use codex_utils_cargo_bin::cargo_bin;
 use codex_utils_path_uri::PathUri;
@@ -74,6 +84,7 @@ use core_test_support::skip_if_no_network;
 use core_test_support::skip_if_no_remote_env;
 use core_test_support::skip_if_wine_exec;
 use core_test_support::stdio_server_bin;
+use core_test_support::submit_thread_settings;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
@@ -565,6 +576,178 @@ async fn mcp_namespace_instructions_are_preserved_without_hiding_tools() -> anyh
         responses::namespace_child_tool(&body, "mcp__bounded", "echo").is_some(),
         "preserving the namespace must not hide a valid MCP tool"
     );
+    Ok(())
+}
+
+#[test_case(false; "configured servers")]
+#[test_case(true; "plugin servers")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn environment_mcp_policy_filters_runtime_config_and_model_tools(
+    from_plugin: bool,
+) -> anyhow::Result<()> {
+    skip_if_wine_exec!(
+        Ok(()),
+        "requires a Windows test_stdio_server in the Wine-exec environment"
+    );
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let response = mount_sse_once(
+        &server,
+        responses::sse(vec![
+            responses::ev_response_created("resp-1"),
+            responses::ev_assistant_message("msg-1", "done"),
+            responses::ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+    let command = remote_aware_stdio_server_bin()?;
+    let allowed_command = command.clone();
+    let codex_home = Arc::new(tempdir()?);
+    if from_plugin {
+        let plugin_root =
+            super::plugins::write_sample_plugin_manifest_and_config(codex_home.as_ref());
+        let plugin_server = json!({
+            "command": command,
+            "environment_id": remote_aware_environment_id(),
+        });
+        fs::write(
+            plugin_root.join(".mcp.json"),
+            serde_json::to_vec(&json!({
+                "mcpServers": {
+                    "allowed": plugin_server,
+                    "blocked": plugin_server,
+                },
+            }))?,
+        )?;
+    }
+    let fixture = test_codex()
+        .with_home(codex_home)
+        .with_model_info_override("gpt-5.4", |model| model.supports_search_tool = false)
+        .with_config(move |config| {
+            if !from_plugin {
+                for server_name in ["allowed", "blocked"] {
+                    insert_mcp_server(
+                        config,
+                        server_name,
+                        stdio_transport(command.clone(), /*env*/ None, Vec::new()),
+                        TestMcpServerOptions {
+                            environment_id: remote_aware_environment_id(),
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
+            insert_mcp_server(
+                config,
+                "unselected",
+                stdio_transport(command, /*env*/ None, Vec::new()),
+                TestMcpServerOptions {
+                    environment_id: "unselected-environment".to_string(),
+                    ..Default::default()
+                },
+            );
+        })
+        .build_with_auto_env(&server)
+        .await?;
+
+    let selection = fixture
+        .codex
+        .environment_selections()
+        .await
+        .into_iter()
+        .next()
+        .expect("thread should select its executor environment");
+    submit_thread_settings(
+        &fixture.codex,
+        ThreadSettingsOverrides {
+            environments: Some(TurnEnvironmentSelections::new(
+                fixture.config.cwd.clone(),
+                vec![TurnEnvironmentSelection {
+                    config: EnvironmentConfigState::Pending,
+                    ..selection.clone()
+                }],
+            )),
+            ..Default::default()
+        },
+    )
+    .await?;
+    let (pending_config, _) = fixture.codex.current_mcp_config_and_runtime_context().await;
+    let pending_servers = pending_config.mcp_server_catalog.configured_servers();
+    assert!(!pending_servers["allowed"].enabled);
+    assert!(!pending_servers["unselected"].enabled);
+
+    let allowed_servers = BTreeMap::from([(
+        "allowed".to_string(),
+        McpServerRequirement::Identity {
+            identity: McpServerIdentity::Command {
+                command: allowed_command,
+            },
+        },
+    )]);
+    let mcp_policy = if from_plugin {
+        EnvironmentMcpPolicy {
+            servers: None,
+            plugins: Some(BTreeMap::from([(
+                "sample@test".to_string(),
+                PluginMcpRequirements {
+                    mcp_servers: Some(allowed_servers),
+                },
+            )])),
+        }
+    } else {
+        EnvironmentMcpPolicy {
+            servers: Some(allowed_servers),
+            plugins: None,
+        }
+    };
+
+    fixture
+        .codex
+        .environment_ready(
+            &selection,
+            EnvironmentConfig {
+                allow_login_shell: true,
+                permission_profile: PermissionProfileSnapshot::legacy(
+                    fixture.config.permissions.permission_profile().clone(),
+                ),
+                shell_environment_policy: Default::default(),
+                exec_policy: None,
+                mcp_policy: Some(mcp_policy),
+                network_policy: None,
+                selected_capability_roots: Vec::new(),
+            },
+        )
+        .await?;
+
+    let (runtime_config, _) = fixture.codex.current_mcp_config_and_runtime_context().await;
+    let runtime_servers = runtime_config.mcp_server_catalog.configured_servers();
+    assert!(!runtime_servers["blocked"].enabled);
+    assert!(!runtime_servers["unselected"].enabled);
+    fixture
+        .codex
+        .call_mcp_tool(
+            "allowed",
+            "echo",
+            Some(json!({ "message": "ready" })),
+            /*meta*/ None,
+        )
+        .await?;
+
+    fixture
+        .submit_text_turn("show the available MCP tools")
+        .await?;
+    let body = response.single_request().body_json();
+    assert!(responses::namespace_child_tool(&body, "mcp__allowed", "echo").is_some());
+    assert!(responses::namespace_child_tool(&body, "mcp__blocked", "echo").is_none());
+
+    fixture
+        .codex
+        .environment_failed(&selection, "environment policy unavailable".to_string())
+        .await?;
+    let (failed_config, _) = fixture.codex.current_mcp_config_and_runtime_context().await;
+    let failed_servers = failed_config.mcp_server_catalog.configured_servers();
+    assert!(!failed_servers["allowed"].enabled);
     Ok(())
 }
 
@@ -2281,7 +2464,6 @@ async fn stdio_image_responses_are_sanitized_for_text_only_model() -> anyhow::Re
                 apply_patch_tool_type: None,
                 web_search_tool_type: Default::default(),
                 truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
-                supports_parallel_tool_calls: false,
                 supports_image_detail_original: false,
                 context_window: Some(272_000),
                 max_context_window: None,
@@ -3289,13 +3471,22 @@ async fn streamable_http_with_oauth_round_trip_impl() -> anyhow::Result<()> {
         .build_with_auto_env(&server)
         .await?;
     // Phase 5: replace rejected credentials as an external OAuth login would.
-    let mut failure_reason = None;
+    let recovery_hint = if credential_config.is_local_environment() {
+        format!("Run `codex mcp login {server_name}`.")
+    } else {
+        "Use your client's MCP OAuth sign-in flow.".to_string()
+    };
+    let expected_failure = (
+        format!("The {server_name} MCP server requires OAuth reauthentication. {recovery_hint}"),
+        Some(McpStartupFailureReason::ReauthenticationRequired),
+    );
+    let mut failure = None;
     let startup = wait_for_event(&fixture.codex, |event| {
         if let EventMsg::McpStartupUpdate(update) = event
             && update.server == server_name
-            && let McpStartupStatus::Failed { reason, .. } = &update.status
+            && let McpStartupStatus::Failed { error, reason } = &update.status
         {
-            failure_reason = *reason;
+            failure = Some((error.clone(), *reason));
         }
         matches!(event, EventMsg::McpStartupComplete(_))
     })
@@ -3305,10 +3496,7 @@ async fn streamable_http_with_oauth_round_trip_impl() -> anyhow::Result<()> {
     };
     assert_eq!(startup.failed.len(), 1);
     assert_eq!(startup.failed[0].server, server_name);
-    assert_eq!(
-        failure_reason,
-        Some(McpStartupFailureReason::ReauthenticationRequired),
-    );
+    assert_eq!(failure, Some(expected_failure.clone()));
 
     let store_lock = fs::OpenOptions::new()
         .read(true)
@@ -3322,23 +3510,23 @@ async fn streamable_http_with_oauth_round_trip_impl() -> anyhow::Result<()> {
             "continue while OAuth credentials are locked",
         ))
         .await?;
-    let (contended_turn, refreshed_failure_reason, refreshed_failed_servers) =
+    let (contended_turn, refreshed_failure, refreshed_failed_servers) =
         tokio::time::timeout(Duration::from_secs(5), async {
             let mut contended_turn = None;
-            let mut refreshed_failure_reason = None;
+            let mut refreshed_failure = None;
             let mut refreshed_failed_servers = None;
             let mut refreshed_starting = false;
             while contended_turn.is_none()
-                || refreshed_failure_reason.is_none()
+                || refreshed_failure.is_none()
                 || refreshed_failed_servers.is_none()
             {
                 match fixture.codex.next_event().await?.msg {
                     EventMsg::McpStartupUpdate(update) if update.server == server_name => {
                         match update.status {
                             McpStartupStatus::Starting => refreshed_starting = true,
-                            McpStartupStatus::Failed { reason, .. } => {
+                            McpStartupStatus::Failed { error, reason } => {
                                 assert!(refreshed_starting);
-                                refreshed_failure_reason = Some(reason);
+                                refreshed_failure = Some((error, reason));
                             }
                             McpStartupStatus::Ready | McpStartupStatus::Cancelled => {}
                         }
@@ -3352,16 +3540,13 @@ async fn streamable_http_with_oauth_round_trip_impl() -> anyhow::Result<()> {
             }
             Ok::<_, anyhow::Error>((
                 contended_turn.expect("turn completion was observed"),
-                refreshed_failure_reason.expect("failure status was observed"),
+                refreshed_failure.expect("failure status was observed"),
                 refreshed_failed_servers.expect("startup summary was observed"),
             ))
         })
         .await
         .context("OAuth credential-store contention blocked the user turn or startup status")??;
-    assert_eq!(
-        refreshed_failure_reason,
-        Some(McpStartupFailureReason::ReauthenticationRequired),
-    );
+    assert_eq!(refreshed_failure, expected_failure);
     assert_eq!(
         refreshed_failed_servers
             .into_iter()
@@ -3923,6 +4108,7 @@ fn write_fallback_oauth_tokens(
         "server_name": server_name,
         "url": server_url,
         "client_id": client_id,
+        "issuer": server_url,
         "token_response": {
             "access_token": access_token,
             "token_type": "Bearer",

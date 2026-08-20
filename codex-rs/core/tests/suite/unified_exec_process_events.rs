@@ -17,6 +17,7 @@ use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ReviewDecision;
@@ -538,6 +539,7 @@ async fn serve_exec_with_pushed_events(
 #[test_case(PushedExecScenario::ReplayGap, false, false, false ; "truncated_event_replay")]
 #[test_case(PushedExecScenario::Complete, true, true, false ; "managed_network_uses_executor_proxy_launch")]
 #[test_case(PushedExecScenario::Complete, true, false, false ; "strict_managed_allowlist_omits_policy_callbacks")]
+#[cfg_attr(not(windows), test_case(PushedExecScenario::Complete, true, true, true ; "foreign_windows_managed_network_preserves_approval_registration"))]
 #[cfg_attr(not(windows), test_case(PushedExecScenario::Complete, false, false, true ; "foreign_windows_workspace_sandbox"))]
 #[test_case(PushedExecScenario::ElevatedPowerShell, false, false, true ; "windows_elevated_powershell_disables_profile")]
 #[cfg_attr(not(windows), test_case(PushedExecScenario::SandboxedInterceptedPatch, false, false, true ; "foreign_windows_intercepted_patch_is_sandboxed"))]
@@ -704,6 +706,7 @@ timeout = 900
                                 PathUri::parse("file:///D:/other-workspace")
                                     .expect("valid Windows workspace root"),
                             ],
+                            config: EnvironmentConfigState::FromThread,
                         }],
                     )
                 }),

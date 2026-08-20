@@ -28,6 +28,7 @@ use crate::events::stop_failure::StopFailureOutcome;
 use crate::events::stop_failure::StopFailureRequest;
 use crate::events::user_prompt_submit::UserPromptSubmitOutcome;
 use crate::events::user_prompt_submit::UserPromptSubmitRequest;
+use crate::mcp::HookMcpExecutor;
 use crate::types::Hook;
 use crate::types::HookEvent;
 use crate::types::HookPayload;
@@ -37,6 +38,8 @@ use codex_config::ConfigLayerStack;
 use codex_plugin::PluginHookSource;
 use codex_protocol::ThreadId;
 use codex_protocol::shell_environment::scrub_non_inheritable_env_vars;
+use std::ffi::OsString;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::Command;
 
@@ -61,38 +64,56 @@ pub struct HookListOutcome {
 
 #[derive(Clone)]
 pub struct Hooks {
+    // TODO: Once legacy `notify` is removed, capture this snapshot in `CommandHookRuntime::new`
+    // and remove the environment plumbing from `Hooks` and `from_config`.
+    environment: Arc<Vec<(OsString, OsString)>>,
     after_agent: Vec<Hook>,
     engine: ClaudeHooksEngine,
 }
 
 impl Hooks {
-    /// Bind this session's hook runtime and output files to its thread.
+    /// Bind this session's hook runtime and output files to its thread, rejecting unloadable
+    /// required managed hooks.
     pub fn new(
         config: HooksConfig,
         thread_id: ThreadId,
-    ) -> (Self, Receiver<codex_protocol::protocol::HookCompletedEvent>) {
+        mcp_executor: Arc<dyn HookMcpExecutor>,
+    ) -> anyhow::Result<(Self, Receiver<codex_protocol::protocol::HookCompletedEvent>)> {
         let (result_sender, result_receiver) = async_channel::unbounded();
-        let hooks = Self::from_config(config, |shell| {
-            CommandHookRuntime::new(shell, thread_id, result_sender)
+        let environment = Arc::new(std::env::vars_os().collect());
+        let hooks = Self::from_config(config, mcp_executor, Arc::clone(&environment), |shell| {
+            CommandHookRuntime::new(shell, environment, thread_id, result_sender)
         });
-        (hooks, result_receiver)
+        let required_load_errors = hooks.engine.required_load_errors();
+        if !required_load_errors.is_empty() {
+            anyhow::bail!(
+                "failed to load required managed hooks: {}",
+                required_load_errors.join("; ")
+            );
+        }
+        Ok((hooks, result_receiver))
     }
 
     /// Preserve in-flight background hooks while applying a refreshed configuration.
     pub fn reconfigured(&self, config: HooksConfig) -> Self {
-        Self::from_config(config, |shell| {
-            self.engine.command_runtime.reconfigured(shell)
-        })
+        Self::from_config(
+            config,
+            Arc::clone(&self.engine.mcp_executor),
+            Arc::clone(&self.environment),
+            |shell| self.engine.command_runtime.reconfigured(shell),
+        )
     }
 
     fn from_config(
         config: HooksConfig,
+        mcp_executor: Arc<dyn HookMcpExecutor>,
+        environment: Arc<Vec<(OsString, OsString)>>,
         build_runtime: impl FnOnce(CommandShell) -> CommandHookRuntime,
     ) -> Self {
         let after_agent = config
             .legacy_notify_argv
             .filter(|argv| !argv.is_empty() && !argv[0].is_empty())
-            .map(crate::notify_hook)
+            .map(|argv| crate::legacy_notify::notify_hook(argv, Arc::clone(&environment)))
             .into_iter()
             .collect();
         let command_runtime = build_runtime(CommandShell {
@@ -106,9 +127,11 @@ impl Hooks {
             config.plugin_hook_sources,
             config.plugin_hook_load_warnings,
             command_runtime,
+            mcp_executor,
             config.settings_file.as_deref(),
         );
         Self {
+            environment,
             after_agent,
             engine,
         }
@@ -328,13 +351,19 @@ pub fn list_hooks(config: HooksConfig) -> HookListOutcome {
     }
 }
 
-pub fn command_from_argv(argv: &[String]) -> Option<Command> {
+// TODO: Remove this legacy-notify-only command builder when `notify` support is removed.
+pub(crate) fn command_from_argv(
+    argv: &[String],
+    environment: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Option<Command> {
     let (program, args) = argv.split_first()?;
     if program.is_empty() {
         return None;
     }
     let mut command = Command::new(program);
     command.args(args);
+    command.env_clear();
+    command.envs(environment);
     scrub_non_inheritable_env_vars(command.as_std_mut());
     Some(command)
 }

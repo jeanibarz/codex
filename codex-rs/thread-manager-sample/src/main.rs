@@ -117,7 +117,7 @@ async fn run_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
     let state_db = init_state_db(&config).await;
 
     let auth_manager =
-        AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false).await;
+        AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false).await?;
     let local_runtime_paths = ExecServerRuntimePaths::from_optional_paths(
         config.codex_self_exe.clone(),
         config.codex_linux_sandbox_exe.clone(),
@@ -215,6 +215,7 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
         include_apps_instructions: false,
         include_collaboration_mode_instructions: false,
         include_skill_instructions: false,
+        skill_max_context_tokens: None,
         orchestrator_skills_enabled: false,
         orchestrator_mcp_enabled: false,
         include_environment_context: false,
@@ -287,7 +288,6 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
         experimental_realtime_ws_backend_prompt: None,
         experimental_realtime_ws_startup_context: None,
         experimental_realtime_start_instructions: None,
-        experimental_thread_config_endpoint: None,
         experimental_thread_store: ThreadStoreConfig::Local,
         forced_chatgpt_workspace_id: None,
         forced_login_method: None,
