@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use toml::Value as TomlValue;
 
 const GPT_5_6_LUNA_MODEL: &str = "gpt-5.6-luna";
+const GPT_5_6_SOL_MODEL: &str = "gpt-5.6-sol";
 
 #[derive(Clone, Copy)]
 struct ClaudeAgentModelMapping {
@@ -753,17 +754,24 @@ fn claude_agent_model_reasoning_effort(model: &str) -> Option<&'static str> {
 
 fn claude_agent_model_mapping(model: &str) -> Option<ClaudeAgentModelMapping> {
     let lower = model.to_ascii_lowercase();
-    if lower.contains("opus") {
+    let family = match lower.as_str() {
+        "opus" | "sonnet" | "haiku" => lower.as_str(),
+        _ => lower
+            .strip_prefix("claude-")?
+            .split('-')
+            .find(|segment| matches!(*segment, "opus" | "sonnet" | "haiku"))?,
+    };
+    if family == "opus" {
         Some(ClaudeAgentModelMapping {
-            model: GPT_5_6_LUNA_MODEL,
-            reasoning_effort: "max",
+            model: GPT_5_6_SOL_MODEL,
+            reasoning_effort: "high",
         })
-    } else if lower.contains("sonnet") {
+    } else if family == "sonnet" {
         Some(ClaudeAgentModelMapping {
             model: GPT_5_6_LUNA_MODEL,
             reasoning_effort: "high",
         })
-    } else if lower.contains("haiku") {
+    } else if family == "haiku" {
         Some(ClaudeAgentModelMapping {
             model: GPT_5_6_LUNA_MODEL,
             reasoning_effort: "medium",
