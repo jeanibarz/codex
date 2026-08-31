@@ -283,6 +283,7 @@ async fn installed_agent_plugin_uses_isolated_data_root_for_stdio_mcp() {
         &store,
         /*plugin_skill_snapshots*/ None,
         Some(Product::Codex),
+        /*plugin_hooks_enabled*/ false,
         /*remote_global_catalog_active*/ false,
         test_skill_root_loader().as_ref(),
     )
@@ -626,7 +627,7 @@ async fn hooks_only_scope_loads_claude_plugin_hooks_without_other_capabilities()
         Some(Product::Codex),
         /*plugin_hooks_enabled*/ true,
         /*remote_global_catalog_active*/ false,
-        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
+        test_skill_root_loader().as_ref(),
     )
     .await;
     let hooks_only = load_plugins_from_layer_stack_with_scope(

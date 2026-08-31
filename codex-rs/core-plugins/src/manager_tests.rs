@@ -56,6 +56,8 @@ use codex_plugin::PluginId;
 use codex_protocol::auth::AuthMode;
 use codex_protocol::protocol::HookEventName;
 use codex_protocol::protocol::Product;
+use codex_skills_extension::HostSkillsLoadInput;
+use codex_skills_extension::HostSkillsService;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::test_support::PathBufExt;
 use codex_utils_plugins::SkillDiscoveryMode;
@@ -159,6 +161,7 @@ fn curated_repo_sync_stays_deferred_for_remote_chatgpt_catalog() {
         "openai".to_string(),
         /*plugins_enabled*/ true,
         /*remote_plugin_enabled*/ true,
+        /*plugin_hooks_enabled*/ false,
         "https://chatgpt.com".to_string(),
         test_http_client_factory(),
     );
@@ -1303,11 +1306,15 @@ enabled = false
     );
 
     let config = load_config(&codex_home, home.path()).await;
-    let plugins_manager = PluginsManager::new(codex_home.clone());
+    let plugins_manager = test_plugins_manager(codex_home.clone());
     let plugin_outcome = plugins_manager.plugins_for_config(&config).await;
 
     assert_eq!(
-        plugin_outcome.effective_skill_roots(),
+        plugin_outcome
+            .effective_plugin_skill_roots()
+            .into_iter()
+            .map(|root| root.path)
+            .collect::<Vec<_>>(),
         vec![plugin_root.join("skills").abs()]
     );
     assert_eq!(
@@ -1315,6 +1322,7 @@ enabled = false
         &[PluginCapabilitySummary {
             config_name: "looper-toolkit@looper".to_string(),
             display_name: "looper-toolkit".to_string(),
+            plugin_namespace: Some("looper-toolkit".to_string()),
             description: Some("Looper Toolkit".to_string()),
             has_skills: true,
             mcp_server_names: Vec::new(),
@@ -1322,14 +1330,14 @@ enabled = false
         }]
     );
 
-    let skills_input = SkillsLoadInput::new(
+    let skills_input = HostSkillsLoadInput::new(
         home.path().to_path_buf().abs(),
         plugin_outcome.effective_plugin_skill_roots(),
         config.config_layer_stack.clone(),
-        /*bundled_skills_enabled*/ false,
-    );
+    )
+    .with_plugin_skill_snapshots(plugins_manager.plugin_skill_snapshots_for_config(&config));
     let skills_service =
-        SkillsService::new(codex_home.abs(), /*bundled_skills_enabled*/ false);
+        HostSkillsService::new(codex_home.abs(), /*bundled_skills_enabled*/ false);
     let skills = skills_service
         .snapshot_for_config(&skills_input, /*fs*/ None)
         .await;
@@ -3196,6 +3204,7 @@ fn loaded_plugins_cache_evicts_least_recently_used_configuration() {
                 },
             )]),
             skill_config_rules: SkillConfigRules::default(),
+            plugin_hooks_enabled: false,
             remote_global_catalog_active: false,
             auth_identity: None,
         })
@@ -3315,7 +3324,7 @@ async fn plugin_cache_distinguishes_hook_loading_flag() {
             test_http_client_factory(),
         )
     };
-    let manager = PluginsManager::new(codex_home.path().to_path_buf());
+    let manager = test_plugins_manager(codex_home.path().to_path_buf());
 
     let hooks_disabled = manager.plugins_for_config(&config(false)).await;
     let hooks_enabled = manager.plugins_for_config(&config(true)).await;
@@ -3341,6 +3350,7 @@ async fn plugins_for_config_discards_in_flight_load_after_account_change() {
         String::new(),
         /*plugins_enabled*/ true,
         /*remote_plugin_enabled*/ true,
+        /*plugin_hooks_enabled*/ false,
         String::new(),
         test_http_client_factory(),
     );

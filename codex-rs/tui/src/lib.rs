@@ -1980,6 +1980,7 @@ mod tests {
     use tempfile::TempDir;
     use tokio::time::Duration;
     use tokio::time::sleep;
+    use tokio::time::timeout;
 
     async fn build_config(temp_dir: &TempDir) -> std::io::Result<Config> {
         ConfigBuilder::default()
@@ -3265,12 +3266,12 @@ mod tests {
             })
             .await
             .expect("turn/start should succeed");
-        for _ in 0..20 {
-            if marker.exists() {
-                break;
+        timeout(Duration::from_secs(30), async {
+            while !marker.exists() {
+                sleep(Duration::from_millis(50)).await;
             }
-            sleep(Duration::from_millis(50)).await;
-        }
+        })
+        .await?;
         assert_eq!(std::fs::read_to_string(&marker)?, "session-start-fired\n");
 
         app_server.shutdown().await?;

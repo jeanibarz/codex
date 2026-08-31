@@ -978,9 +978,9 @@ async fn load_plugin(
         }
         PluginLoadScope::HooksOnly => {}
     }
-    let (hook_sources, hook_load_warnings) = if !scope.plugin_hooks_enabled() {
-        (Vec::new(), Vec::new())
-    } else if loaded_manifest.format == PluginManifestFormat::AgentPlugin {
+    let (hook_sources, hook_load_warnings) = if !scope.plugin_hooks_enabled()
+        || loaded_manifest.format == PluginManifestFormat::AgentPlugin
+    {
         (Vec::new(), Vec::new())
     } else {
         load_plugin_hooks(
@@ -1073,9 +1073,9 @@ pub(crate) async fn load_plugin_from_root(
         }
         PluginLoadScope::HooksOnly => {}
     }
-    let (hook_sources, hook_load_warnings) = if !scope.plugin_hooks_enabled() {
-        (Vec::new(), Vec::new())
-    } else if loaded_manifest.format == PluginManifestFormat::AgentPlugin {
+    let (hook_sources, hook_load_warnings) = if !scope.plugin_hooks_enabled()
+        || loaded_manifest.format == PluginManifestFormat::AgentPlugin
+    {
         (Vec::new(), Vec::new())
     } else {
         load_plugin_hooks(&plugin_root, plugin_id, &plugin_data_root, manifest_paths)
