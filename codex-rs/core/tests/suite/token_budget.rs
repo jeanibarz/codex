@@ -33,9 +33,9 @@ use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_completed_with_tokens;
+use core_test_support::responses::ev_exec_command_call;
 use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_response_created;
-use core_test_support::responses::ev_shell_command_call;
 use core_test_support::responses::mount_compact_json_once;
 use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_sequence;
@@ -249,6 +249,7 @@ async fn token_budget_guidance_precedes_standalone_context_window() -> Result<()
     let guidance_message = "Preserve important state before compaction.";
     let test = test_codex()
         .with_config(move |config| {
+            config.update_plan_enabled = true;
             config.model_context_window = Some(CONFIGURED_CONTEXT_WINDOW);
             config.token_budget = Some(TokenBudgetConfig {
                 guidance_message: Some(guidance_message.to_string()),
@@ -264,7 +265,13 @@ async fn token_budget_guidance_precedes_standalone_context_window() -> Result<()
 
     test.submit_turn("inspect context guidance").await?;
 
-    let developer_texts = response.single_request().message_input_texts("developer");
+    let request = response.single_request();
+    assert!(request.has_content_kinds(&[
+        "token_budget.context_window_guidance",
+        "permissions.instructions",
+    ]));
+    assert!(request.has_content_kinds(&["token_budget.context_window"]));
+    let developer_texts = request.message_input_texts("developer");
     let context_window_index = developer_texts
         .iter()
         .position(|text| text.starts_with(CONTEXT_WINDOW_OPEN_TAG))
@@ -294,7 +301,7 @@ async fn token_budget_uses_model_message_defaults() -> Result<()> {
         .with_pre_build_hook(|home| {
             std::fs::write(
                 home.join("config.toml"),
-                "[features.token_budget]\nenabled = true\n",
+                "[features.token_budget]\nenabled = true\nuse_history_notes_extension = true\n",
             )
             .expect("write token-budget configuration");
         })
@@ -455,7 +462,7 @@ async fn token_budget_defaults_follow_the_active_model() -> Result<()> {
         "switching models should preserve the existing model-switch message"
     );
     let expected_guidance = format!(
-        "{CONTEXT_WINDOW_GUIDANCE_OPEN_TAG}\nUse second-model context-window guidance.\n{CONTEXT_WINDOW_GUIDANCE_CLOSE_TAG}"
+        "{CONTEXT_WINDOW_GUIDANCE_OPEN_TAG}\nThis context-window guidance replaces all previously provided context-window guidance.\n\nUse second-model context-window guidance.\n{CONTEXT_WINDOW_GUIDANCE_CLOSE_TAG}"
     );
     assert_eq!(
         developer_texts
@@ -1022,6 +1029,15 @@ async fn token_budget_context_uses_new_window_after_compaction(
     assert_eq!(initial_token_budget.len(), 1);
     let (initial_first_window_id, initial_previous_window_id, initial_window_id) =
         token_budget_window_ids(&initial_token_budget[0], "/root");
+    let initial_turn_metadata: Value = serde_json::from_str(
+        &requests[0]
+            .header("x-codex-turn-metadata")
+            .expect("initial context window metadata"),
+    )?;
+    assert_eq!(
+        initial_turn_metadata["context_window_id"].as_str(),
+        Some(initial_window_id.as_str())
+    );
     let post_compaction_token_budget = token_budget_contexts(&requests[1]);
     assert_eq!(post_compaction_token_budget.len(), 1);
     let (
@@ -1029,6 +1045,15 @@ async fn token_budget_context_uses_new_window_after_compaction(
         post_compaction_previous_window_id,
         post_compaction_window_id,
     ) = token_budget_window_ids(&post_compaction_token_budget[0], "/root");
+    let post_compaction_turn_metadata: Value = serde_json::from_str(
+        &requests[1]
+            .header("x-codex-turn-metadata")
+            .expect("post-compaction context window metadata"),
+    )?;
+    assert_eq!(
+        post_compaction_turn_metadata["context_window_id"].as_str(),
+        Some(post_compaction_window_id.as_str())
+    );
     assert_eq!(initial_previous_window_id, None);
     assert_eq!(initial_first_window_id, initial_window_id);
     assert_eq!(post_compaction_first_window_id, initial_first_window_id);
@@ -1254,7 +1279,7 @@ async fn token_budget_auto_compact_fallback_uses_buffer_until_new_context() -> R
             ]),
             sse(vec![
                 ev_response_created("fallback-tool-resp"),
-                ev_shell_command_call(fallback_call_id, "echo fallback-note > fallback-note.txt"),
+                ev_exec_command_call(fallback_call_id, "echo fallback-note > fallback-note.txt"),
                 ev_completed_with_tokens("fallback-tool-resp", /*total_tokens*/ 10_000),
             ]),
             sse(vec![
@@ -1444,6 +1469,7 @@ async fn new_context_tool_skips_auto_compact_fallback() -> Result<()> {
     let test = test_codex()
         .with_extensions(Arc::new(extensions.build()))
         .with_config(|config| {
+            config.update_plan_enabled = true;
             config.model_context_window = Some(10_000);
             config.token_budget = Some(TokenBudgetConfig {
                 auto_compact_fallback_prompt: Some(AUTO_COMPACT_FALLBACK_PROMPT.to_string()),

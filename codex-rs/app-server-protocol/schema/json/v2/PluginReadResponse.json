@@ -124,7 +124,8 @@
         "subagentStop",
         "stop",
         "stopFailure",
-        "fileChanged"
+        "fileChanged",
+        "interrupt"
       ],
       "type": "string"
     },

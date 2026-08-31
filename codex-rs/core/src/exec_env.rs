@@ -40,7 +40,6 @@ pub(crate) fn inject_session_id_env(env: &mut HashMap<String, String>, session_i
     env.insert(CODEX_SESSION_ID_ENV_VAR.to_string(), session_id.to_string());
 }
 
-
 pub(crate) fn apply_dependency_env(
     env: &mut HashMap<String, String>,
     explicit_env_overrides: &mut HashMap<String, String>,
@@ -51,7 +50,6 @@ pub(crate) fn apply_dependency_env(
         explicit_env_overrides.insert(key.clone(), value.clone());
     }
 }
-
 
 /// Injects the selected named permission profile into a shell tool's environment.
 ///

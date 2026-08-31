@@ -258,7 +258,7 @@ impl ChatWidget {
                     .send(AppEvent::OpenDesktopThread { thread_id });
             }
             SlashCommand::Init => {
-                const INIT_PROMPT: &str = include_str!("../../prompt_for_init_command.md");
+                const INIT_PROMPT: &str = include_str!("../../assets/prompt_for_init_command.md");
                 self.submit_user_message(INIT_PROMPT.to_string().into());
             }
             SlashCommand::Compact => {
@@ -272,6 +272,16 @@ impl ChatWidget {
                 }
                 self.input_queue.user_turn_pending_start = true;
                 self.app_event_tx.compact();
+            }
+            SlashCommand::Recap => {
+                let Some(thread_id) = self.thread_id else {
+                    self.add_error_message(
+                        "Session is still starting; try /recap again in a moment.".to_string(),
+                    );
+                    return;
+                };
+                self.app_event_tx
+                    .send(AppEvent::GenerateRecap { thread_id });
             }
             SlashCommand::Review => {
                 self.open_review_popup();
@@ -402,7 +412,7 @@ impl ChatWidget {
                 self.app_event_tx.send(AppEvent::Logout);
             }
             SlashCommand::Copy => {
-                self.copy_last_agent_markdown();
+                self.show_copy_picker();
             }
             SlashCommand::Export => {
                 self.show_transcript_export_popup();
@@ -1139,6 +1149,7 @@ impl ChatWidget {
             | SlashCommand::Diff
             | SlashCommand::App
             | SlashCommand::Rename
+            | SlashCommand::Recap
             | SlashCommand::TestApproval => QueueDrain::Continue,
             SlashCommand::Cd => match self.thread_id {
                 Some(thread_id) if self.can_change_working_directory(thread_id) => QueueDrain::Stop,

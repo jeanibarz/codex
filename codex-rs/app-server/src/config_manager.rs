@@ -69,17 +69,6 @@ impl ConfigManager {
         self
     }
 
-    pub(crate) fn replace_thread_config_loader(
-        &self,
-        thread_config_loader: Arc<dyn ThreadConfigLoader>,
-    ) {
-        if let Ok(mut guard) = self.thread_config_loader.write() {
-            *guard = thread_config_loader;
-        } else {
-            warn!("failed to update thread config loader");
-        }
-    }
-
     fn current_thread_config_loader(&self) -> Arc<dyn ThreadConfigLoader> {
         self.thread_config_loader
             .read()
@@ -169,6 +158,14 @@ impl ConfigManager {
             fallback_cwd,
         )
         .await
+    }
+
+    /// Loads system, user, and runtime settings without discovering a project
+    /// from the app-server process's working directory.
+    pub(crate) async fn load_non_project_config(&self) -> std::io::Result<Config> {
+        let mut manager = self.clone();
+        manager.loader_overrides.ignore_project_config = true;
+        manager.load_latest_config(/*fallback_cwd*/ None).await
     }
 
     pub(crate) async fn load_latest_config_for_thread(
