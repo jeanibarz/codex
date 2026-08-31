@@ -2017,6 +2017,7 @@ fn executor_stop_hook_fixture() -> (
             args: Vec::new(),
         }),
         executor,
+        /*settings_file*/ None,
     );
     let source = ExecutorPluginHookSource {
         plugin_id: PluginId::parse("computer-use@openai-bundled").expect("valid plugin ID"),
@@ -2581,6 +2582,7 @@ async fn mcp_interrupt_hooks_expand_event_input_and_bound_timeout() {
             args: Vec::new(),
         }),
         Arc::new(executor),
+        /*settings_file*/ None,
     );
     let outcome = engine
         .run_interrupt(InterruptRequest {
