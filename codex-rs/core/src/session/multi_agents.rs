@@ -73,7 +73,7 @@ pub(super) fn usage_hint_text(
     }
 
     let catalog = turn_context
-        .model_info
+        .model_info()
         .model_messages
         .as_ref()
         .and_then(|messages| messages.multi_agent.as_ref())
@@ -148,7 +148,7 @@ pub(crate) fn effective_multi_agent_mode(turn_context: &TurnContext) -> Option<M
     }
 
     let catalog_mode = turn_context
-        .model_info
+        .model_info()
         .model_messages
         .as_ref()
         .and_then(|messages| messages.multi_agent.as_ref())
@@ -165,7 +165,10 @@ pub(crate) fn effective_multi_agent_mode(turn_context: &TurnContext) -> Option<M
     let multi_agent_mode = match mode_hint_text {
         Some(hint_text) => MultiAgentMode::Custom(hint_text.to_string()),
         None => match turn_context.effective_reasoning_effort() {
-            Some(ReasoningEffort::Ultra) => MultiAgentMode::Proactive,
+            Some(ReasoningEffort::Ultra) => catalog_mode
+                .and_then(|messages| messages.proactive.clone())
+                .map(MultiAgentMode::Custom)
+                .unwrap_or(MultiAgentMode::Proactive),
             _ => catalog_mode
                 .and_then(|messages| messages.explicit.clone())
                 .map(MultiAgentMode::Custom)

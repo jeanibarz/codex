@@ -6,10 +6,18 @@ use crate::events::compact::PostCompactRequest;
 use crate::events::compact::PreCompactOutcome;
 use crate::events::compact::PreCompactRequest;
 use crate::events::compact::StatelessHookOutcome;
+use crate::events::file_changed::FileChangedOutcome;
+use crate::events::file_changed::FileChangedRequest;
+use crate::events::interrupt::InterruptOutcome;
+use crate::events::interrupt::InterruptRequest;
+use crate::events::notification::NotificationOutcome;
+use crate::events::notification::NotificationRequest;
 use crate::events::permission_request::PermissionRequestOutcome;
 use crate::events::permission_request::PermissionRequestRequest;
 use crate::events::post_tool_use::PostToolUseOutcome;
 use crate::events::post_tool_use::PostToolUseRequest;
+use crate::events::post_tool_use_failure::PostToolUseFailureOutcome;
+use crate::events::post_tool_use_failure::PostToolUseFailureRequest;
 use crate::events::pre_tool_use::PreToolUseOutcome;
 use crate::events::pre_tool_use::PreToolUseRequest;
 use crate::events::session_end::SessionEndOutcome;
@@ -18,12 +26,6 @@ use crate::events::session_start::SessionStartOutcome;
 use crate::events::session_start::SessionStartRequest;
 use crate::events::stop::StopOutcome;
 use crate::events::stop::StopRequest;
-use crate::events::file_changed::FileChangedOutcome;
-use crate::events::file_changed::FileChangedRequest;
-use crate::events::notification::NotificationOutcome;
-use crate::events::notification::NotificationRequest;
-use crate::events::post_tool_use_failure::PostToolUseFailureOutcome;
-use crate::events::post_tool_use_failure::PostToolUseFailureRequest;
 use crate::events::stop_failure::StopFailureOutcome;
 use crate::events::stop_failure::StopFailureRequest;
 use crate::events::user_prompt_submit::UserPromptSubmitOutcome;
@@ -35,6 +37,7 @@ use crate::types::HookPayload;
 use crate::types::HookResponse;
 use async_channel::Receiver;
 use codex_config::ConfigLayerStack;
+use codex_plugin::ExecutorPluginHookSource;
 use codex_plugin::PluginHookSource;
 use codex_protocol::ThreadId;
 use codex_protocol::shell_environment::scrub_non_inheritable_env_vars;
@@ -102,6 +105,12 @@ impl Hooks {
             Arc::clone(&self.environment),
             |shell| self.engine.command_runtime.reconfigured(shell),
         )
+    }
+
+    pub fn with_executor_hooks(&self, executor_hooks: Vec<ExecutorPluginHookSource>) -> Self {
+        let mut hooks = self.clone();
+        hooks.engine.set_executor_hooks(executor_hooks);
+        hooks
     }
 
     fn from_config(
@@ -329,6 +338,13 @@ impl Hooks {
         self.engine.run_file_changed(request).await
     }
 
+    pub fn preview_interrupt(&self) -> Vec<codex_protocol::protocol::HookRunSummary> {
+        self.engine.preview_interrupt()
+    }
+
+    pub async fn run_interrupt(&self, request: InterruptRequest) -> InterruptOutcome {
+        self.engine.run_interrupt(request).await
+    }
 }
 
 pub fn list_hooks(config: HooksConfig) -> HookListOutcome {

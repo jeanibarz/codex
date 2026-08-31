@@ -370,6 +370,24 @@ impl BottomPane {
         self.request_redraw();
     }
 
+    pub(crate) fn set_task_mentions_enabled(&mut self, enabled: bool) {
+        self.composer.set_task_mentions_enabled(enabled);
+        self.request_redraw();
+    }
+
+    pub(crate) fn task_mentions_enabled(&self) -> bool {
+        self.composer.task_mentions_enabled()
+    }
+
+    pub(crate) fn on_task_search_result(
+        &mut self,
+        query: &str,
+        matches: Vec<crate::task_mentions::TaskMention>,
+    ) {
+        self.composer.on_task_search_result(query, matches);
+        self.request_redraw();
+    }
+
     pub fn set_plugins_command_enabled(&mut self, enabled: bool) {
         self.composer.set_plugins_command_enabled(enabled);
         self.request_redraw();
@@ -740,7 +758,7 @@ impl BottomPane {
                 self.request_redraw();
             }
             event
-        } else if self.composer.cancel_history_search() {
+        } else if self.composer.cancel_vim_search() || self.composer.cancel_history_search() {
             self.request_redraw();
             CancellationEvent::Handled
         } else if self.composer_is_empty() {
@@ -931,18 +949,6 @@ impl BottomPane {
     pub(crate) fn set_footer_hint_override(&mut self, items: Option<Vec<(String, String)>>) {
         self.composer.set_footer_hint_override(items);
         self.request_redraw();
-    }
-
-    /// Applies the externally decided Plan-mode nudge visibility to the footer presentation.
-    pub(crate) fn set_plan_mode_nudge_visible(&mut self, visible: bool) {
-        if self.composer.set_plan_mode_nudge_visible(visible) {
-            self.request_redraw();
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn plan_mode_nudge_visible(&self) -> bool {
-        self.composer.plan_mode_nudge_visible()
     }
 
     pub(crate) fn set_remote_image_urls(&mut self, urls: Vec<String>) {
@@ -1192,6 +1198,7 @@ impl BottomPane {
     }
 
     /// Replace the newest matching selection view without disturbing views stacked above it.
+    /// Preserve pending parent cleanup when an already-open child is accepted.
     pub(crate) fn replace_selection_view_if_present(
         &mut self,
         view_id: &'static str,
@@ -1207,11 +1214,13 @@ impl BottomPane {
 
         let replaces_active_view = index + 1 == self.view_stack.len();
         self.apply_standard_popup_hint(&mut params);
-        self.view_stack[index] = Box::new(list_selection_view::ListSelectionView::new(
+        let mut view = list_selection_view::ListSelectionView::new(
             params,
             self.app_event_tx.clone(),
             self.keymap.list.clone(),
-        ));
+        );
+        view.dismiss_after_child_accept = self.view_stack[index].dismiss_after_child_accept();
+        self.view_stack[index] = Box::new(view);
         if replaces_active_view {
             self.schedule_active_view_frame();
         }
@@ -1295,6 +1304,25 @@ impl BottomPane {
             .last()
             .filter(|view| view.view_id() == Some(view_id))
             .and_then(|view| view.active_tab_id())
+    }
+
+    /// Forward a suggestion to its matching prompt, even beneath another view.
+    pub(crate) fn apply_text_suggestion(
+        &mut self,
+        request_id: uuid::Uuid,
+        suggestion: Option<&str>,
+    ) -> bool {
+        let changed = self
+            .view_stack
+            .iter_mut()
+            .rev()
+            .any(|view| view.apply_text_suggestion(request_id, suggestion));
+
+        if changed {
+            self.request_redraw();
+        }
+
+        changed
     }
 
     pub(crate) fn dismiss_active_view_if_id(&mut self, view_id: &'static str) -> bool {
@@ -1986,6 +2014,7 @@ mod tests {
 
     fn exec_request() -> ApprovalRequest {
         ApprovalRequest::Exec(ExecApprovalRequest {
+            kind: Default::default(),
             thread_id: codex_protocol::ThreadId::new(),
             thread_label: None,
             id: "1".to_string(),
@@ -2112,6 +2141,11 @@ mod tests {
         assert_eq!(pane.composer_text(), "draft");
         assert!(!pane.composer.popup_active());
         assert!(!pane.quit_shortcut_hint_visible());
+        pane.composer.set_vim_enabled(/*enabled*/ true);
+        pane.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert_eq!(CancellationEvent::Handled, pane.on_ctrl_c());
+        assert_eq!(pane.composer_text(), "draft");
+        assert!(!pane.composer.popup_active());
     }
 
     // live ring removed; related tests deleted.
@@ -2314,6 +2348,41 @@ mod tests {
             pane.view_stack.last().and_then(|view| view.view_id()),
             Some("top")
         );
+    }
+
+    #[test]
+    fn apply_text_suggestion_updates_matching_prompt_beneath_an_overlay() {
+        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let mut pane = test_pane(tx);
+        let request_id = uuid::Uuid::new_v4();
+        let prompt = custom_prompt_view::CustomPromptView::new(
+            "Rename thread".to_string(),
+            "Type a name".to_string(),
+            /*initial_text*/ String::new(),
+            /*context_label*/ None,
+            Box::new(|_| {}),
+        )
+        .with_text_suggestion(request_id, "Loading".to_string(), "Ready".to_string());
+        pane.show_text_prompt(prompt);
+        pane.push_view(Box::new(CompletingView {
+            id: Some("overlay"),
+            complete: false,
+        }));
+
+        assert!(pane.apply_text_suggestion(request_id, Some("Fix login timeout")));
+
+        pane.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let rendered = render_snapshot(
+            &pane,
+            Rect::new(
+                /*x*/ 0, /*y*/ 0, /*width*/ 80, /*height*/ 8,
+            ),
+        );
+
+        assert!(rendered.contains("Fix login timeout"));
+        assert!(rendered.contains("Ready"));
+        assert!(!rendered.contains("Loading"));
     }
 
     #[test]
@@ -2722,6 +2791,7 @@ mod tests {
                 path: test_path_buf("/tmp/test-skill/SKILL.md").abs(),
                 scope: crate::test_support::skill_scope_user(),
                 enabled: true,
+                plugin_id: None,
             }]),
         });
 

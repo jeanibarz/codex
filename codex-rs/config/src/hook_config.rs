@@ -64,6 +64,8 @@ pub struct HookEventsToml {
     pub stop_failure: Vec<MatcherGroup>,
     #[serde(rename = "FileChanged", default)]
     pub file_changed: Vec<MatcherGroup>,
+    #[serde(rename = "Interrupt", default)]
+    pub interrupt: Vec<MatcherGroup>,
 }
 
 impl HookEventsToml {
@@ -84,6 +86,7 @@ impl HookEventsToml {
             stop,
             stop_failure,
             file_changed,
+            interrupt,
         } = self;
         pre_tool_use.is_empty()
             && permission_request.is_empty()
@@ -100,6 +103,7 @@ impl HookEventsToml {
             && stop.is_empty()
             && stop_failure.is_empty()
             && file_changed.is_empty()
+            && interrupt.is_empty()
     }
 
     pub fn handler_count(&self) -> usize {
@@ -119,6 +123,7 @@ impl HookEventsToml {
             stop,
             stop_failure,
             file_changed,
+            interrupt,
         } = self;
         [
             pre_tool_use,
@@ -136,6 +141,7 @@ impl HookEventsToml {
             stop,
             stop_failure,
             file_changed,
+            interrupt,
         ]
         .into_iter()
         .flatten()
@@ -143,26 +149,31 @@ impl HookEventsToml {
         .sum()
     }
 
-    pub fn into_matcher_groups(self) -> [(HookEventName, Vec<MatcherGroup>); 15] {
+    pub fn into_matcher_groups(mut self) -> [(HookEventName, Vec<MatcherGroup>); 16] {
+        self.matcher_groups_mut()
+            .map(|(event, groups)| (event, std::mem::take(groups)))
+    }
+
+    pub fn matcher_groups_mut(&mut self) -> [(HookEventName, &mut Vec<MatcherGroup>); 16] {
+        use HookEventName as Event;
+
         [
-            (HookEventName::PreToolUse, self.pre_tool_use),
-            (HookEventName::PermissionRequest, self.permission_request),
-            (HookEventName::PostToolUse, self.post_tool_use),
-            (HookEventName::PreCompact, self.pre_compact),
-            (HookEventName::PostCompact, self.post_compact),
-            (
-                HookEventName::PostToolUseFailure,
-                self.post_tool_use_failure,
-            ),
-            (HookEventName::Notification, self.notification),
-            (HookEventName::SessionStart, self.session_start),
-            (HookEventName::SessionEnd, self.session_end),
-            (HookEventName::UserPromptSubmit, self.user_prompt_submit),
-            (HookEventName::SubagentStart, self.subagent_start),
-            (HookEventName::SubagentStop, self.subagent_stop),
-            (HookEventName::Stop, self.stop),
-            (HookEventName::StopFailure, self.stop_failure),
-            (HookEventName::FileChanged, self.file_changed),
+            (Event::PreToolUse, &mut self.pre_tool_use),
+            (Event::PermissionRequest, &mut self.permission_request),
+            (Event::PostToolUse, &mut self.post_tool_use),
+            (Event::PreCompact, &mut self.pre_compact),
+            (Event::PostCompact, &mut self.post_compact),
+            (Event::PostToolUseFailure, &mut self.post_tool_use_failure),
+            (Event::Notification, &mut self.notification),
+            (Event::SessionStart, &mut self.session_start),
+            (Event::SessionEnd, &mut self.session_end),
+            (Event::UserPromptSubmit, &mut self.user_prompt_submit),
+            (Event::SubagentStart, &mut self.subagent_start),
+            (Event::SubagentStop, &mut self.subagent_stop),
+            (Event::Stop, &mut self.stop),
+            (Event::StopFailure, &mut self.stop_failure),
+            (Event::FileChanged, &mut self.file_changed),
+            (Event::Interrupt, &mut self.interrupt),
         ]
     }
 }

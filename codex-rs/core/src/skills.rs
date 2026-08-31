@@ -10,13 +10,16 @@ use codex_extension_api::SkillInvocationInput;
 use codex_extension_api::SkillInvocationKind;
 use codex_otel::sanitize_metric_tag_value;
 use codex_protocol::protocol::SkillScope;
+use codex_skills_extension::InjectedHostSkillPrompts;
 use codex_skills_extension::detect_implicit_skill_invocation;
+use codex_skills_extension::record_plugin_turn_usage;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use codex_utils_plugins::PluginSkillRoot;
 use std::collections::HashSet;
 use tokio::sync::Mutex;
 
+pub use codex_config::bundled_skills_enabled_from_stack;
 pub use codex_skills::SkillError;
 pub use codex_skills::SkillMetadata;
 pub use codex_skills::SkillPolicy;
@@ -26,7 +29,6 @@ pub use codex_skills::detect_implicit_skill_invocation_for_command;
 pub use codex_skills_extension::HostSkillsLoadInput;
 pub use codex_skills_extension::HostSkillsService;
 pub use codex_skills_extension::SkillLoadOutcome;
-pub use codex_config::bundled_skills_enabled_from_stack;
 use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
@@ -49,7 +51,7 @@ pub(crate) fn skills_load_input_from_config(
     )
 }
 
-pub(crate) fn emit_explicit_skill_invocations(
+pub(crate) async fn emit_explicit_skill_invocations(
     sess: &Session,
     turn_context: &TurnContext,
     mentioned_skills: &[SkillMetadata],
@@ -60,9 +62,17 @@ pub(crate) fn emit_explicit_skill_invocations(
         .iter()
         .map(|skill| &skill.path_to_skills_md)
         .collect::<HashSet<_>>();
+    let model_slug_tag = sanitize_metric_tag_value(turn_context.model_info().slug.as_str());
+    let reasoning_effort = turn_context.effective_reasoning_effort_for_tracing();
     for skill in mentioned_skills {
         let skill_name_tag = sanitize_metric_tag_value(skill.name.as_str());
+        let plugin_id_tag =
+            sanitize_metric_tag_value(skill.plugin_id.as_deref().unwrap_or("unattributed"));
         let status = if injected_skill_paths.contains(&skill.path_to_skills_md) {
+            record_plugin_turn_usage(
+                turn_context.extension_data.as_ref(),
+                skill.plugin_id.as_deref(),
+            );
             "ok"
         } else {
             "error"
@@ -74,8 +84,36 @@ pub(crate) fn emit_explicit_skill_invocations(
                 ("status", status),
                 ("skill", skill_name_tag.as_str()),
                 ("invoke_type", "explicit"),
+                ("plugin_id", plugin_id_tag.as_str()),
+                ("model_slug", model_slug_tag.as_str()),
+                ("reasoning_effort", reasoning_effort.as_str()),
             ],
         );
+    }
+
+    let injected_host_skill_prompts = turn_context
+        .extension_data
+        .get::<InjectedHostSkillPrompts>();
+    for skill in injected_skills {
+        let skill_resource = skill.path_to_skills_md.to_string_lossy();
+        if injected_host_skill_prompts
+            .as_ref()
+            .is_some_and(|prompts| prompts.is_superseded_path(&skill_resource))
+        {
+            continue;
+        }
+        for contributor in sess.services.extensions.skill_invocation_contributors() {
+            contributor
+                .on_skill_invocation(SkillInvocationInput {
+                    session_store: &sess.services.session_extension_data,
+                    thread_store: &sess.services.thread_extension_data,
+                    turn_store: turn_context.extension_data.as_ref(),
+                    turn_id: turn_context.sub_id.as_str(),
+                    skill_resource: skill_resource.as_ref(),
+                    kind: SkillInvocationKind::Explicit,
+                })
+                .await;
+        }
     }
 
     let invocations = injected_skills
@@ -141,14 +179,16 @@ pub(crate) fn include_cli_plugin_hook_sources(
             Ok(abs) => abs,
             Err(_) => continue,
         };
-        let Some(manifest) = codex_core_plugins::manifest::load_plugin_manifest(abs_root.as_path()) else {
+        let Some(manifest) = codex_core_plugins::manifest::load_plugin_manifest(abs_root.as_path())
+        else {
             // Already warned by include_cli_plugin_skill_roots for the same dir.
             continue;
         };
         // CLI-injected plugins don't come from a marketplace; synthesize a
         // marketplace segment ("cli") so the resulting PluginId is well-formed
         // and self-documenting in telemetry/source paths.
-        let plugin_id = match codex_plugin::PluginId::new(manifest.name.clone(), "cli".to_string()) {
+        let plugin_id = match codex_plugin::PluginId::new(manifest.name.clone(), "cli".to_string())
+        {
             Ok(id) => id,
             Err(err) => {
                 warn!(
@@ -163,8 +203,12 @@ pub(crate) fn include_cli_plugin_hook_sources(
         // plugin root itself (marketplace plugins get a per-plugin cache dir,
         // but CLI-injected ones write to their own tree if needed).
         let plugin_data_root = abs_root.clone();
-        let (sources, warnings) =
-            codex_core_plugins::loader::load_plugin_hooks(&abs_root, &plugin_id, &plugin_data_root, &manifest.paths);
+        let (sources, warnings) = codex_core_plugins::loader::load_plugin_hooks(
+            &abs_root,
+            &plugin_id,
+            &plugin_data_root,
+            &manifest.paths,
+        );
         for warning in warnings {
             warn!(
                 "--plugin-dir {} hook load warning: {warning}",
@@ -267,9 +311,11 @@ async fn request_skill_dependencies(
             },
         )
         .await
-        .unwrap_or_else(|| codex_protocol::request_user_input::RequestUserInputResponse {
-            answers: HashMap::new(),
-        });
+        .unwrap_or_else(
+            || codex_protocol::request_user_input::RequestUserInputResponse {
+                answers: HashMap::new(),
+            },
+        );
     if response.answers.is_empty() {
         return;
     }
@@ -294,7 +340,6 @@ async fn request_skill_dependencies(
 
     sess.set_dependency_env(values).await;
 }
-
 
 pub(crate) async fn maybe_emit_implicit_skill_invocation(
     sess: &Session,
@@ -339,6 +384,14 @@ pub(crate) async fn maybe_emit_implicit_skill_invocation(
         return;
     }
     let skill_name_tag = sanitize_metric_tag_value(skill_name.as_str());
+    let plugin_id_tag =
+        sanitize_metric_tag_value(invocation.plugin_id.as_deref().unwrap_or("unattributed"));
+    let model_slug_tag = sanitize_metric_tag_value(turn_context.model_info().slug.as_str());
+    let reasoning_effort = turn_context.effective_reasoning_effort_for_tracing();
+    record_plugin_turn_usage(
+        turn_context.extension_data.as_ref(),
+        invocation.plugin_id.as_deref(),
+    );
 
     for contributor in sess.services.extensions.skill_invocation_contributors() {
         contributor
@@ -360,13 +413,16 @@ pub(crate) async fn maybe_emit_implicit_skill_invocation(
             ("status", "ok"),
             ("skill", skill_name_tag.as_str()),
             ("invoke_type", "implicit"),
+            ("plugin_id", plugin_id_tag.as_str()),
+            ("model_slug", model_slug_tag.as_str()),
+            ("reasoning_effort", reasoning_effort.as_str()),
         ],
     );
     sess.services
         .analytics_events_client
         .track_skill_invocations(
             build_track_events_context(
-                turn_context.model_info.slug.clone(),
+                turn_context.model_info().slug.clone(),
                 sess.thread_id.to_string(),
                 turn_context.sub_id.clone(),
                 turn_context.originator.clone(),

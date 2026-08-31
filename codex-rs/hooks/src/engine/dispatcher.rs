@@ -2,6 +2,8 @@ use std::path::Path;
 
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
+use serde_json::Map;
+use serde_json::Value;
 
 use codex_protocol::protocol::HookCompletedEvent;
 use codex_protocol::protocol::HookEventName;
@@ -15,6 +17,7 @@ use super::ClaudeHooksEngine;
 use super::ConfiguredHandler;
 use super::ConfiguredHandlerKind;
 use super::HandlerRunResult;
+use super::HandlerSourcePath;
 use super::command_runner::run_command;
 use super::mcp_runner::run_mcp_tool;
 use crate::events::common::matches_matcher;
@@ -136,7 +139,8 @@ fn select_handlers_for_matcher_inputs_and_tool_input(
                 HookEventName::Notification
                 | HookEventName::UserPromptSubmit
                 | HookEventName::Stop
-                | HookEventName::StopFailure => true,
+                | HookEventName::StopFailure
+                | HookEventName::Interrupt => true,
             }
         })
         .filter(|handler| {
@@ -254,13 +258,16 @@ fn glob_matches(pattern: &str, input: &str) -> bool {
 }
 
 pub(crate) fn running_summary(handler: &ConfiguredHandler) -> HookRunSummary {
+    let HandlerSourcePath::Local(source_path) = &handler.source_path else {
+        unreachable!("executor-scoped hooks do not produce public hook summaries");
+    };
     HookRunSummary {
         id: handler.run_id(),
         event_name: handler.event_name,
         handler_type: handler.handler_type(),
         execution_mode: handler.execution_mode(),
         scope: scope_for_event(handler.event_name),
-        source_path: handler.source_path.clone(),
+        source_path: source_path.clone(),
         source: handler.source,
         display_order: handler.display_order,
         status: HookRunStatus::Running,
@@ -280,8 +287,31 @@ pub(crate) async fn execute_handlers<T: 'static>(
     turn_id: Option<String>,
     parse: fn(&ConfiguredHandler, HandlerRunResult, Option<String>) -> ParsedHandler<T>,
 ) -> Vec<ParsedHandler<T>> {
+    execute_handlers_with_metadata(
+        engine, handlers, input_json, cwd, turn_id, /*metadata*/ None, parse,
+    )
+    .await
+}
+
+pub(crate) async fn execute_handlers_with_metadata<T: 'static>(
+    engine: &ClaudeHooksEngine,
+    handlers: Vec<ConfiguredHandler>,
+    input_json: String,
+    cwd: &Path,
+    turn_id: Option<String>,
+    metadata: Option<&Map<String, Value>>,
+    parse: fn(&ConfiguredHandler, HandlerRunResult, Option<String>) -> ParsedHandler<T>,
+) -> Vec<ParsedHandler<T>> {
+    let mut executor_handlers = Vec::new();
     let mut pending = FuturesUnordered::new();
     for (configured_order, handler) in handlers.into_iter().enumerate() {
+        if matches!(
+            handler.source_path,
+            HandlerSourcePath::ExecutorScoped { .. }
+        ) {
+            executor_handlers.push(handler);
+            continue;
+        }
         if handler.execution_mode() == HookExecutionMode::Async {
             engine.command_runtime.schedule_async_hook(
                 handler,
@@ -295,47 +325,85 @@ pub(crate) async fn execute_handlers<T: 'static>(
         let input_json = input_json.clone();
         let turn_id = turn_id.clone();
         pending.push(async move {
-            let result = match &handler.kind {
-                ConfiguredHandlerKind::Command { command, env, .. } => {
-                    run_command(
-                        &engine.command_runtime,
-                        &handler,
-                        command,
-                        env,
-                        &input_json,
-                        cwd,
-                    )
-                    .await
-                }
-                ConfiguredHandlerKind::McpTool {
-                    server,
-                    tool,
-                    input,
-                } => {
-                    run_mcp_tool(
-                        engine.mcp_executor.as_ref(),
-                        &handler,
-                        server,
-                        tool,
-                        input,
-                        &input_json,
-                    )
-                    .await
-                }
-            };
+            let result =
+                execute_handler(engine, &handler, &input_json, cwd, /*metadata*/ None).await;
             (configured_order, parse(&handler, result, turn_id))
         });
     }
 
     let mut completed = Vec::new();
     let mut completion_order = 0;
+    let mut should_stop = false;
+    let mut should_block = false;
     while let Some((configured_order, mut parsed)) = pending.next().await {
+        should_stop |= parsed.completed.run.status == HookRunStatus::Stopped;
+        should_block |= parsed.completed.run.status == HookRunStatus::Blocked;
         parsed.completion_order = completion_order;
         completion_order += 1;
         completed.push((configured_order, parsed));
     }
     completed.sort_by_key(|(configured_order, _)| *configured_order);
+
+    if should_stop || !should_block {
+        for handler in executor_handlers {
+            let task_engine = engine.clone();
+            let input_json = input_json.clone();
+            let cwd = cwd.to_path_buf();
+            let metadata = metadata.cloned();
+            engine.command_runtime.schedule_async_task(async move {
+                let result =
+                    execute_handler(&task_engine, &handler, &input_json, &cwd, metadata.as_ref())
+                        .await;
+                if let Some(error) = result.error {
+                    tracing::warn!(
+                        source_path = %handler.source_path,
+                        %error,
+                        "executor-scoped hook failed"
+                    );
+                }
+            });
+        }
+    }
+
     completed.into_iter().map(|(_, parsed)| parsed).collect()
+}
+
+async fn execute_handler(
+    engine: &ClaudeHooksEngine,
+    handler: &ConfiguredHandler,
+    input_json: &str,
+    cwd: &Path,
+    metadata: Option<&Map<String, Value>>,
+) -> HandlerRunResult {
+    match &handler.kind {
+        ConfiguredHandlerKind::Command { command, env, .. } => {
+            run_command(
+                &engine.command_runtime,
+                handler,
+                command,
+                env,
+                input_json,
+                cwd,
+            )
+            .await
+        }
+        ConfiguredHandlerKind::McpTool {
+            server,
+            tool,
+            input,
+        } => {
+            run_mcp_tool(
+                engine.mcp_executor.as_ref(),
+                handler,
+                server,
+                tool,
+                input,
+                input_json,
+                metadata,
+            )
+            .await
+        }
+    }
 }
 
 pub(crate) fn completed_summary(
@@ -344,13 +412,16 @@ pub(crate) fn completed_summary(
     status: HookRunStatus,
     entries: Vec<codex_protocol::protocol::HookOutputEntry>,
 ) -> HookRunSummary {
+    let HandlerSourcePath::Local(source_path) = &handler.source_path else {
+        unreachable!("executor-scoped hooks do not produce public hook summaries");
+    };
     HookRunSummary {
         id: handler.run_id(),
         event_name: handler.event_name,
         handler_type: handler.handler_type(),
         execution_mode: handler.execution_mode(),
         scope: scope_for_event(handler.event_name),
-        source_path: handler.source_path.clone(),
+        source_path: source_path.clone(),
         source: handler.source,
         display_order: handler.display_order,
         status,
@@ -378,7 +449,8 @@ pub(crate) fn scope_for_event(event_name: HookEventName) -> HookScope {
         | HookEventName::SubagentStop
         | HookEventName::FileChanged
         | HookEventName::Stop
-        | HookEventName::StopFailure => HookScope::Turn,
+        | HookEventName::StopFailure
+        | HookEventName::Interrupt => HookScope::Turn,
     }
 }
 
@@ -399,6 +471,7 @@ pub(crate) fn hook_event_name_label(event_name: HookEventName) -> &'static str {
         HookEventName::Stop => "Stop",
         HookEventName::StopFailure => "StopFailure",
         HookEventName::FileChanged => "FileChanged",
+        HookEventName::Interrupt => "Interrupt",
     }
 }
 
@@ -471,7 +544,7 @@ mod tests {
             timeout_sec: 5,
             status_message: None,
             additional_context_limit: Default::default(),
-            source_path: test_path_buf("/tmp/hooks.json").abs(),
+            source_path: test_path_buf("/tmp/hooks.json").abs().into(),
             source: HookSource::User,
             display_order,
             kind: ConfiguredHandlerKind::Command {
@@ -500,6 +573,34 @@ mod tests {
         ];
 
         let selected = select_handlers(&handlers, HookEventName::Stop, /*matcher_input*/ None);
+
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].display_order, 0);
+        assert_eq!(selected[1].display_order, 1);
+    }
+
+    #[test]
+    fn select_handlers_ignores_interrupt_matchers() {
+        let handlers = vec![
+            make_handler(
+                HookEventName::Interrupt,
+                Some("^interrupted$"),
+                "echo first",
+                /*display_order*/ 0,
+            ),
+            make_handler(
+                HookEventName::Interrupt,
+                /*matcher*/ None,
+                "echo second",
+                /*display_order*/ 1,
+            ),
+        ];
+
+        let selected = select_handlers(
+            &handlers,
+            HookEventName::Interrupt,
+            /*matcher_input*/ None,
+        );
 
         assert_eq!(selected.len(), 2);
         assert_eq!(selected[0].display_order, 0);

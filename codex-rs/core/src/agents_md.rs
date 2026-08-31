@@ -26,8 +26,11 @@ use codex_config::default_project_root_markers;
 use codex_config::merge_toml_values;
 use codex_config::project_root_markers_from_config;
 use codex_exec_server::ExecutorFileSystem;
+use codex_exec_server::GetMetadataOptions;
 use codex_exec_server::LOCAL_FS;
-use codex_extension_api::UserInstructions;
+use codex_exec_server::ReadFileOptions;
+use codex_extension_api::Instructions;
+use codex_file_system::FileSystemSandboxContext;
 use codex_file_system::FindUpErrorPolicy;
 use codex_file_system::find_nearest_ancestor_with_markers;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -60,11 +63,15 @@ const MAX_CONCURRENT_ANCESTOR_PROBES: usize = 256;
 /// instructions.
 pub(crate) async fn load_project_instructions(
     config: &Config,
-    user_instructions: Option<UserInstructions>,
+    user_instructions: Option<Instructions>,
     environments: &TurnEnvironmentSnapshot,
-) -> Option<LoadedAgentsMd> {
+) -> io::Result<Option<LoadedAgentsMd>> {
     let mut loaded = LoadedAgentsMd::from_user_instructions(user_instructions);
-    let mut remaining = config.project_doc_max_bytes;
+    if config.active_project.is_untrusted() {
+        return Ok((!loaded.is_empty()).then_some(loaded));
+    }
+
+    let remaining = config.project_doc_max_bytes;
     for turn_environment in environments.turn_environments() {
         if remaining == 0 {
             break;
@@ -77,12 +84,18 @@ pub(crate) async fn load_project_instructions(
             continue;
         };
         let mut project_doc_bytes_used = 0;
+        let sandbox = (!turn_environment
+            .permission_profile()
+            .file_system_sandbox_policy()
+            .has_full_disk_read_access())
+        .then(|| turn_environment.sandbox_context(/*additional_permissions*/ None));
         match read_agents_md(
             config,
             filesystem.as_ref(),
             &turn_environment.selection.environment_id,
             turn_environment.cwd(),
             remaining,
+            sandbox.as_ref(),
         )
         .await
         {
@@ -96,11 +109,20 @@ pub(crate) async fn load_project_instructions(
                 loaded.entries.extend(docs.entries);
             }
             Ok(None) => {}
-            Err(e) => {
+            Err(error) if sandbox.is_none() => {
                 error!(
                     environment_id = turn_environment.selection.environment_id,
-                    "error trying to find AGENTS.md docs: {e:#}"
+                    "error trying to find AGENTS.md docs: {error:#}"
                 );
+            }
+            Err(error) => {
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!(
+                        "failed to load AGENTS.md instructions for environment `{}`: {error}",
+                        turn_environment.selection.environment_id
+                    ),
+                ));
             }
         }
 
@@ -125,7 +147,7 @@ pub(crate) async fn load_project_instructions(
         }
     }
 
-    (!loaded.is_empty()).then_some(loaded)
+    Ok((!loaded.is_empty()).then_some(loaded))
 }
 
 impl<'a> AgentsMdManager<'a> {
@@ -142,7 +164,10 @@ impl<'a> AgentsMdManager<'a> {
         for candidate in [LOCAL_AGENTS_MD_FILENAME, DEFAULT_AGENTS_MD_FILENAME] {
             let path = base.join(candidate);
             let path_uri = PathUri::from_abs_path(&path);
-            let data = match fs.read_file(&path_uri, /*sandbox*/ None).await {
+            let data = match fs
+                .read_file(&path_uri, ReadFileOptions::default(), /*sandbox*/ None)
+                .await
+            {
                 Ok(data) => data,
                 Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
                 Err(err) if err.kind() == io::ErrorKind::IsADirectory => continue,
@@ -181,7 +206,7 @@ impl<'a> AgentsMdManager<'a> {
         })
         .unwrap_or_default();
         let cwd = PathUri::from_abs_path(&self.config.cwd);
-        match agents_md_paths(self.config, &cwd, fs).await {
+        match agents_md_paths(self.config, &cwd, fs, /*sandbox*/ None).await {
             Ok(agents_md_paths) => {
                 paths.extend(
                     agents_md_paths
@@ -215,12 +240,13 @@ async fn read_agents_md(
     environment_id: &str,
     cwd: &PathUri,
     max_total: usize,
+    sandbox: Option<&FileSystemSandboxContext>,
 ) -> io::Result<Option<LoadedAgentsMd>> {
     if max_total == 0 {
         return Ok(None);
     }
 
-    let paths = agents_md_paths(config, cwd, fs).await?;
+    let paths = agents_md_paths(config, cwd, fs, sandbox).await?;
     if paths.is_empty() {
         return Ok(None);
     }
@@ -233,7 +259,7 @@ async fn read_agents_md(
             break;
         }
 
-        let mut data = match fs.read_file(&p, /*sandbox*/ None).await {
+        let mut data = match fs.read_file(&p, ReadFileOptions::default(), sandbox).await {
             Ok(data) => data,
             Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
             Err(err) => return Err(err),
@@ -310,6 +336,7 @@ async fn agents_md_paths(
     config: &Config,
     cwd: &PathUri,
     fs: &dyn ExecutorFileSystem,
+    sandbox: Option<&FileSystemSandboxContext>,
 ) -> io::Result<Vec<PathUri>> {
     let dir = cwd.clone();
 
@@ -332,8 +359,8 @@ async fn agents_md_paths(
         fs,
         &dir,
         project_root_markers,
-        FindUpErrorPolicy::Propagate,
-        /*sandbox*/ None,
+        FindUpErrorPolicy::Ignore,
+        sandbox,
     )
     .await?;
     let search_dirs = if let Some(root) = project_root {
@@ -363,7 +390,10 @@ async fn agents_md_paths(
                 let candidate = directory
                     .join(name)
                     .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
-                match fs.get_metadata(&candidate, /*sandbox*/ None).await {
+                match fs
+                    .get_metadata(&candidate, GetMetadataOptions::default(), sandbox)
+                    .await
+                {
                     Ok(metadata) if metadata.is_file => return Ok(Some(candidate)),
                     Ok(_) => {}
                     Err(err) if err.kind() == io::ErrorKind::NotFound => {}
@@ -403,7 +433,7 @@ fn candidate_filenames(config: &Config) -> Vec<&str> {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LoadedAgentsMd {
     /// Host-provided user instructions.
-    user_instructions: Option<UserInstructions>,
+    user_instructions: Option<Instructions>,
 
     /// Ordered instructions and their provenance.
     entries: Vec<InstructionEntry>,
@@ -416,7 +446,7 @@ impl LoadedAgentsMd {
             return Self::default();
         }
         Self {
-            user_instructions: Some(UserInstructions {
+            user_instructions: Some(Instructions {
                 text: contents,
                 source: path,
             }),
@@ -424,7 +454,7 @@ impl LoadedAgentsMd {
         }
     }
 
-    fn from_user_instructions(user_instructions: Option<UserInstructions>) -> Self {
+    fn from_user_instructions(user_instructions: Option<Instructions>) -> Self {
         Self {
             user_instructions: user_instructions
                 .filter(|instructions| !instructions.text.trim().is_empty()),

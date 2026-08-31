@@ -20,7 +20,7 @@ v2_enum_from_core!(
         PreToolUse, PermissionRequest, PostToolUse, PreCompact, PostCompact,
         PostToolUseFailure, Notification, SessionStart, SessionEnd,
         UserPromptSubmit, SubagentStart, SubagentStop, Stop, StopFailure,
-        FileChanged
+        FileChanged, Interrupt
     }
 );
 

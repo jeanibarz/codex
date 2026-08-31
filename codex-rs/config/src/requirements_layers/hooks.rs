@@ -219,6 +219,7 @@ fn append_hook_events(existing: &mut HookEventsToml, incoming: HookEventsToml) -
         stop,
         stop_failure,
         file_changed,
+        interrupt,
     } = incoming;
 
     let mut changed = false;
@@ -237,6 +238,7 @@ fn append_hook_events(existing: &mut HookEventsToml, incoming: HookEventsToml) -
     changed |= append_vec(&mut existing.stop, stop);
     changed |= append_vec(&mut existing.stop_failure, stop_failure);
     changed |= append_vec(&mut existing.file_changed, file_changed);
+    changed |= append_vec(&mut existing.interrupt, interrupt);
     changed
 }
 

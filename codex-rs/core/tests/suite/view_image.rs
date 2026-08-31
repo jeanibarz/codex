@@ -166,7 +166,10 @@ async fn create_workspace_directory(test: &TestCodex, rel_path: &str) -> anyhow:
     test.fs()
         .create_directory(
             &abs_path_uri,
-            CreateDirectoryOptions { recursive: true },
+            CreateDirectoryOptions {
+                recursive: true,
+                follow_symlinks: true,
+            },
             /*sandbox*/ None,
         )
         .await?;
@@ -183,13 +186,21 @@ async fn write_workspace_file(
         test.fs()
             .create_directory(
                 &parent_uri,
-                CreateDirectoryOptions { recursive: true },
+                CreateDirectoryOptions {
+                    recursive: true,
+                    follow_symlinks: true,
+                },
                 /*sandbox*/ None,
             )
             .await?;
     }
     test.fs()
-        .write_file(&abs_path_uri, contents, /*sandbox*/ None)
+        .write_file(
+            &abs_path_uri,
+            contents,
+            Default::default(),
+            /*sandbox*/ None,
+        )
         .await?;
     Ok(abs_path_uri.to_path_buf())
 }
@@ -269,7 +280,9 @@ async fn assert_user_turn_local_image_resizes_to(
     )
     .await;
 
-    let body = mock.single_request().body_json();
+    let request = mock.single_request();
+    assert!(request.has_content_kinds(&["user.text", "user.image", "user.text"]));
+    let body = request.body_json();
     let input = body
         .get("input")
         .and_then(Value::as_array)
@@ -292,6 +305,7 @@ async fn assert_user_turn_local_image_resizes_to(
             assert_eq!(resize_notice_indices, Vec::<usize>::new());
         }
         ResizeNoticeExpectation::Enabled => {
+            assert!(request.has_content_kinds(&["images.resize_notice"]));
             assert_eq!(resize_notice_indices, vec![image_message_index + 1]);
             assert_developer_text_message(
                 &input[image_message_index + 1],
@@ -728,7 +742,12 @@ async fn view_image_routes_to_selected_remote_environment() -> anyhow::Result<()
     let image_path_uri = remote_cwd_uri.join("remote.png")?;
     let png = png_bytes(/*width*/ 1, /*height*/ 1, [0, 255, 0, 255])?;
     test.fs()
-        .write_file(&image_path_uri, png, /*sandbox*/ None)
+        .write_file(
+            &image_path_uri,
+            png,
+            Default::default(),
+            /*sandbox*/ None,
+        )
         .await?;
     let absolute_image_path = image_path_uri.inferred_native_path_string();
     let remote_selection = TurnEnvironmentSelection {
@@ -810,6 +829,7 @@ async fn view_image_routes_to_selected_remote_environment() -> anyhow::Result<()
             RemoveOptions {
                 recursive: false,
                 force: true,
+                follow_symlinks: true,
             },
             /*sandbox*/ None,
         )
@@ -1596,7 +1616,7 @@ async fn view_image_tool_returns_unsupported_message_for_text_only_model() -> an
             effort: ReasoningEffort::Medium,
             description: ReasoningEffort::Medium.to_string(),
         }],
-        shell_type: ConfigShellToolType::ShellCommand,
+        shell_type: ConfigShellToolType::UnifiedExec,
         visibility: ModelVisibility::List,
         supported_in_api: true,
         input_modalities: vec![InputModality::Text],
@@ -1609,6 +1629,7 @@ async fn view_image_tool_returns_unsupported_message_for_text_only_model() -> an
         model_specialty: None,
         tool_mode: None,
         multi_agent_version: None,
+        multi_agent_reasoning_effort: None,
         priority: 1,
         additional_speed_tiers: Vec::new(),
         service_tiers: Vec::new(),

@@ -13,7 +13,6 @@ use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ConfigWarningNotification;
-use codex_app_server_protocol::DeprecationNoticeNotification;
 use codex_app_server_protocol::InitializeCapabilities;
 use codex_app_server_protocol::InitializeParams;
 use codex_app_server_protocol::JSONRPCError;
@@ -43,7 +42,7 @@ use codex_app_server_protocol::TurnEnvironmentParams;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::UserInput as V2UserInput;
 use codex_arg0::Arg0DispatchPaths;
-use codex_config::CloudRequirementsLoader;
+use codex_config::CloudConfigBundleLoader;
 use codex_config::LoaderOverrides;
 use codex_config::NoopThreadConfigLoader;
 use codex_config::loader::project_trust_key;
@@ -428,8 +427,8 @@ async fn thread_start_creates_thread_and_emits_started() -> Result<()> {
     );
     assert_eq!(
         thread_json.get("historyMode").and_then(Value::as_str),
-        Some("legacy"),
-        "new threads should serialize `historyMode: legacy`"
+        Some("paginated"),
+        "durable threads should default to `historyMode: paginated` when supported"
     );
     assert_eq!(
         thread_json.get("threadSource").and_then(Value::as_str),
@@ -688,7 +687,7 @@ async fn thread_start_inherits_settings_file_hooks_from_embedded_process_impl() 
         vec![
             responses::sse(vec![
                 responses::ev_response_created("resp-1"),
-                responses::ev_shell_command_call("call-1", "echo hello"),
+                responses::ev_exec_command_call("call-1", "echo hello"),
                 responses::ev_completed("resp-1"),
             ]),
             responses::sse(vec![
@@ -717,7 +716,7 @@ async fn thread_start_inherits_settings_file_hooks_from_embedded_process_impl() 
         cli_overrides: Vec::new(),
         loader_overrides,
         strict_config: false,
-        cloud_requirements: CloudRequirementsLoader::default(),
+        cloud_config_bundle: CloudConfigBundleLoader::default(),
         thread_config_loader: Arc::new(NoopThreadConfigLoader),
         feedback: CodexFeedback::new(),
         log_db: None,
@@ -779,9 +778,8 @@ async fn thread_start_inherits_settings_file_hooks_from_embedded_process_impl() 
             let Some(event) = client.next_event().await else {
                 anyhow::bail!("in-process app-server stopped before turn/completed");
             };
-            if let InProcessServerEvent::ServerNotification(ServerNotification::TurnCompleted(
-                completed,
-            )) = event
+            if let InProcessServerEvent::ServerNotification(notification) = event
+                && let ServerNotification::TurnCompleted(completed) = notification.as_ref()
                 && completed.thread_id == thread.id
             {
                 return Ok::<(), anyhow::Error>(());
@@ -1293,6 +1291,7 @@ async fn thread_start_ephemeral_remains_pathless() -> Result<()> {
         thread.ephemeral,
         "ephemeral threads should be marked explicitly"
     );
+    assert_eq!(thread.history_mode, ThreadHistoryMode::Legacy);
     assert_eq!(
         thread.path, None,
         "ephemeral threads should not expose a path"
@@ -2035,6 +2034,11 @@ fn create_config_toml_with_profile_workspace_root(
             r#"
 [permissions.dev.workspace_roots]
 "{profile_root_key}" = true
+
+# This test only exercises workspace roots; Windows restricted-token sandboxes
+# cannot enforce a filesystem policy without root read access.
+[permissions.dev.filesystem]
+":root" = "read"
 
 [permissions.dev.filesystem.":workspace_roots"]
 "." = "write"
