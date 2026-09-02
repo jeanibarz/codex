@@ -1976,6 +1976,7 @@ fn builtin_cleanup_ignores_disablement_but_preserves_managed_only_policy() {
                 args: Vec::new(),
             }),
             mcp_executor(),
+            /*settings_file*/ None,
         );
         assert_eq!(feature_disabled.handlers, expected);
     }
@@ -2012,6 +2013,7 @@ fn disabled_hooks_feature_keeps_builtin_cleanup_but_not_trusted_plugin_hooks() {
             args: Vec::new(),
         }),
         mcp_executor(),
+        /*settings_file*/ None,
     );
     assert_eq!(engine.handlers, vec![discovered.handlers[0].clone()]);
 }
