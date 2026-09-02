@@ -125,8 +125,6 @@ mod otel_reloader;
 mod outgoing_message;
 mod plugin_config_reload;
 mod process_config_overrides;
-mod realtime_event_handling;
-mod realtime_history;
 mod request_processors;
 mod request_serialization;
 mod server_request_error;
