@@ -25,6 +25,7 @@ impl ChatWidget {
         self.bottom_pane
             .set_queue_submissions(/*queue_submissions*/ false);
         if previous_thread_id != self.thread_id {
+            self.backend_banner_notice_model = None;
             self.pending_automatic_thread_names.clear();
             self.review.recent_auto_review_denials = RecentAutoReviewDenials::default();
             self.clear_thread_usage_state();
@@ -128,6 +129,7 @@ impl ChatWidget {
                 .should_show_fast_status(&model_for_header, self.effective_service_tier.as_deref());
             let session_info_cell = history_cell::new_session_info(
                 &self.config,
+                &self.local_settings,
                 &model_for_header,
                 &session,
                 self.show_welcome_banner,

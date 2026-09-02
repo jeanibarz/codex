@@ -123,12 +123,12 @@ impl ChatWidget {
     }
 
     pub(crate) fn set_world_writable_warning_acknowledged(&mut self, acknowledged: bool) {
-        self.config.notices.hide_world_writable_warning = Some(acknowledged);
+        self.local_settings.notices.hide_world_writable_warning = Some(acknowledged);
     }
 
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub(crate) fn world_writable_warning_hidden(&self) -> bool {
-        self.config
+        self.local_settings
             .notices
             .hide_world_writable_warning
             .unwrap_or(false)
@@ -220,6 +220,9 @@ impl ChatWidget {
         self.invalidate_connector_scope();
         self.clear_pending_token_activity_refreshes();
         self.clear_pending_rate_limit_reset_requests();
+        self.clear_backend_banner();
+        self.input_queue.rate_limit_recovery_pending = false;
+        self.add_credits_nudge_email_in_flight = None;
         self.codex_rate_limit_reached_type = None;
         self.codex_spend_control_reached = None;
         self.rate_limit_warnings = RateLimitWarningState::default();
@@ -253,7 +256,7 @@ impl ChatWidget {
 
     /// Set the syntax theme override in the widget's config copy.
     pub(crate) fn set_tui_theme(&mut self, theme: Option<String>) {
-        self.config.tui_theme = theme;
+        self.local_settings.tui.theme = theme;
     }
 
     /// Set the model in the widget's config copy and stored collaboration mode.
@@ -446,6 +449,7 @@ impl ChatWidget {
     /// header/title (`refresh_model_display`) but forget the footer status line
     /// (`refresh_status_line`).
     pub(super) fn refresh_model_dependent_surfaces(&mut self) {
+        self.sync_backend_banner_view();
         self.refresh_model_display();
         self.refresh_status_line();
     }

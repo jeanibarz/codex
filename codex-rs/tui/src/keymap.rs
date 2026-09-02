@@ -184,6 +184,7 @@ pub(crate) struct VimNormalKeymap {
     pub(crate) insert_line_start: Vec<KeyBinding>,
     pub(crate) open_line_below: Vec<KeyBinding>,
     pub(crate) open_line_above: Vec<KeyBinding>,
+    pub(crate) enter_replace_mode: Vec<KeyBinding>,
     pub(crate) move_left: Vec<KeyBinding>,
     pub(crate) move_right: Vec<KeyBinding>,
     pub(crate) move_up: Vec<KeyBinding>,
@@ -210,6 +211,8 @@ pub(crate) struct VimNormalKeymap {
     pub(crate) start_delete_operator: Vec<KeyBinding>,
     pub(crate) start_yank_operator: Vec<KeyBinding>,
     pub(crate) start_change_operator: Vec<KeyBinding>,
+    pub(crate) undo: Vec<KeyBinding>,
+    pub(crate) redo: Vec<KeyBinding>,
     pub(crate) cancel_operator: Vec<KeyBinding>,
 }
 
@@ -599,25 +602,12 @@ impl RuntimeKeymap {
                     || configured_context_alias_is_used(&keymap.list, alias)
                     || configured_context_alias_is_used(&keymap.approval, alias)
             });
-        let open_agents_default_is_shadowed = keymap.global.open_agents.is_none()
-            && (configured_main_surface_alias_is_used(keymap, "alt-a")
-                || configured_context_alias_is_used(&keymap.list, "alt-a")
-                || configured_context_alias_is_used(&keymap.approval, "alt-a")
-                || chords.bindings.iter().any(|binding| {
-                    binding.action.context.overlaps(KeymapContext::Global)
-                        && binding.chord.prefix.parts() == key_hint::alt(KeyCode::Char('a')).parts()
-                }));
-
         let app = AppKeymap {
-            open_agents: if open_agents_default_is_shadowed {
-                Vec::new()
-            } else {
-                resolve_bindings(
-                    keymap.global.open_agents.as_ref(),
-                    &defaults.app.open_agents,
-                    "tui.keymap.global.open_agents",
-                )?
-            },
+            open_agents: resolve_bindings(
+                keymap.global.open_agents.as_ref(),
+                &defaults.app.open_agents,
+                "tui.keymap.global.open_agents",
+            )?,
             open_transcript: resolve_bindings(
                 keymap.global.open_transcript.as_ref(),
                 &defaults.app.open_transcript,
@@ -734,6 +724,7 @@ impl RuntimeKeymap {
             insert_line_start: resolve_local!(keymap, defaults, vim_normal, insert_line_start),
             open_line_below: resolve_local!(keymap, defaults, vim_normal, open_line_below),
             open_line_above: resolve_local!(keymap, defaults, vim_normal, open_line_above),
+            enter_replace_mode: resolve_local!(keymap, defaults, vim_normal, enter_replace_mode),
             move_left: resolve_local!(keymap, defaults, vim_normal, move_left),
             move_right: resolve_local!(keymap, defaults, vim_normal, move_right),
             move_up: resolve_local!(keymap, defaults, vim_normal, move_up),
@@ -770,6 +761,8 @@ impl RuntimeKeymap {
                 vim_normal,
                 start_change_operator
             ),
+            undo: resolve_local!(keymap, defaults, vim_normal, undo),
+            redo: resolve_local!(keymap, defaults, vim_normal, redo),
             cancel_operator: resolve_local!(keymap, defaults, vim_normal, cancel_operator),
         };
 
@@ -797,6 +790,10 @@ impl RuntimeKeymap {
             (
                 keymap.vim_normal.open_line_above.as_ref(),
                 vim_normal.open_line_above.as_slice(),
+            ),
+            (
+                keymap.vim_normal.enter_replace_mode.as_ref(),
+                vim_normal.enter_replace_mode.as_slice(),
             ),
             (
                 keymap.vim_normal.move_left.as_ref(),
@@ -902,6 +899,8 @@ impl RuntimeKeymap {
                 keymap.vim_normal.start_change_operator.as_ref(),
                 vim_normal.start_change_operator.as_slice(),
             ),
+            (keymap.vim_normal.undo.as_ref(), vim_normal.undo.as_slice()),
+            (keymap.vim_normal.redo.as_ref(), vim_normal.redo.as_slice()),
             (
                 keymap.vim_normal.cancel_operator.as_ref(),
                 vim_normal.cancel_operator.as_slice(),
@@ -972,7 +971,6 @@ impl RuntimeKeymap {
                 });
             }
         }
-
         let mut vim_operator = VimOperatorKeymap {
             delete_line: resolve_local!(keymap, defaults, vim_operator, delete_line),
             yank_line: resolve_local!(keymap, defaults, vim_operator, yank_line),
@@ -1363,7 +1361,12 @@ impl RuntimeKeymap {
             editor,
             vim_normal,
             vim_operator,
-            vim_search: VimSearchKeymap::default(),
+            vim_search: VimSearchKeymap {
+                forward: resolve_local!(keymap, defaults, vim_search, forward),
+                backward: resolve_local!(keymap, defaults, vim_search, backward),
+                next: resolve_local!(keymap, defaults, vim_search, next),
+                previous: resolve_local!(keymap, defaults, vim_search, previous),
+            },
             vim_text_object,
             pager,
             list,
@@ -1371,6 +1374,40 @@ impl RuntimeKeymap {
             approval,
         };
 
+        let configured: Vec<_> = runtime_action_bindings(&resolved)
+            .filter(|action| {
+                action.id.context.overlaps(KeymapContext::VimNormal)
+                    && bindings::configured_binding_for_action(keymap, action.id)
+                        .is_some_and(Option::is_some)
+            })
+            .flat_map(|action| action.bindings.iter().copied())
+            .collect();
+        for (setting, bindings) in [
+            (
+                keymap.vim_normal.undo.as_ref(),
+                &mut resolved.vim_normal.undo,
+            ),
+            (
+                keymap.vim_normal.redo.as_ref(),
+                &mut resolved.vim_normal.redo,
+            ),
+            (
+                keymap.vim_normal.enter_replace_mode.as_ref(),
+                &mut resolved.vim_normal.enter_replace_mode,
+            ),
+        ] {
+            if setting.is_none() {
+                bindings.retain(|binding| {
+                    let (code, modifiers) = binding.parts();
+                    let event = KeyEvent::new(code, modifiers);
+                    !configured.is_pressed(event)
+                        && !resolved.chords.bindings.iter().any(|chord| {
+                            chord.action.context.overlaps(KeymapContext::VimNormal)
+                                && chord.chord.prefix.is_press(event)
+                        })
+                });
+            }
+        }
         resolved.configure_vim_search(keymap)?;
         resolved.validate_conflicts()?;
         chords::validate_chord_conflicts(&resolved)?;
@@ -1397,7 +1434,7 @@ impl RuntimeKeymap {
     fn built_in_defaults() -> Self {
         Self {
             app: AppKeymap {
-                open_agents: default_bindings![alt(KeyCode::Char('a'))],
+                open_agents: default_bindings![],
                 open_transcript: default_bindings![ctrl(KeyCode::Char('t'))],
                 open_external_editor: default_bindings![ctrl(KeyCode::Char('g'))],
                 copy: default_bindings![ctrl(KeyCode::Char('o'))],
@@ -1509,6 +1546,10 @@ impl RuntimeKeymap {
                     shift(KeyCode::Char('o')),
                     plain(KeyCode::Char('O'))
                 ],
+                enter_replace_mode: default_bindings![
+                    shift(KeyCode::Char('r')),
+                    plain(KeyCode::Char('R'))
+                ],
                 move_left: default_bindings![plain(KeyCode::Char('h')), plain(KeyCode::Left)],
                 move_right: default_bindings![plain(KeyCode::Char('l')), plain(KeyCode::Right)],
                 move_up: default_bindings![plain(KeyCode::Char('k')), plain(KeyCode::Up)],
@@ -1547,6 +1588,8 @@ impl RuntimeKeymap {
                 start_delete_operator: default_bindings![plain(KeyCode::Char('d'))],
                 start_yank_operator: default_bindings![plain(KeyCode::Char('y'))],
                 start_change_operator: default_bindings![plain(KeyCode::Char('c'))],
+                undo: default_bindings![plain(KeyCode::Char('u'))],
+                redo: default_bindings![ctrl(KeyCode::Char('r'))],
                 cancel_operator: default_bindings![plain(KeyCode::Esc)],
             },
             vim_search: VimSearchKeymap::default(),
@@ -2816,6 +2859,15 @@ mod tests {
     }
 
     #[test]
+    fn explicit_replace_mode_binding_conflicts_with_legacy_binding() {
+        let mut keymap = TuiKeymap::default();
+        keymap.vim_normal.move_left = Some(one("shift-r"));
+        keymap.vim_normal.enter_replace_mode = Some(one("shift-r"));
+
+        expect_conflict(&keymap, "move_left", "enter_replace_mode");
+    }
+
+    #[test]
     fn configured_legacy_vim_normal_bindings_prune_new_substitute_default() {
         let mut keymap = TuiKeymap::default();
         keymap.vim_normal.move_left = Some(one("s"));
@@ -2966,6 +3018,68 @@ mod tests {
             binding.action.context == KeymapContext::VimNormal
                 && binding.chord.prefix == key_hint::plain(KeyCode::Char('.'))
         }));
+    }
+
+    #[test]
+    fn configured_legacy_bindings_prune_new_vim_defaults() {
+        for (key, new_action) in [
+            ("u", "undo"),
+            ("ctrl-r", "redo"),
+            ("shift-r", "enter_replace_mode"),
+        ] {
+            for (context, action, suffix) in [
+                ("vim_normal", "move_left", ""),
+                ("vim_normal", "move_left", " g"),
+                ("vim_search", "forward", ""),
+                ("vim_search", "forward", " g"),
+                ("composer", "submit", ""),
+                ("global", "submit", ""),
+                ("global", "queue", ""),
+                ("global", "toggle_shortcuts", ""),
+            ] {
+                let mut keymap: TuiKeymap = serde_json::from_value(serde_json::json!({
+                    (context): { (action): format!("{key}{suffix}") }
+                }))
+                .expect("config should deserialize");
+                if key == "ctrl-r"
+                    && (!suffix.is_empty() || matches!(context, "composer" | "global"))
+                {
+                    // Ctrl+R chords and main-surface actions must unbind the older history key.
+                    keymap.composer.history_search_previous = Some(KeybindingsSpec::Many(vec![]));
+                }
+                let runtime = RuntimeKeymap::from_config(&keymap).expect("config should parse");
+                assert_eq!(
+                    bindings_for_action(&runtime, "vim_normal", new_action),
+                    Some([].as_slice()),
+                    "{context}.{action} = {key}{suffix}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_vim_history_bindings_still_conflict_with_legacy_bindings() {
+        let mut keymap = TuiKeymap::default();
+        keymap.vim_normal.move_left = Some(one("u"));
+        keymap.vim_normal.undo = Some(one("u"));
+        expect_conflict(&keymap, "move_left", "undo");
+
+        keymap.vim_normal.move_left = Some(one("ctrl-r"));
+        keymap.vim_normal.undo = None;
+        keymap.vim_normal.redo = Some(one("ctrl-r"));
+        expect_conflict(&keymap, "move_left", "redo");
+    }
+
+    #[test]
+    fn explicit_empty_arrays_unbind_vim_history_actions() {
+        let mut keymap = TuiKeymap::default();
+        keymap.vim_normal.undo = Some(KeybindingsSpec::Many(vec![]));
+        keymap.vim_normal.redo = Some(KeybindingsSpec::Many(vec![]));
+
+        let runtime = RuntimeKeymap::from_config(&keymap).expect("config should parse");
+
+        assert!(runtime.vim_normal.undo.is_empty());
+        assert!(runtime.vim_normal.redo.is_empty());
     }
 
     #[test]
@@ -3311,32 +3425,6 @@ mod tests {
             RuntimeKeymap::from_config(&keymap)
                 .expect_err("backspace is reserved for task input")
                 .contains("backspace")
-        );
-    }
-
-    #[test]
-    fn agents_overview_default_yields_to_existing_custom_shortcuts() {
-        let mut keymap = TuiKeymap::default();
-        keymap.global.open_transcript = Some(one("alt-a"));
-
-        let runtime = RuntimeKeymap::from_config(&keymap).expect("existing keymap remains valid");
-
-        assert_eq!(
-            runtime.app.open_transcript,
-            vec![key_hint::alt(KeyCode::Char('a'))]
-        );
-        assert!(runtime.app.open_agents.is_empty());
-
-        keymap.global.open_transcript = Some(one("alt-a ctrl-t"));
-        let runtime = RuntimeKeymap::from_config(&keymap).expect("existing chord remains valid");
-        assert!(runtime.app.open_agents.is_empty());
-
-        keymap.global.open_transcript = None;
-        keymap.pager.scroll_up = Some(one("alt-a page-up"));
-        let runtime = RuntimeKeymap::from_config(&keymap).expect("pager chord remains valid");
-        assert_eq!(
-            runtime.app.open_agents,
-            vec![key_hint::alt(KeyCode::Char('a'))]
         );
     }
 

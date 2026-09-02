@@ -693,6 +693,7 @@ mod tests {
 
     fn handler_with_async(r#async: bool) -> ConfiguredHandler {
         ConfiguredHandler {
+            builtin: false,
             event_name: HookEventName::Stop,
             matcher: None,
             timeout_sec: 600,

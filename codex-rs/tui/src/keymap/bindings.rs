@@ -136,12 +136,21 @@ macro_rules! define_runtime_action_bindings {
             }
         }
 
-        /// Return the root-config slot for one runtime action.
+        /// Return the configured slot for one runtime action, including global fallbacks.
         pub(super) fn configured_binding_for_action(
             keymap: &TuiKeymap,
             action: KeymapActionId,
         ) -> Option<&Option<KeybindingsSpec>> {
             match (action.context.config_name(), action.action) {
+                ("composer", "submit") if keymap.composer.submit.is_none() => {
+                    Some(&keymap.global.submit)
+                }
+                ("composer", "queue") if keymap.composer.queue.is_none() => {
+                    Some(&keymap.global.queue)
+                }
+                ("composer", "toggle_shortcuts") if keymap.composer.toggle_shortcuts.is_none() => {
+                    Some(&keymap.global.toggle_shortcuts)
+                }
                 $(
                     $(
                         ($context, stringify!($action)) => {
@@ -284,6 +293,7 @@ define_runtime_action_bindings! {
         insert_line_start,
         open_line_below,
         open_line_above,
+        enter_replace_mode,
         move_left,
         move_right,
         move_up,
@@ -310,6 +320,8 @@ define_runtime_action_bindings! {
         start_delete_operator,
         start_yank_operator,
         start_change_operator,
+        undo,
+        redo,
         cancel_operator,
     ],
     "vim_search" => VimSearch, vim_search, vim_search [forward, backward, next, previous],
