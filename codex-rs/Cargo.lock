@@ -2739,7 +2739,7 @@ dependencies = [
 
 [[package]]
 name = "codex-config-schema"
-version = "0.0.0"
+version = "0.145.0-alpha.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -3996,7 +3996,7 @@ dependencies = [
 
 [[package]]
 name = "codex-otel-trace-websocket"
-version = "0.0.0"
+version = "0.145.0-alpha.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -4108,7 +4108,7 @@ dependencies = [
 
 [[package]]
 name = "codex-realtime-webrtc"
-version = "0.0.0"
+version = "0.145.0-alpha.4"
 dependencies = [
  "anyhow",
  "codex-install-context",
@@ -4699,7 +4699,7 @@ version = "0.145.0-alpha.4"
 
 [[package]]
 name = "codex-utils-git-discovery"
-version = "0.0.0"
+version = "0.145.0-alpha.4"
 dependencies = [
  "codex-git-utils",
  "codex-utils-absolute-path",
@@ -4895,7 +4895,7 @@ dependencies = [
 
 [[package]]
 name = "codex-voice-host"
-version = "0.0.0"
+version = "0.145.0-alpha.4"
 dependencies = [
  "anyhow",
  "codex-install-context",
