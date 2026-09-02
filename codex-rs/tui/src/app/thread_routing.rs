@@ -443,6 +443,12 @@ impl App {
         thread_id: ThreadId,
         op: AppCommand,
     ) -> Result<()> {
+        if self.thread_unavailable(thread_id) {
+            self.chat_widget.add_error_message(
+                "This conversation is unavailable; no operation was sent.".into(),
+            );
+            return Ok(());
+        }
         if self.chat_widget.rejects_misalignment_policy_op(&op) {
             return Ok(());
         }
@@ -476,8 +482,8 @@ impl App {
     /// Persist prompt text in the local cross-session message history.
     pub(super) fn append_message_history_entry(&self, thread_id: ThreadId, text: String) {
         let history_config = codex_message_history::HistoryConfig::new(
-            self.chat_widget.config_ref().codex_home.clone(),
-            &self.chat_widget.config_ref().history,
+            self.local_settings.codex_home.clone(),
+            &self.local_settings.history,
         );
         tokio::spawn(async move {
             if let Err(err) =
@@ -500,8 +506,8 @@ impl App {
         log_id: u64,
     ) -> Result<()> {
         let history_config = codex_message_history::HistoryConfig::new(
-            self.chat_widget.config_ref().codex_home.clone(),
-            &self.chat_widget.config_ref().history,
+            self.local_settings.codex_home.clone(),
+            &self.local_settings.history,
         );
         let app_event_tx = self.app_event_tx.clone();
         tokio::spawn(async move {
@@ -534,8 +540,8 @@ impl App {
         log_id: u64,
     ) -> Result<()> {
         let history_config = codex_message_history::HistoryConfig::new(
-            self.chat_widget.config_ref().codex_home.clone(),
-            &self.chat_widget.config_ref().history,
+            self.local_settings.codex_home.clone(),
+            &self.local_settings.history,
         );
         let app_event_tx = self.app_event_tx.clone();
         tokio::spawn(async move {
@@ -967,11 +973,10 @@ impl App {
             && let ServerNotification::TurnCompleted(notification) = &notification
         {
             let now = Instant::now();
-            let app_event_tx = self.app_event_tx.clone();
 
             self.recap
                 .note_turn_finished(&notification.turn.status, now);
-            self.recap.schedule_check(thread_id, app_event_tx, now);
+            self.schedule_recap_check(thread_id, now);
         }
         let misalignment_policy_violation =
             match &notification {
@@ -1304,6 +1309,7 @@ impl App {
             self.recap.reset_for_new_thread(Instant::now());
         }
         self.primary_thread_id = Some(thread_id);
+        self.agents_overview.threads.entry(thread_id).or_default();
         self.primary_session_configured = Some(session.clone());
         self.upsert_agent_picker_thread(
             thread_id, /*agent_nickname*/ None, /*agent_role*/ None,
@@ -1334,10 +1340,9 @@ impl App {
                 .send(AppEvent::BeginInitialHistoryReplayBuffer);
         }
         let now = Instant::now();
-        let app_event_tx = self.app_event_tx.clone();
 
         self.recap.seed_from_turns(&turns, now);
-        self.recap.schedule_check(thread_id, app_event_tx, now);
+        self.schedule_recap_check(thread_id, now);
 
         self.chat_widget
             .replay_thread_turns(turns, ReplayKind::ResumeInitialMessages);
@@ -1412,6 +1417,7 @@ impl App {
 
         match app_server
             .resume_thread(
+                &self.local_settings,
                 self.config.clone(),
                 thread_id,
                 crate::app_server_session::ResumeModelSettings::PreserveExistingThread,
@@ -1546,7 +1552,7 @@ impl App {
 
     pub(super) fn replay_thread_snapshot(
         &mut self,
-        snapshot: ThreadEventSnapshot,
+        mut snapshot: ThreadEventSnapshot,
         resume_restored_queue: bool,
     ) {
         let request_changes = snapshot
@@ -1591,6 +1597,12 @@ impl App {
                 self.chat_widget.handle_thread_session(session);
             }
         }
+        let recovered_input = snapshot
+            .input_state
+            .as_ref()
+            .is_some_and(|input| input.recovered_queue)
+            .then(|| snapshot.input_state.take())
+            .flatten();
         self.chat_widget.restore_thread_input_state(
             snapshot.input_state,
             ThreadInputStateRestoreMode {
@@ -1615,6 +1627,9 @@ impl App {
         if should_buffer_replay {
             self.app_event_tx
                 .send(AppEvent::EndInitialHistoryReplayBuffer);
+        }
+        if recovered_input.is_some() {
+            self.chat_widget.restore_reconnected_input(recovered_input);
         }
         self.chat_widget
             .set_queue_autosend_suppressed(/*suppressed*/ false);

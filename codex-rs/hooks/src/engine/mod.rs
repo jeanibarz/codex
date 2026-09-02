@@ -65,6 +65,8 @@ pub(crate) struct CommandShell {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ConfiguredHandler {
+    /// Internally admitted cleanup hook, enabled independently of per-hook state.
+    pub builtin: bool,
     pub event_name: codex_protocol::protocol::HookEventName,
     pub matcher: Option<String>,
     pub timeout_sec: u64,
@@ -207,6 +209,8 @@ pub enum HookListEntryHandler {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookListEntry {
+    /// Builtin hooks remain available internally but are omitted from the public hooks list.
+    pub builtin: bool,
     pub key: String,
     pub event_name: HookEventName,
     pub handler: HookListEntryHandler,
@@ -244,7 +248,7 @@ impl ClaudeHooksEngine {
         mcp_executor: Arc<dyn HookMcpExecutor>,
         settings_file: Option<&std::path::Path>,
     ) -> Self {
-        if !enabled {
+        if !enabled && plugin_hook_sources.is_empty() {
             return Self {
                 handlers: Vec::new(),
                 warnings: Vec::new(),
@@ -265,6 +269,12 @@ impl ClaudeHooksEngine {
             discovery::append_settings_file_handlers(&mut discovered, settings_path);
         }
 
+        if !enabled {
+            discovered.handlers.retain(|handler| handler.builtin);
+            // Disabled ordinary hooks must not emit warnings or reject session startup.
+            discovered.warnings.clear();
+            discovered.required_load_errors.clear();
+        }
         Self {
             handlers: discovered.handlers,
             warnings: discovered.warnings,
@@ -325,6 +335,7 @@ impl ClaudeHooksEngine {
                     continue;
                 }
                 self.handlers.push(ConfiguredHandler {
+                    builtin: true,
                     event_name,
                     matcher: None,
                     timeout_sec: timeout_sec.unwrap_or(5).max(1),

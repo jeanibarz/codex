@@ -1,6 +1,7 @@
 //! Shared context sections for synchronous Guardian review and asynchronous scoring.
 //!
-//! Transcript collection is also available directly, without section composition.
+//! Transcript collection and bounded host-owned history are also available directly,
+//! without section composition.
 //! Contributor failures abort collection without returning partial context.
 //! Sections carry structured transcript evidence without depending on either
 //! consumer's rendering, retention, compaction, or request lifecycle.
@@ -13,10 +14,19 @@ use std::sync::LazyLock;
 
 use codex_protocol::models::ResponseItem;
 
+use authorization::RootConversationSection;
+use authorization::TrustedUserAnswersSection;
 use transcript::ConversationTranscriptSection;
+
+pub use authorization::GuardianRootMessage;
+pub use composition::ComposedContext;
 
 pub use entry::ConversationTranscriptEntry;
 pub use entry::ConversationTranscriptEntryKind;
+pub use history::TranscriptHistory;
+pub use retention::UserMessageCost;
+pub use retention::UserMessageSelection;
+pub use retention::select_user_messages;
 pub use transcript::ConversationTranscriptConfig;
 pub use transcript::ConversationTranscriptOptions;
 pub use transcript::MANUAL_APPROVAL_DEVELOPER_PREFIX;
@@ -25,7 +35,11 @@ pub use transcript::TranscriptRetentionConfig;
 pub use transcript::collect_transcript;
 pub use truncation::truncate_text;
 
+mod authorization;
+mod composition;
 mod entry;
+mod history;
+mod retention;
 mod transcript;
 mod truncation;
 
@@ -69,6 +83,10 @@ pub struct SectionInput<'a> {
     pub history: &'a dyn SectionHistory,
     /// Evidence sources and per-entry limits for this collection.
     pub transcript: &'a ConversationTranscriptConfig,
+    /// Bounded root evidence resolved by the host; empty when not applicable.
+    pub root_conversation: &'a [GuardianRootMessage],
+    /// Bounded, role-labeled answers verified and matched to history by the host.
+    pub trusted_user_answers: &'a [String],
 }
 
 /// Supplies repeatable, zero-copy access to a host-owned conversation snapshot.
@@ -146,6 +164,8 @@ pub struct SectionRegistry {
 pub fn default_registry() -> &'static SectionRegistry {
     static REGISTRY: LazyLock<SectionRegistry> = LazyLock::new(|| {
         let mut registry = SectionRegistry::default();
+        registry.register(RootConversationSection);
+        registry.register(TrustedUserAnswersSection);
         registry.register(ConversationTranscriptSection);
         registry
     });
@@ -171,11 +191,23 @@ impl SectionRegistry {
     }
 }
 
-/// Ordered transcript evidence produced by one section contributor.
+/// Ordered evidence with a stable section identity and source-specific content.
+///
+/// Variants preserve provenance: transcript entries carry their original roles,
+/// root messages remain line-role-labeled, and answers are host-verified fragments.
+/// All currently supported sections are delivered as user-role evidence. Source
+/// attribution never promotes their contents to developer instructions.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ContextSection {
-    /// Structured evidence before consumer-specific selection and rendering.
-    pub items: Vec<ConversationTranscriptEntry>,
+pub enum ContextSection {
+    ConversationTranscript {
+        items: Vec<ConversationTranscriptEntry>,
+    },
+    RootConversation {
+        items: Vec<String>,
+    },
+    TrustedUserAnswers {
+        items: Vec<String>,
+    },
 }
 
 #[cfg(test)]

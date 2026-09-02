@@ -23,8 +23,8 @@ use crate::tools::handlers::PlanHandler;
 use crate::tools::handlers::ReadMcpResourceHandler;
 use crate::tools::handlers::RequestPermissionsHandler;
 use crate::tools::handlers::RequestPluginInstallHandler;
+use crate::tools::handlers::RequestUserInputAsyncHandler;
 use crate::tools::handlers::RequestUserInputHandler;
-use crate::tools::handlers::SendUserMessageAsyncHandler;
 use crate::tools::handlers::SleepHandler;
 use crate::tools::handlers::TestSyncHandler;
 use crate::tools::handlers::ToolSearchHandlerCache;
@@ -153,18 +153,6 @@ pub(crate) fn build_tool_router(
     add_core_tool_sources(&context, &mut registry);
 
     let hosted_specs = if crate::guardian::is_basic_session_source(&turn_context.session_source) {
-        if let Some(history_tools) = session
-            .services
-            .thread_extension_data
-            .get::<crate::codex_delegate::GuardianReadOnlyHistoryTools>()
-        {
-            append_extension_tool_executors(
-                turn_context,
-                model_info,
-                history_tools.0.iter().cloned(),
-                &mut registry,
-            );
-        }
         Vec::new()
     } else {
         let registered_mcp_tools = session.services.mcp_handler_cache.append_mcp_tools(
@@ -1176,10 +1164,16 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
             .model_info
             .experimental_supported_tools
             .iter()
-            .any(|tool| tool == "send_user_message_async")
+            // Existing model catalogs still advertise the previous name.
+            .any(|tool| {
+                matches!(
+                    tool.as_str(),
+                    "request_user_input_async" | "send_user_message_async"
+                )
+            })
     {
         registry.add_with_exposure(
-            SendUserMessageAsyncHandler {
+            RequestUserInputAsyncHandler {
                 description: context
                     .model_messages
                     .and_then(|messages| messages.tools.as_ref())
