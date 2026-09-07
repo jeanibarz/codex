@@ -311,6 +311,7 @@ async fn request_skill_dependencies(
             },
         )
         .await
+        .map(|accepted| accepted.response)
         .unwrap_or_else(
             || codex_protocol::request_user_input::RequestUserInputResponse {
                 answers: HashMap::new(),
