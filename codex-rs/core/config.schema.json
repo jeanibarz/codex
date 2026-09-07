@@ -699,6 +699,9 @@
             "content_item_kinds": {
               "type": "boolean"
             },
+            "context_management": {
+              "$ref": "#/definitions/FeatureToml_for_ContextManagementConfigToml"
+            },
             "current_time_reminder": {
               "$ref": "#/definitions/FeatureToml_for_CurrentTimeReminderConfigToml"
             },
@@ -876,6 +879,9 @@
             "realtime_conversation": {
               "type": "boolean"
             },
+            "reasoning_effort_override": {
+              "type": "boolean"
+            },
             "recommended_plugins": {
               "type": "boolean"
             },
@@ -1014,6 +1020,9 @@
             "unified_exec": {
               "type": "boolean"
             },
+            "unified_exec_tty": {
+              "type": "boolean"
+            },
             "unified_exec_zsh_fork": {
               "type": "boolean"
             },
@@ -1041,10 +1050,16 @@
             "web_search_request": {
               "type": "boolean"
             },
+            "windows_sandbox_service": {
+              "type": "boolean"
+            },
             "workspace_dependencies": {
               "type": "boolean"
             },
             "workspace_owner_usage_nudge": {
+              "type": "boolean"
+            },
+            "worktrees": {
               "type": "boolean"
             },
             "write_stdin_approval": {
@@ -1135,6 +1150,16 @@
             }
           ],
           "default": null
+        }
+      },
+      "type": "object"
+    },
+    "ContextManagementConfigToml": {
+      "additionalProperties": false,
+      "properties": {
+        "experimental_mode": {
+          "description": "Enables experimental context management.",
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -1249,6 +1274,16 @@
         },
         {
           "$ref": "#/definitions/CodeModeHostConfigToml"
+        }
+      ]
+    },
+    "FeatureToml_for_ContextManagementConfigToml": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "$ref": "#/definitions/ContextManagementConfigToml"
         }
       ]
     },
@@ -1525,6 +1560,10 @@
           "maximum": 1.0,
           "minimum": 0.0,
           "type": "number"
+        },
+        "thread_context": {
+          "description": "Use thread-owned context for sync and async Guardian. Defaults to false. Independent of the Guardian v2 `enabled` toggle.",
+          "type": "boolean"
         },
         "transcript": {
           "$ref": "#/definitions/GuardianV2TranscriptConfigToml"
@@ -3860,6 +3899,7 @@
             "agents": {
               "new_task": null,
               "rename": null,
+              "resume": null,
               "search": null,
               "stop": null,
               "toggle_grouping": null
@@ -3881,6 +3921,8 @@
               "interrupt_turn": null,
               "next_permission_mode": null,
               "previous_permission_mode": null,
+              "prompt_stack_back": null,
+              "skip_question": null,
               "toggle_voice_mute": null
             },
             "composer": {
@@ -4077,6 +4119,11 @@
           "default": "composer",
           "description": "Where the terminal pet should anchor vertically.\n\nDefaults to `composer`, which follows the current TUI composer viewport."
         },
+        "question_esc_back": {
+          "default": true,
+          "description": "Escape returns from async questions to the composer, preserving the answer draft.",
+          "type": "boolean"
+        },
         "raw_output_mode": {
           "default": false,
           "description": "Start the TUI in raw scrollback mode for copy-friendly transcript output. Defaults to `false`.",
@@ -4107,7 +4154,7 @@
         },
         "status_line": {
           "default": null,
-          "description": "Ordered list of status line item identifiers.\n\nWhen set, the TUI renders the selected items as the status line. When unset, the TUI defaults to: `model-with-reasoning` and `current-dir`.",
+          "description": "Ordered list of status line item identifiers.\n\nWhen set, the TUI renders the selected items as the status line. When unset, the TUI defaults to: `model-with-reasoning`, `current-dir`, and `thread-name`.",
           "items": {
             "type": "string"
           },
@@ -4127,7 +4174,7 @@
         },
         "terminal_title": {
           "default": null,
-          "description": "Ordered list of terminal title item identifiers.\n\nWhen set, the TUI renders the selected items into the terminal window/tab title. When unset, the TUI defaults to: `activity` and `project`. The `activity` item spins while working and shows an action-required message when blocked on the user.",
+          "description": "Ordered list of terminal title item identifiers.\n\nWhen set, the TUI renders the selected items into the terminal window/tab title. When unset, the TUI defaults to: `activity`, `thread-name`, and `project-name`. The `activity` item spins while working and shows an action-required message when blocked on the user.",
           "items": {
             "type": "string"
           },
@@ -4141,6 +4188,11 @@
         "vim_mode_default": {
           "default": false,
           "description": "Start the composer in Vim mode (`Normal`) by default. Defaults to `false`.",
+          "type": "boolean"
+        },
+        "whimsy": {
+          "default": true,
+          "description": "Enable decorative effects such as Astra composer stars. Also requires animations. Defaults to `true`.",
           "type": "boolean"
         }
       },
@@ -4165,6 +4217,14 @@
             }
           ],
           "description": "Rename the selected task."
+        },
+        "resume": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Open the session resume picker."
         },
         "search": {
           "allOf": [
@@ -4282,7 +4342,7 @@
               "$ref": "#/definitions/KeybindingsSpec"
             }
           ],
-          "description": "Edit the most recently queued message."
+          "description": "Move up through pending async questions, then edit the most recently queued message."
         },
         "increase_reasoning_effort": {
           "allOf": [
@@ -4315,6 +4375,22 @@
             }
           ],
           "description": "Switch to the previous available permission mode."
+        },
+        "prompt_stack_back": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Move back through pending async questions toward the composer."
+        },
+        "skip_question": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Skip the focused question."
         },
         "toggle_voice_mute": {
           "allOf": [
@@ -4633,6 +4709,7 @@
           "default": {
             "new_task": null,
             "rename": null,
+            "resume": null,
             "search": null,
             "stop": null,
             "toggle_grouping": null
@@ -4668,6 +4745,8 @@
             "interrupt_turn": null,
             "next_permission_mode": null,
             "previous_permission_mode": null,
+            "prompt_stack_back": null,
+            "skip_question": null,
             "toggle_voice_mute": null
           }
         },
@@ -5792,6 +5871,10 @@
       "description": "Whether the model may request a login shell for shell-based tools. Default to `true`\n\nIf `true`, the model may request a login shell (`login = true`), and omitting `login` defaults to using a login shell. If `false`, the model can never use a login shell: `login = true` requests are rejected, and omitting `login` defaults to a non-login shell.",
       "type": "boolean"
     },
+    "allow_symlinked_codex_home": {
+      "description": "Allow macOS sandbox writable roots at or beneath CODEX_HOME to traverse symlinks. Read only from the host's user config at startup; defaults to false. This grants no write access by itself, but trusts symlink targets even if they change between commands or lie outside CODEX_HOME. This setting has no effect on Linux or Windows.",
+      "type": "boolean"
+    },
     "analytics": {
       "allOf": [
         {
@@ -6039,6 +6122,9 @@
         "content_item_kinds": {
           "type": "boolean"
         },
+        "context_management": {
+          "$ref": "#/definitions/FeatureToml_for_ContextManagementConfigToml"
+        },
         "current_time_reminder": {
           "$ref": "#/definitions/FeatureToml_for_CurrentTimeReminderConfigToml"
         },
@@ -6216,6 +6302,9 @@
         "realtime_conversation": {
           "type": "boolean"
         },
+        "reasoning_effort_override": {
+          "type": "boolean"
+        },
         "recommended_plugins": {
           "type": "boolean"
         },
@@ -6354,6 +6443,9 @@
         "unified_exec": {
           "type": "boolean"
         },
+        "unified_exec_tty": {
+          "type": "boolean"
+        },
         "unified_exec_zsh_fork": {
           "type": "boolean"
         },
@@ -6381,10 +6473,16 @@
         "web_search_request": {
           "type": "boolean"
         },
+        "windows_sandbox_service": {
+          "type": "boolean"
+        },
         "workspace_dependencies": {
           "type": "boolean"
         },
         "workspace_owner_usage_nudge": {
+          "type": "boolean"
+        },
+        "worktrees": {
           "type": "boolean"
         },
         "write_stdin_approval": {
@@ -6798,6 +6896,12 @@
     "suppress_unstable_features_warning": {
       "description": "Suppress warnings about unstable (under development) features.",
       "type": "boolean"
+    },
+    "thread_unload_delay_secs": {
+      "description": "Seconds a thread must have no subscribers and no activity before app-server unloads it. Defaults to 60; zero unloads immediately. Changes require a server restart.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
     },
     "tool_output_token_limit": {
       "description": "Token budget applied when storing tool/function outputs in the context manager.",

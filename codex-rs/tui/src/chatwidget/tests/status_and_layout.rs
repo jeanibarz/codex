@@ -91,7 +91,10 @@ async fn resumed_session_hides_unknown_token_usage_until_an_update_arrives() {
 
 #[tokio::test]
 async fn app_server_cyber_policy_error_renders_dedicated_notice() {
-    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(Some("gpt-5.6-sol")).await;
+    chat.cyber_policy_notice
+        .set(crate::daybreak::Notice::Apply)
+        .unwrap();
 
     handle_error(
         &mut chat,
@@ -102,27 +105,10 @@ async fn app_server_cyber_policy_error_renders_dedicated_notice() {
     let cells = drain_insert_history(&mut rx);
     assert_eq!(cells.len(), 1);
     let rendered = lines_to_single_string(&cells[0]);
-    assert!(rendered.contains("This content can't be shown"));
-    assert!(rendered.contains("extra caution with cybersecurity requests"));
-    assert!(rendered.contains("openai.com/form/enterprise-trusted-access-for-cyber"));
+    assert!(rendered.contains("This content can’t be shown"));
+    assert!(rendered.contains("We take extra care with some cybersecurity requests"));
+    assert!(rendered.contains("Apply for Daybreak"));
     assert!(!rendered.contains("server fallback message"));
-}
-
-#[tokio::test]
-async fn app_server_cyber_policy_error_uses_individual_link_for_personal_plan() {
-    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.plan_type = Some(PlanType::Free);
-    chat.has_chatgpt_account = true;
-
-    handle_error(
-        &mut chat,
-        "server fallback message",
-        Some(CodexErrorInfo::CyberPolicy),
-    );
-
-    let cells = drain_insert_history(&mut rx);
-    assert_eq!(cells.len(), 1);
-    assert!(lines_to_single_string(&cells[0]).contains("https://chatgpt.com/cyber/"));
 }
 
 #[tokio::test]
@@ -503,7 +489,6 @@ async fn configured_pet_load_is_deferred_until_after_construction() {
         feedback: codex_feedback::CodexFeedback::new(),
         is_first_run: true,
         status_account_display: None,
-        runtime_model_provider_base_url: None,
         initial_plan_type: None,
         model: Some(resolved_model),
         startup_tooltip_override: None,
@@ -706,6 +691,7 @@ async fn status_line_uses_secondary_fallback_for_unsupported_window() {
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
         limit_id: None,
         limit_name: None,
+        normal_model_slug: None,
         primary: None,
         secondary: Some(RateLimitWindow {
             used_percent: 50,
@@ -732,6 +718,7 @@ async fn status_line_legacy_limit_items_prefer_matching_windows() {
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
         limit_id: None,
         limit_name: None,
+        normal_model_slug: None,
         primary: Some(RateLimitWindow {
             used_percent: 94,
             window_duration_mins: Some(7 * 24 * 60),
@@ -766,6 +753,7 @@ async fn status_line_shows_secondary_non_weekly_when_primary_is_weekly() {
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
         limit_id: None,
         limit_name: None,
+        normal_model_slug: None,
         primary: Some(RateLimitWindow {
             used_percent: 94,
             window_duration_mins: Some(7 * 24 * 60),
@@ -800,6 +788,7 @@ async fn status_line_five_hour_item_omits_weekly_only_limit() {
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
         limit_id: None,
         limit_name: None,
+        normal_model_slug: None,
         primary: Some(RateLimitWindow {
             used_percent: 9,
             window_duration_mins: Some(7 * 24 * 60),
@@ -830,6 +819,7 @@ async fn status_line_single_monthly_primary_omits_weekly_limit_item() {
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
         limit_id: None,
         limit_name: None,
+        normal_model_slug: None,
         primary: Some(RateLimitWindow {
             used_percent: 35,
             window_duration_mins: Some(30 * 24 * 60),
@@ -860,6 +850,7 @@ async fn status_line_secondary_only_non_weekly_limit_omits_primary_limit_item() 
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
         limit_id: None,
         limit_name: None,
+        normal_model_slug: None,
         primary: None,
         secondary: Some(RateLimitWindow {
             used_percent: 35,
@@ -890,7 +881,12 @@ async fn rate_limit_snapshot_keeps_prior_credits_when_missing_from_headers() {
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
         limit_id: None,
         limit_name: None,
-        primary: None,
+        normal_model_slug: None,
+        primary: Some(RateLimitWindow {
+            used_percent: 10,
+            window_duration_mins: Some(60),
+            resets_at: Some(123),
+        }),
         secondary: None,
         credits: Some(CreditsSnapshot {
             has_credits: true,
@@ -912,6 +908,7 @@ async fn rate_limit_snapshot_keeps_prior_credits_when_missing_from_headers() {
     chat.on_rolling_rate_limit_snapshot(RateLimitSnapshot {
         limit_id: None,
         limit_name: None,
+        normal_model_slug: None,
         primary: Some(RateLimitWindow {
             used_percent: 80,
             window_duration_mins: Some(60),
@@ -938,7 +935,7 @@ async fn rate_limit_snapshot_keeps_prior_credits_when_missing_from_headers() {
     assert!(!credits.unlimited);
     assert_eq!(
         display.primary.as_ref().map(|window| window.used_percent),
-        Some(80.0)
+        Some(10.0)
     );
 }
 
@@ -983,6 +980,7 @@ async fn rate_limit_snapshot_updates_and_retains_plan_type() {
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
         limit_id: None,
         limit_name: None,
+        normal_model_slug: None,
         primary: Some(RateLimitWindow {
             used_percent: 10,
             window_duration_mins: Some(60),
@@ -1004,6 +1002,7 @@ async fn rate_limit_snapshot_updates_and_retains_plan_type() {
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
         limit_id: None,
         limit_name: None,
+        normal_model_slug: None,
         primary: Some(RateLimitWindow {
             used_percent: 25,
             window_duration_mins: Some(30),
@@ -1025,6 +1024,7 @@ async fn rate_limit_snapshot_updates_and_retains_plan_type() {
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
         limit_id: None,
         limit_name: None,
+        normal_model_slug: None,
         primary: Some(RateLimitWindow {
             used_percent: 30,
             window_duration_mins: Some(60),
@@ -1051,6 +1051,7 @@ async fn rate_limit_snapshots_keep_separate_entries_per_limit_id() {
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
         limit_id: Some("codex".to_string()),
         limit_name: Some("codex".to_string()),
+        normal_model_slug: None,
         primary: Some(RateLimitWindow {
             used_percent: 20,
             window_duration_mins: Some(300),
@@ -1071,6 +1072,7 @@ async fn rate_limit_snapshots_keep_separate_entries_per_limit_id() {
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
         limit_id: Some("codex_other".to_string()),
         limit_name: Some("codex_other".to_string()),
+        normal_model_slug: None,
         primary: Some(RateLimitWindow {
             used_percent: 90,
             window_duration_mins: Some(60),
@@ -1126,6 +1128,7 @@ async fn rate_limit_switch_prompt_skips_non_codex_limit() {
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
         limit_id: Some("codex_other".to_string()),
         limit_name: Some("codex_other".to_string()),
+        normal_model_slug: None,
         primary: Some(RateLimitWindow {
             used_percent: 95,
             window_duration_mins: Some(60),
