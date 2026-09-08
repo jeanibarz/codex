@@ -101,6 +101,7 @@ members = [
     "otel",
     "otel-trace-websocket",
     "tui",
+    "user-verification",
     "tools",
     "v8-poc",
     "websocket-client",
@@ -297,6 +298,7 @@ codex-utils-sleep-inhibitor = { path = "utils/sleep-inhibitor" }
 codex-utils-stream-parser = { path = "utils/stream-parser" }
 codex-utils-string = { path = "utils/string" }
 codex-utils-template = { path = "utils/template" }
+codex-user-verification = { path = "user-verification" }
 codex-v8-poc = { path = "v8-poc" }
 codex-workload-identity = { path = "workload-identity" }
 codex-windows-sandbox = { path = "windows-sandbox-rs" }
@@ -323,6 +325,7 @@ aws-types = "1"
 axum = { version = "0.8", default-features = false }
 base64 = "0.22.1"
 bitflags = "2.13.1"
+blake3 = "1.8.2"
 bm25 = "2.3.2"
 bytes = "1.10.1"
 chardetng = "0.1.17"

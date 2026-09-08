@@ -1,3 +1,5 @@
+use super::transcript::ContextInput;
+use codex_core::context::ContextualUserFragment;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -32,6 +34,8 @@ use codex_extension_api::ToolLifecycleFuture;
 use codex_extension_api::ToolStartInput;
 use codex_features::Feature;
 use codex_guardian_context::ContextTarget;
+use codex_guardian_context::PlannedAction;
+use codex_guardian_context::PlannedActionKind;
 use codex_history::RolloutItem;
 use codex_login::AgentIdentityAuthPolicy;
 use codex_login::AuthManager;
@@ -54,7 +58,6 @@ use super::metrics::record_classification_risk;
 use super::metrics::sampler_failure_reason;
 use super::parent_compaction::ParentCompactionError;
 use super::parent_compaction::select_parent_compaction;
-use super::review_evidence::render_review_evidence;
 use super::sampler::LunaSampler;
 use super::sampler::LunaSamplerConfig;
 use super::sampler::LunaSamplerError;
@@ -64,6 +67,11 @@ use super::truncation::ClassificationTruncations;
 use super::trusted_skills::TrustedSkillInvocations;
 use super::trusted_skills::TrustedSkillRoots;
 use super::trusted_tools::trusted_tool_context;
+use super::wrapper_lag::WrapperLag;
+use codex_core::context::GuardianReviewEvidenceFragment;
+use codex_guardian_context::PreviousReviews;
+use codex_guardian_context::ReviewEvidence;
+use codex_guardian_context::render_review_evidence;
 
 enum ClassificationOutcome {
     Scored,
@@ -72,6 +80,7 @@ enum ClassificationOutcome {
 
 #[derive(Default)]
 pub(super) struct GuardianV2ScoreProgress {
+    pub(super) wrapper_lag: WrapperLag,
     pub(super) latest_tool_call: AtomicUsize,
     // Setup and reset calls must not consume the first JS execution allowance.
     pub(super) js_executions: AtomicUsize,
@@ -276,15 +285,18 @@ impl GuardianV2Extension {
             match policy.unscored_action {
                 UnscoredAction::Ignore => {}
                 UnscoredAction::AgeScore => {
-                    score_progress
+                    let index = score_progress
                         .latest_tool_call
-                        .fetch_add(/*val*/ 1, Ordering::Relaxed);
+                        .fetch_add(/*val*/ 1, Ordering::Relaxed)
+                        .saturating_add(/*rhs*/ 1);
+                    score_progress.wrapper_lag.record(&input, index);
                 }
                 UnscoredAction::InvalidateScore => {
                     let index = score_progress
                         .latest_tool_call
                         .fetch_add(/*val*/ 1, Ordering::Relaxed)
                         .saturating_add(/*rhs*/ 1);
+                    score_progress.wrapper_lag.record(&input, index);
                     score_progress
                         .latest_failed_tool_call
                         .fetch_max(index, Ordering::Release);
@@ -307,6 +319,7 @@ impl GuardianV2Extension {
             .latest_tool_call
             .fetch_add(/*val*/ 1, Ordering::Relaxed)
             .saturating_add(/*rhs*/ 1);
+        score_progress.wrapper_lag.record(&input, tool_call_index);
         let event_sink = Arc::clone(&self.event_sink);
         let thread_id = input.thread_store.level_id().to_owned();
         let turn_id = input.turn_id.to_owned();
@@ -464,9 +477,6 @@ impl GuardianV2Extension {
         } else {
             Vec::new()
         };
-        let rendered_images = guardian_config
-            .transcript
-            .images(input.conversation_history.review_items(), node_repl_images);
         // Capture root evidence before background metadata resolution or model I/O.
         // Later root changes invalidate this sample through its captured authorization version.
         let root_snapshot = if context_mode == GuardianContextMode::ThreadOwned {
@@ -509,37 +519,6 @@ impl GuardianV2Extension {
                 model: parent_model.clone(),
                 ..score_authorization
             };
-            let transcript = match guardian_config.transcript.build_context(
-                ContextTarget::Async,
-                history.as_ref(),
-                root_conversation.as_deref().unwrap_or_default(),
-                &trusted_user_inputs,
-            ) {
-                Ok(transcript) => transcript,
-                Err(error) => {
-                    Self::record_fail_closed_score(thread.thread_extension_data(), sampled_at);
-                    record_classification(
-                        metrics.as_deref(),
-                        classification_started_at.elapsed(),
-                        "failure",
-                        Some("context_build_error"),
-                    );
-                    event_sink.emit_warning(ExtensionWarning {
-                        thread_id,
-                        turn_id: Some(turn_id),
-                        message: format!("Guardian V2 context collection failed: {error}"),
-                    });
-                    return;
-                }
-            };
-            drop(history);
-            truncations.extend(transcript.truncations);
-            truncations.record(
-                "transcript_image",
-                rendered_images.omitted_bytes,
-                /*retained_bytes*/ 0,
-            );
-            let images = rendered_images.images;
             let planned_action = match action.render(guardian_config.max_action_tokens) {
                 Ok(RenderedAction {
                     text,
@@ -564,29 +543,64 @@ impl GuardianV2Extension {
                     return;
                 }
             };
-            let mut classification_input = transcript.authorization;
-            classification_input.push(">>> TRANSCRIPT START\n".to_owned());
-            classification_input.extend(transcript.entries);
-            classification_input.push(">>> TRANSCRIPT END\n\n".to_owned());
-            let trusted_review_evidence = sync_reviews
+            let action_section = PlannedAction {
+                json: planned_action.clone(),
+                kind: PlannedActionKind::Command,
+                reason: None,
+            };
+            let review_fragments = sync_reviews
                 .iter()
                 .filter(|review| {
                     review.authorization_version == authorization_version
                         && review.root_authorization_version == root_authorization_version
                 })
                 .map(|review| {
-                    let review = render_review_evidence(review);
+                    let review = render_review_evidence(ReviewEvidence {
+                        correlation: &review.correlation,
+                        decision: &review.decision,
+                        action: &review.action,
+                        rationale: review.rationale.as_deref(),
+                    });
                     truncations.extend(review.truncations);
-                    review.text
+                    GuardianReviewEvidenceFragment::new(review.body).render()
                 })
-                .collect();
-            classification_input.extend([
-                "The Codex agent has requested the following action:\n".to_owned(),
-                ">>> APPROVAL REQUEST START\n".to_owned(),
-                "Planned action JSON:\n".to_owned(),
-                format!("{planned_action}\n"),
-                ">>> APPROVAL REQUEST END\n".to_owned(),
-            ]);
+                .collect::<Vec<_>>();
+            let transcript =
+                PreviousReviews::try_from_fragments(review_fragments).and_then(|reviews| {
+                    guardian_config.transcript.build_context(ContextInput {
+                        target: ContextTarget::Async,
+                        history: history.as_ref(),
+                        root_conversation: root_conversation.as_deref().unwrap_or_default(),
+                        trusted_user_answers: &trusted_user_inputs,
+                        planned_action: Some(&action_section),
+                        previous_reviews: Some(&reviews),
+                        trusted_tool: trusted_tool_context.as_ref(),
+                        trusted_skill_paths: &trusted_skill_paths,
+                        node_repl_images: Some(&node_repl_images),
+                    })
+                });
+            let mut transcript = match transcript {
+                Ok(transcript) => transcript,
+                Err(error) => {
+                    Self::record_fail_closed_score(thread.thread_extension_data(), sampled_at);
+                    record_classification(
+                        metrics.as_deref(),
+                        classification_started_at.elapsed(),
+                        "failure",
+                        Some("context_build_error"),
+                    );
+                    event_sink.emit_warning(ExtensionWarning {
+                        thread_id,
+                        turn_id: Some(turn_id),
+                        message: format!("Guardian V2 context collection failed: {error}"),
+                    });
+                    return;
+                }
+            };
+            drop(history);
+            drop(node_repl_images);
+            truncations.extend(std::mem::take(&mut transcript.truncations));
+            let classification_input = transcript.into_messages();
             let mut failure_reason = "invalid_output";
             let mut classification_risk = None;
             let mut classification_finished_at = None;
@@ -620,11 +634,7 @@ impl GuardianV2Extension {
                     .sample(LunaSamplingRequest {
                         parent_response_id,
                         instructions,
-                        trusted_review_evidence,
-                        trusted_tool_context,
-                        trusted_skill_paths,
                         input: classification_input,
-                        images,
                         parent_compaction,
                         parent_compaction_hash,
                         reasoning_effort: guardian_config.reasoning_effort.clone(),

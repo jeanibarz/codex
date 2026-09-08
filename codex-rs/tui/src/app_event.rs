@@ -63,6 +63,7 @@ use codex_plugin::PluginCapabilitySummary;
 use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::config_types::Personality;
 use codex_protocol::models::ActivePermissionProfile;
+use codex_realtime_webrtc::StartedRealtimeWebrtcSession;
 
 use crate::history_cell::HistoryCell;
 
@@ -347,6 +348,21 @@ pub(crate) enum AppEvent {
         model: String,
         turn: AppCommand,
         prompt: UserMessage,
+    },
+
+    /// Sign the challenge associated with an approved elicitation.
+    UserVerificationApproved {
+        thread_id: ThreadId,
+        server_name: String,
+        request_id: AppServerRequestId,
+    },
+    /// Return a controller-owned verification result, never a native provider handle.
+    UserVerificationFinished {
+        thread_id: ThreadId,
+        server_name: String,
+        request_id: AppServerRequestId,
+        attempt_id: Uuid,
+        result: Result<codex_app_server_protocol::UserVerificationProof, String>,
     },
 
     /// Interrupt, fork, and retry a safety-buffered turn with the server-selected model.
@@ -1053,6 +1069,25 @@ pub(crate) enum AppEvent {
     /// Update the current personality in the running app and widget.
     UpdatePersonality(Personality),
 
+    /// Result of creating a TUI-owned WebRTC offer for an active thread.
+    RealtimeWebrtcOfferCreated {
+        thread_id: ThreadId,
+        attempt_id: u64,
+        result: Result<StartedRealtimeWebrtcSession, String>,
+    },
+
+    /// Result of establishing the WebRTC connection for an active voice attempt.
+    RealtimeWebrtcConnected {
+        thread_id: ThreadId,
+        attempt_id: u64,
+        result: Result<(), codex_realtime_webrtc::ConnectionError>,
+    },
+
+    /// Stop voice on its original thread after its chat widget is replaced.
+    StopRealtimeConversation {
+        thread_id: ThreadId,
+    },
+
     /// Finish a settings selection after its preceding update events have been applied.
     SettingsSelectionClosed,
     /// Run after any nested settings events emitted while handling the close event.
@@ -1352,6 +1387,11 @@ pub(crate) enum AppEvent {
 
     /// Open the approval popup.
     FullScreenApprovalRequest(ApprovalRequest),
+
+    /// Inspect the complete verification request without deciding it.
+    FullScreenUserVerificationRequest(
+        crate::bottom_pane::user_verification::UserVerificationRequest,
+    ),
 
     /// Open the feedback note entry overlay after the user selects a category.
     OpenFeedbackNote {
