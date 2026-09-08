@@ -4784,7 +4784,7 @@ dependencies = [
 
 [[package]]
 name = "codex-user-verification"
-version = "0.0.0"
+version = "0.145.0-alpha.4"
 dependencies = [
  "base64 0.22.1",
  "core-foundation 0.10.1",
