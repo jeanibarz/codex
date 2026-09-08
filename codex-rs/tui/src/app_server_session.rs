@@ -6,6 +6,7 @@
 mod fs;
 mod history;
 mod models;
+mod realtime;
 mod rollout_history;
 mod thread_list;
 
@@ -553,6 +554,13 @@ impl AppServerSession {
             return None;
         };
         client.server_version()
+    }
+
+    pub(crate) fn server_codex_home(&self) -> Option<&str> {
+        let AppServerClient::Remote(client) = &self.client else {
+            return None;
+        };
+        client.codex_home()
     }
 
     pub(crate) async fn bootstrap(&mut self, config: &Config) -> Result<AppServerBootstrap> {

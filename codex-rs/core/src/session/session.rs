@@ -34,6 +34,7 @@ use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_skills::SkillError;
 use codex_utils_git_discovery::GitRootDiscovery;
+use codex_utils_path::replace_path_and_deduplicate;
 use std::sync::OnceLock;
 use tokio::sync::Semaphore;
 
@@ -71,7 +72,6 @@ pub(crate) struct Session {
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
     pub(crate) async_hook_results: async_channel::Receiver<HookCompletedEvent>,
     pub(crate) input_queue: InputQueue,
-    pub(crate) guardian_review_session: GuardianReviewSessionManager,
     pub(crate) services: SessionServices,
     pub(super) git_enrichment_policy: GitEnrichmentPolicy,
     pub(super) fork_persistence: ForkPersistence,
@@ -109,6 +109,8 @@ pub(crate) struct SessionConfiguration {
 
     /// Legacy thread cwd used when a turn does not select an environment.
     pub(super) legacy_fallback_cwd: AbsolutePathBuf,
+    /// Top-level runtime workspace roots, independent of explicit environment selections.
+    pub(super) runtime_workspace_roots: Vec<AbsolutePathBuf>,
     /// Directory containing all Codex state for this session.
     pub(super) codex_home: AbsolutePathBuf,
     /// Optional user-facing name for the thread, updated during the session.
@@ -294,6 +296,7 @@ impl SessionConfiguration {
             permission_profile: self.materialized_permission_profile(environment_selections),
             active_permission_profile: self.active_permission_profile(),
             cwd: self.legacy_fallback_cwd.clone(),
+            runtime_workspace_roots: Some(self.runtime_workspace_roots.clone()),
             reasoning_effort: self.step_settings.collaboration_mode.reasoning_effort(),
             reasoning_summary: self.step_settings.reasoning_summary,
             personality: self.step_settings.personality,
@@ -311,6 +314,7 @@ impl SessionConfiguration {
                 self.legacy_fallback_cwd.clone(),
                 environment_selections,
             )),
+            runtime_workspace_roots: Some(self.runtime_workspace_roots.clone()),
             profile_workspace_roots: Some(
                 self.permission_profile_state
                     .profile_workspace_roots()
@@ -389,6 +393,15 @@ impl SessionConfiguration {
             next_configuration.legacy_fallback_cwd = environments.legacy_fallback_cwd.clone();
         }
         let cwd_changed = next_configuration.legacy_fallback_cwd != current_cwd;
+        if let Some(runtime_workspace_roots) = &updates.runtime_workspace_roots {
+            next_configuration.runtime_workspace_roots = runtime_workspace_roots.clone();
+        } else if cwd_changed {
+            next_configuration.runtime_workspace_roots = replace_path_and_deduplicate(
+                next_configuration.runtime_workspace_roots,
+                current_cwd.as_path(),
+                next_configuration.legacy_fallback_cwd.clone(),
+            );
+        }
 
         if let Some(permission_profile) = updates.permission_profile.clone() {
             let active_permission_profile =
@@ -550,6 +563,7 @@ pub(crate) struct SessionSettingsCommit {
 pub(crate) struct SessionSettingsUpdate {
     pub(crate) step_settings: StepSettingsUpdate,
     pub(crate) environments: Option<TurnEnvironmentSelections>,
+    pub(crate) runtime_workspace_roots: Option<Vec<AbsolutePathBuf>>,
     pub(crate) profile_workspace_roots: Option<Vec<AbsolutePathBuf>>,
     pub(crate) sandbox_policy: Option<SandboxPolicy>,
     pub(crate) permission_profile: Option<PermissionProfile>,
@@ -883,6 +897,7 @@ impl Session {
                             initial_window_id: initial_auto_compact_window_ids
                                 .window_id
                                 .to_string(),
+                            runtime_workspace_roots: Some(config.workspace_roots.clone()),
                             metadata: ThreadPersistenceMetadata {
                                 cwd: Some(config.cwd.to_path_buf()),
                                 model_provider: config.model_provider_id.clone(),
@@ -1131,17 +1146,25 @@ impl Session {
                 slug: Some(session_model),
             };
             config.features.emit_metrics(&session_telemetry);
+            let is_worktree = session_configuration.cwd().canonicalize().ok().and_then(|cwd| {
+                codex_git_utils::repository_identity(&cwd).and_then(|_| {
+                    get_git_repo_root(&cwd).map(|root| root.join(".git").is_file())
+                })
+            });
+            let is_worktree_tag = match is_worktree {
+                Some(true) => "true",
+                Some(false) => "false",
+                None => "unknown",
+            };
+            let is_git_tag = if get_git_repo_root(session_configuration.cwd()).is_some() {
+                "true"
+            } else {
+                "false"
+            };
             session_telemetry.counter(
                 THREAD_STARTED_METRIC,
                 /*inc*/ 1,
-                &[(
-                    "is_git",
-                    if get_git_repo_root(session_configuration.cwd()).is_some() {
-                        "true"
-                    } else {
-                        "false"
-                    },
-                )],
+                &[("is_git", is_git_tag), ("is_worktree", is_worktree_tag)],
             );
 
             let mcp_server_names =
@@ -1525,7 +1548,6 @@ impl Session {
                 active_turn: Mutex::new(None),
                 async_hook_results,
                 input_queue: InputQueue::new(),
-                guardian_review_session: GuardianReviewSessionManager::default(),
                 services,
                 git_enrichment_policy,
                 fork_persistence,

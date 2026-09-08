@@ -85,6 +85,7 @@ struct ThreadListFilters {
 #[derive(PartialEq)]
 struct ResumeConfigState {
     history_cwd: Option<PathBuf>,
+    workspace_roots: Option<Vec<AbsolutePathBuf>>,
     persisted_metadata: Option<ThreadMetadata>,
     persisted_settings: Option<PersistedResumeSettings>,
 }
@@ -1050,12 +1051,23 @@ impl ThreadRequestProcessor {
         Ok(ThreadUnsubscribeResponse { status })
     }
 
-    async fn prepare_thread_for_archive(&self, thread_id: ThreadId) {
-        self.prepare_thread_for_removal(thread_id, "archive").await;
+    async fn prepare_thread_for_archive(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<(), JSONRPCErrorError> {
+        self.prepare_thread_for_removal(thread_id, "archive").await
     }
 
-    pub(super) async fn prepare_thread_for_removal(&self, thread_id: ThreadId, operation: &str) {
-        let removed_conversation = self.thread_manager.remove_thread(&thread_id).await;
+    pub(super) async fn prepare_thread_for_removal(
+        &self,
+        thread_id: ThreadId,
+        operation: &str,
+    ) -> Result<(), JSONRPCErrorError> {
+        let removed_conversation = self
+            .thread_manager
+            .remove_thread_for_client(&thread_id)
+            .await
+            .map_err(|err| core_thread_write_error(operation, err))?;
         if let Some(conversation) = removed_conversation {
             info!("thread {thread_id} was active; shutting down");
             match wait_for_thread_shutdown(&conversation).await {
@@ -1071,6 +1083,7 @@ impl ThreadRequestProcessor {
             }
         }
         self.finalize_thread_teardown(thread_id).await;
+        Ok(())
     }
 
     fn listener_task_context(&self) -> ListenerTaskContext {
@@ -1724,9 +1737,10 @@ impl ThreadRequestProcessor {
 
         archive_thread_ids[1..].reverse();
         // Collaboration may resume an archived descendant without unarchiving it.
-        self.prepare_thread_for_archive(thread_id).await;
+        self.prepare_thread_for_archive(thread_id).await?;
         for &descendant_thread_id in subtree_thread_ids.iter().skip(1).rev() {
-            self.prepare_thread_for_archive(descendant_thread_id).await;
+            self.prepare_thread_for_archive(descendant_thread_id)
+                .await?;
         }
 
         let archived_thread_ids = self
@@ -1859,13 +1873,9 @@ impl ThreadRequestProcessor {
             .clone()
             .ok_or_else(|| internal_error("sqlite state db unavailable for memory reset"))?;
 
-        state_db
-            .memories()
-            .clear_memory_data()
-            .await
-            .map_err(|err| {
-                internal_error(format!("failed to clear memory rows in memories db: {err}"))
-            })?;
+        state_db.clear_all_memory_data().await.map_err(|err| {
+            internal_error(format!("failed to clear memory rows in memories db: {err}"))
+        })?;
 
         clear_memory_roots_contents(&self.config.codex_home)
             .await
@@ -2264,6 +2274,15 @@ impl ThreadRequestProcessor {
             .map_err(|err| {
                 internal_error(format!(
                     "failed to restore thread settings after revert: {err}"
+                ))
+            })?;
+        // Replace the resume-time checkpoint written from the original config.
+        codex_thread
+            .checkpoint_thread_settings()
+            .await
+            .map_err(|err| {
+                internal_error(format!(
+                    "failed to persist restored thread settings after revert: {err}"
                 ))
             })?;
         Self::set_app_server_client_info(
@@ -3796,21 +3815,72 @@ impl ThreadRequestProcessor {
         }
 
         // Copied or referenced history can contain another thread's settings. Only snapshots
-        // explicitly owned by this thread can override its startup cwd.
-        let history_cwd = if let InitialHistory::Resumed(resumed) = &thread_history {
+        // explicitly owned by this thread can override its startup cwd and workspace folders.
+        let history_settings = if let InitialHistory::Resumed(resumed) = &thread_history {
             resumed.history.iter().rev().find_map(|item| match item {
                 RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event))
                     if event.thread_id == Some(resumed.conversation_id) =>
                 {
-                    Some(event.thread_settings.cwd.to_path_buf())
+                    Some(&event.thread_settings)
                 }
                 _ => None,
             })
         } else {
             None
         };
-        let history_cwd = history_cwd.or_else(|| thread_history.session_cwd());
-        let runtime_workspace_roots = runtime_workspace_roots.map(resolve_runtime_workspace_roots);
+        let history_cwd = history_settings
+            .map(|settings| settings.cwd.to_path_buf())
+            .or_else(|| thread_history.session_cwd());
+        let mut runtime_workspace_roots =
+            runtime_workspace_roots.map(resolve_runtime_workspace_roots);
+        if runtime_workspace_roots.is_none() {
+            // A retained owned snapshot is authoritative. Only use startup metadata when
+            // no such snapshot exists; missing roots do not resurrect an older selection.
+            let saved_workspaces: Option<(&Path, Vec<&Path>)> = match history_settings {
+                Some(settings) => settings.runtime_workspace_roots.as_ref().map(|roots| {
+                    (
+                        settings.cwd.as_path(),
+                        roots.iter().map(AbsolutePathBuf::as_path).collect(),
+                    )
+                }),
+                None => {
+                    if let InitialHistory::Resumed(resumed) = &thread_history
+                        && let Some(RolloutItem::SessionMeta(meta)) = resumed.history.first()
+                        && meta.meta.id == resumed.conversation_id
+                        && let Some(roots) = &meta.meta.runtime_workspace_roots
+                    {
+                        Some((
+                            meta.meta.cwd.as_path(),
+                            roots.iter().map(PathBuf::as_path).collect(),
+                        ))
+                    } else {
+                        None
+                    }
+                }
+            };
+            if let Some((saved_cwd, saved_roots)) = saved_workspaces {
+                let resume_cwd = resolve_request_cwd(cwd.as_ref().map(PathBuf::from))?;
+                // Retarget before validation so an explicit cwd can replace a
+                // startup cwd recorded on another operating system.
+                let restored_roots = path_utils::replace_path_and_deduplicate(
+                    saved_roots,
+                    saved_cwd,
+                    resume_cwd.as_ref().map_or(saved_cwd, AbsolutePathBuf::as_path),
+                )
+                    .into_iter()
+                    .map(|root| {
+                        AbsolutePathBuf::from_absolute_path_checked(root).map_err(|err| {
+                            invalid_params(format!(
+                                "cannot restore workspace root `{}` on this host: {err}. Pass `runtimeWorkspaceRoots` with valid local paths or an empty list.",
+                                root.display()
+                            ))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                // Validation can normalize distinct saved paths to the same root.
+                runtime_workspace_roots = Some(resolve_runtime_workspace_roots(restored_roots));
+            }
+        }
         let mut typesafe_overrides = self.build_thread_config_overrides(
             model,
             model_provider,
@@ -3863,6 +3933,7 @@ impl ThreadRequestProcessor {
                 .is_some_and(|metadata| metadata.reasoning_effort.is_none());
         let config_state = ResumeConfigState {
             history_cwd: history_cwd.clone(),
+            workspace_roots: typesafe_overrides.workspace_roots.clone(),
             persisted_metadata,
             persisted_settings: match &thread_history {
                 InitialHistory::Resumed(resumed) => {
@@ -4832,7 +4903,7 @@ impl ThreadRequestProcessor {
             .name
             .as_deref()
             .and_then(codex_core::util::normalize_thread_name);
-        let prepared_fork = if paginated_source {
+        let mut prepared_fork = if paginated_source {
             let boundary = match (last_turn_id.as_deref(), before_turn_id.as_deref()) {
                 (Some(turn_id), None) => {
                     codex_thread_store::ForkBoundary::ThroughTurn(turn_id.to_string())
@@ -4936,8 +5007,9 @@ impl ThreadRequestProcessor {
             !has_permission_override(request_overrides.as_ref(), &typesafe_overrides);
         let needs_latest_settings =
             restore_approval_policy || restore_approvals_reviewer || restore_permission_profile;
+        let loaded_parent = self.thread_manager.get_thread(source_thread_id).await.ok();
         let loaded_parent_settings = if paginated_source && needs_latest_settings {
-            if let Ok(parent) = self.thread_manager.get_thread(source_thread_id).await {
+            if let Some(parent) = loaded_parent.as_ref() {
                 let snapshot = parent.thread_settings_snapshot().await;
                 Some(PersistedResumeSettings {
                     approval_policy: snapshot.approval_policy,
@@ -4952,10 +5024,10 @@ impl ThreadRequestProcessor {
         };
         let latest_context = if paginated_source
             && needs_latest_settings
-            && loaded_parent_settings.is_none()
+            && loaded_parent.is_none()
             && (last_turn_id.is_some() || before_turn_id.is_some())
         {
-            Some(
+            Some(Arc::new(
                 self.thread_store
                     .load_latest_model_context(StoreLoadThreadHistoryParams {
                         thread_id: source_thread_id,
@@ -4964,10 +5036,23 @@ impl ThreadRequestProcessor {
                     .await
                     .map_err(thread_store_resume_read_error)?
                     .items,
-            )
+            ))
         } else {
             None
         };
+        // The fork cutoff can remove the only TurnContext that records the selected version.
+        // Recover it from the untrimmed source or live parent, independently of permission overrides.
+        let source_multi_agent_version = InitialHistory::Resumed(ResumedHistory {
+            conversation_id: source_thread_id,
+            history: Arc::clone(latest_context.as_ref().unwrap_or(&source_history_items)),
+            rollout_path: source_thread.rollout_path.clone(),
+        })
+        .get_multi_agent_version()
+        .or_else(|| {
+            loaded_parent
+                .as_ref()
+                .and_then(|parent| parent.multi_agent_version())
+        });
         let persisted_settings = loaded_parent_settings.or_else(|| {
             latest_persisted_resume_settings(
                 latest_context
@@ -5000,7 +5085,7 @@ impl ThreadRequestProcessor {
         let parent_trace = self.request_trace_context(&request_id).await;
         let thread_source = thread_source.map(Into::into);
 
-        let history_items = if prepared_fork.is_some() {
+        let mut history_items = if prepared_fork.is_some() {
             source_history_items
         } else {
             let source_history_items = Arc::unwrap_or_clone(source_history_items);
@@ -5018,6 +5103,21 @@ impl ThreadRequestProcessor {
             };
             Arc::new(history_items)
         };
+        if let Some(multi_agent_version) = source_multi_agent_version
+            && (last_turn_id.is_some() || before_turn_id.is_some())
+        {
+            // Update only the fork's in-memory metadata; the source rollout stays unchanged.
+            for item in Arc::make_mut(&mut history_items) {
+                if let RolloutItem::SessionMeta(meta) = item
+                    && meta.meta.id == source_thread_id
+                {
+                    meta.meta.multi_agent_version = Some(multi_agent_version);
+                }
+            }
+            if let Some(prepared_fork) = prepared_fork.as_mut() {
+                prepared_fork.model_context = Arc::clone(&history_items);
+            }
+        }
 
         let ephemeral_preview = if ephemeral {
             if paginated_source && last_turn_id.is_none() && before_turn_id.is_none() {

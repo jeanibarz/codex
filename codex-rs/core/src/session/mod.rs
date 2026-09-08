@@ -225,6 +225,8 @@ mod environment;
 pub(crate) mod extension_metrics;
 mod handlers;
 mod inject;
+mod reasoning_effort;
+pub(crate) use reasoning_effort::RequestEffortUsage;
 mod input_queue;
 mod mcp;
 mod mcp_prewarm;
@@ -232,7 +234,6 @@ mod mcp_refresh;
 mod mcp_runtime;
 pub(crate) mod multi_agents;
 mod realtime_history;
-mod reasoning_effort;
 mod retained_context;
 mod review;
 mod rollout_budget;
@@ -300,6 +301,7 @@ use crate::state::AcceptedUserInputResponse;
 use crate::state::AutoCompactWindowIds;
 use crate::state::AutoCompactWindowSnapshot;
 use crate::state::PendingRequestPermissions;
+use crate::state::ReasoningEffortPin;
 use crate::state::SessionServices;
 use crate::state::SessionState;
 #[cfg(test)]
@@ -765,6 +767,7 @@ impl Session {
             windows_sandbox_private_desktop: config.permissions.windows_sandbox_private_desktop,
             use_legacy_landlock: config.features.use_legacy_landlock(),
             legacy_fallback_cwd: config.cwd.clone(),
+            runtime_workspace_roots: config.workspace_roots.clone(),
             codex_home: config.codex_home.clone(),
             thread_name: None,
             original_config_do_not_use: Arc::clone(&config),
@@ -1471,8 +1474,14 @@ impl Session {
                 self.state.lock().await.latest_token_usage_record =
                     Self::last_token_usage_record_from_rollout(&rollout_items);
 
+                // Checkpoint effective settings even when no turn follows the resume.
+                self.persist_rollout_items(&[RolloutItem::EventMsg(
+                    thread_settings::applied_event(self).await,
+                )])
+                .await;
+
                 // Defer seeding the session's initial context until the first turn starts so
-                // turn/start overrides can be merged before we write to the rollout.
+                // turn/start overrides can be merged before we write model-visible context.
                 if !is_subagent {
                     let _ = self.flush_rollout().await;
                 }
@@ -1606,6 +1615,8 @@ impl Session {
             state
                 .history
                 .restore_review_context(Some(&retained_context), guardian_history.as_ref());
+            // The next send supplies the selected effort. Refresh its trusted override too.
+            state.reasoning_effort_pin = ReasoningEffortPin::Unset;
             if let Some(world_state) = world_state_baseline {
                 state.history.set_world_state_baseline(world_state);
             }
@@ -2083,6 +2094,13 @@ impl Session {
                 turn_context.sub_id.clone(),
                 error,
             ));
+    }
+
+    /// Uses the extension-owned reviewer, or the same manager for standalone hosts.
+    pub(crate) fn guardian_review_session(&self) -> Arc<GuardianReviewSessionManager> {
+        self.services
+            .thread_extension_data
+            .get_or_init(GuardianReviewSessionManager::default)
     }
 
     /// Persist the event to rollout and send it to clients.
@@ -3822,6 +3840,7 @@ impl Session {
             );
             compacted_item.guardian_history = state.history.guardian_history_checkpoint();
             compacted_item.retained_context = Some(state.history.retained_context().clone());
+            state.reasoning_effort_pin = ReasoningEffortPin::Compacted;
             if let Some(world_state) = world_state_baseline {
                 let snapshot = world_state.snapshot();
                 world_state_item = Some(WorldStateItem::full(snapshot.clone().into_object()));

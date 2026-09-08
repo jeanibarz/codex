@@ -2227,6 +2227,7 @@ dependencies = [
  "codex-state",
  "codex-thread-store",
  "codex-tools",
+ "codex-user-verification",
  "codex-utils-absolute-path",
  "codex-utils-cargo-bin",
  "codex-utils-cli",
@@ -2300,6 +2301,7 @@ name = "codex-app-server-daemon"
 version = "0.145.0-alpha.4"
 dependencies = [
  "anyhow",
+ "blake3",
  "codex-app-server-protocol",
  "codex-app-server-transport",
  "codex-http-client",
@@ -2310,7 +2312,6 @@ dependencies = [
  "pretty_assertions",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tokio-tungstenite",
@@ -2535,6 +2536,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
 ]
 
@@ -3543,6 +3545,7 @@ dependencies = [
 name = "codex-guardian-context"
 version = "0.145.0-alpha.4"
 dependencies = [
+ "codex-context-fragments",
  "codex-history",
  "codex-protocol",
  "pretty_assertions",
@@ -3565,8 +3568,6 @@ dependencies = [
  "codex-login",
  "codex-model-provider",
  "codex-model-provider-info",
- "codex-models-manager",
- "codex-network-proxy",
  "codex-protocol",
  "core_test_support",
  "dirs",
@@ -3896,6 +3897,7 @@ dependencies = [
  "codex-extension-api",
  "codex-features",
  "codex-otel",
+ "codex-protocol",
  "codex-tools",
  "codex-utils-absolute-path",
  "codex-utils-output-truncation",
@@ -4037,7 +4039,12 @@ dependencies = [
  "anyhow",
  "appcontainer_common",
  "codex-protocol",
+ "codex-utils-absolute-path",
+ "codex-utils-path-uri",
  "learning_mode_windows",
+ "pretty_assertions",
+ "tempfile",
+ "thiserror 2.0.18",
  "tracelogging",
  "wxc_common",
 ]
@@ -4329,6 +4336,8 @@ dependencies = [
  "tiny_http",
  "tokio",
  "tracing",
+ "tracing-subscriber",
+ "tracing-test",
  "url",
  "urlencoding",
  "webbrowser",
@@ -4681,6 +4690,7 @@ dependencies = [
  "codex-otel",
  "codex-plugin",
  "codex-protocol",
+ "codex-realtime-webrtc",
  "codex-rollout",
  "codex-sandboxing",
  "codex-shell-command",
@@ -4770,6 +4780,26 @@ dependencies = [
  "tokio-util",
  "uds_windows",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "codex-user-verification"
+version = "0.145.0-alpha.4"
+dependencies = [
+ "base64 0.22.1",
+ "core-foundation 0.10.1",
+ "dirs",
+ "objc2",
+ "objc2-foundation",
+ "objc2-local-authentication",
+ "p256",
+ "pretty_assertions",
+ "security-framework 3.5.1",
+ "security-framework-sys",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -10709,6 +10739,16 @@ dependencies = [
  "bitflags 2.13.1",
  "objc2",
  "objc2-core-foundation",
+]
+
+[[package]]
+name = "objc2-local-authentication"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e48e0b8b339e0d9d2ed4416b7f93f9d4daadff7d4dd797f89867cde11aeac607"
+dependencies = [
+ "objc2",
+ "objc2-foundation",
 ]
 
 [[package]]

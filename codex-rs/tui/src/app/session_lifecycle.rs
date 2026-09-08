@@ -484,6 +484,7 @@ impl App {
     /// This helper copies every known nickname/role from `AgentNavigationState` into the
     /// replacement widget so that replayed collab items render agent names immediately.
     pub(super) fn replace_chat_widget(&mut self, mut chat_widget: ChatWidget) {
+        self.retain_realtime_replay_state_before_replace();
         chat_widget.cyber_policy_notice = self.chat_widget.cyber_policy_notice.clone();
         self.commit_animation = None;
         // Transfer the last-written terminal title to the replacement widget
@@ -581,6 +582,16 @@ impl App {
             return Ok(());
         }
         let previous_thread_id = self.active_thread_id;
+        // Notifications already routed to the active channel must reach the old
+        // widget before its transcript state is transferred. Events routed after
+        // deactivation are retained separately for that thread.
+        if let Some(mut receiver) = self.active_thread_rx.take() {
+            while let Ok(event) = receiver.try_recv() {
+                self.handle_thread_event_now_recovering_file_changes(event)
+                    .await;
+            }
+            self.active_thread_rx = Some(receiver);
+        }
         self.store_active_thread_receiver().await;
         self.active_thread_id = None;
         let Some((receiver, mut snapshot)) = self.activate_thread_for_replay(thread_id).await
@@ -656,6 +667,10 @@ impl App {
         self.recap.seed_from_progress(recap_progress, now);
         self.schedule_recap_check(thread_id, now);
 
+        // The old widget owns the local helper and its undelivered answers.
+        // Transfer replay state before stopping its backend voice session.
+        self.retain_realtime_replay_state_before_replace();
+        self.stop_realtime_conversation(app_server).await;
         self.render_thread_snapshot(tui, app_server, thread_id, snapshot, !is_replay_only)?;
         if is_replay_only
             && self
@@ -749,6 +764,9 @@ impl App {
     pub(super) fn reset_thread_event_state(&mut self) {
         self.abort_all_thread_event_listeners();
         self.thread_event_channels.clear();
+        self.pending_realtime_speech_replay.clear();
+        self.pending_realtime_transcript_replay.clear();
+        self.realtime_replay_order.clear();
         self.pending_server_profiles.clear();
         self.agents_overview.activity.clear();
         self.agent_navigation.clear();
@@ -761,6 +779,7 @@ impl App {
         self.pending_primary_events.clear();
         self.pending_app_server_requests.clear();
         self.pending_startup_thread_start = false;
+        self.pending_server_version_notice = None;
         self.chat_widget.set_pending_thread_approvals(Vec::new());
         self.sync_active_agent_label();
     }
@@ -842,6 +861,9 @@ impl App {
                 self.enqueue_primary_thread_session(started.session, started.turns)
                     .await?;
                 self.apply_backend_banner_fallback(app_server).await;
+                if let Some(notice) = self.pending_server_version_notice.take() {
+                    self.chat_widget.add_server_version_warning(notice);
+                }
                 if !recovery_was_pending {
                     self.chat_widget.finish_rate_limit_recovery();
                 }
@@ -922,6 +944,7 @@ impl App {
                     }
                 }
                 self.local_settings = crate::local_settings::LocalSettings::from(&config);
+                self.refresh_server_version_overview_notice(CODEX_CLI_VERSION);
                 self.config = config;
 
                 let name_error = if let Some(name) = new_thread_name {
@@ -1227,6 +1250,7 @@ impl App {
             self.shutdown_current_thread(app_server).await;
         }
         self.local_settings = local_settings;
+        self.refresh_server_version_overview_notice(CODEX_CLI_VERSION);
         self.config = resume_config;
         tui.set_notification_settings(
             self.local_settings.tui.notification_settings.method,
