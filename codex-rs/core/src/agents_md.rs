@@ -234,6 +234,7 @@ impl<'a> AgentsMdManager<'a> {
 /// discovered doc. If no documentation file is found the function returns
 /// `Ok(None)`. Unexpected I/O failures bubble up as `Err` so callers can
 /// decide how to handle them.
+#[tracing::instrument(name = "agents_md.load", skip_all, fields(max_total = max_total))]
 async fn read_agents_md(
     config: &Config,
     fs: &dyn ExecutorFileSystem,
@@ -332,6 +333,7 @@ async fn rule_paths(
 
 /// Discovers AGENTS.md files from the project root to the current working
 /// directory, inclusive. Symlinks are allowed.
+#[tracing::instrument(name = "agents_md.discover", skip_all)]
 async fn agents_md_paths(
     config: &Config,
     cwd: &PathUri,

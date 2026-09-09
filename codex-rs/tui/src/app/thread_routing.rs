@@ -482,9 +482,11 @@ impl App {
                 self.chat_widget
                     .restore_undelivered_realtime_speech(*delivery_id);
             }
-            if let AppCommand::RealtimeConversationStart { thread_id, .. } = &op
+            if let AppCommand::RealtimeConversationStart { thread_id, .. }
+            | AppCommand::RealtimeConversationStop { thread_id } = &op
                 && self.chat_widget.thread_id() == Some(*thread_id)
             {
+                self.chat_widget.record_realtime_failure();
                 self.chat_widget.reset_realtime_conversation();
             }
             self.chat_widget
@@ -506,9 +508,11 @@ impl App {
                 self.chat_widget
                     .restore_undelivered_realtime_speech(*delivery_id);
             }
-            if let AppCommand::RealtimeConversationStart { thread_id, .. } = &op
+            if let AppCommand::RealtimeConversationStart { thread_id, .. }
+            | AppCommand::RealtimeConversationStop { thread_id } = &op
                 && self.chat_widget.thread_id() == Some(*thread_id)
             {
+                self.chat_widget.record_realtime_failure();
                 self.chat_widget.reset_realtime_conversation();
             }
             self.chat_widget.add_error_message(
@@ -1676,6 +1680,7 @@ impl App {
             let mut store = channel.store.lock().await;
             store.set_session(session.clone(), turns.clone());
             store.rebase_buffer_after_session_refresh();
+            snapshot.active_reasoning_item = store.active_reasoning_item.clone();
         }
         snapshot.session = Some(session);
         snapshot.turns = turns;
@@ -1766,6 +1771,7 @@ impl App {
         mut snapshot: ThreadEventSnapshot,
         resume_restored_queue: bool,
     ) {
+        let mut reasoning_replay = reasoning_replay::ReasoningReplay::new(&mut snapshot);
         let replayed_final_items = realtime_delivery::completed_agent_items(&snapshot);
         let replayed_voice_texts = realtime_delivery::replayed_voice_texts(&snapshot);
         replay_filter::omit_completed_agent_deltas(&mut snapshot.events);
@@ -1832,6 +1838,7 @@ impl App {
                 .replay_thread_turns(snapshot.turns, ReplayKind::ThreadSnapshot);
         }
         for (event, changes) in snapshot.events.into_iter().zip(request_changes) {
+            reasoning_replay.before_event(&event, &mut self.chat_widget);
             if suppress_replay_notices && replay_filter::event_is_notice(&event) {
                 continue;
             }
@@ -1842,6 +1849,7 @@ impl App {
                 (event, _) => self.handle_thread_event_replay(event),
             }
         }
+        reasoning_replay.restore(&mut self.chat_widget);
         if should_buffer_replay {
             self.app_event_tx
                 .send(AppEvent::EndInitialHistoryReplayBuffer);
