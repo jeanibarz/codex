@@ -1,6 +1,7 @@
 use crate::attribution::BindConnectionAttribution;
 use crate::config::NetworkMode;
 use crate::connect_policy::TargetCheckedTcpConnector;
+use crate::connection_lifecycle::CancelOnShutdown;
 use crate::mitm;
 use crate::network_policy::BlockDecisionAuditEventArgs;
 use crate::network_policy::NetworkDecision;
@@ -41,6 +42,7 @@ use rama_core::error::ErrorExt as _;
 use rama_core::error::OpaqueError;
 use rama_core::extensions::ExtensionsMut;
 use rama_core::extensions::ExtensionsRef;
+use rama_core::graceful::ShutdownGuard;
 use rama_core::service::BoxService;
 use rama_core::service::service_fn;
 use rama_core::stream::Stream;
@@ -87,7 +89,7 @@ use tracing::warn;
 enum ConnectMitmMode {
     Disabled,
     Enabled,
-    DetectTls,
+    DetectProtocol(crate::brokered_tunnel::BrokeredProtocols),
 }
 
 pub async fn run_http_proxy(
@@ -95,6 +97,7 @@ pub async fn run_http_proxy(
     addr: SocketAddr,
     policy_decider: Option<Arc<dyn NetworkPolicyDecider>>,
     environment_id: Option<String>,
+    guard: ShutdownGuard,
 ) -> Result<()> {
     let listener = TcpListener::build()
         .bind(addr)
@@ -107,7 +110,7 @@ pub async fn run_http_proxy(
         .map_err(anyhow::Error::from)
         .with_context(|| format!("bind HTTP proxy: {addr}"))?;
 
-    run_http_proxy_with_listener(state, listener, policy_decider, environment_id).await
+    run_http_proxy_with_listener(state, listener, policy_decider, environment_id, guard).await
 }
 
 pub async fn run_http_proxy_with_std_listener(
@@ -115,10 +118,11 @@ pub async fn run_http_proxy_with_std_listener(
     listener: StdTcpListener,
     policy_decider: Option<Arc<dyn NetworkPolicyDecider>>,
     environment_id: Option<String>,
+    guard: ShutdownGuard,
 ) -> Result<()> {
     let listener =
         TcpListener::try_from(listener).context("convert std listener to HTTP proxy listener")?;
-    run_http_proxy_with_listener(state, listener, policy_decider, environment_id).await
+    run_http_proxy_with_listener(state, listener, policy_decider, environment_id, guard).await
 }
 
 async fn run_http_proxy_with_listener(
@@ -126,6 +130,7 @@ async fn run_http_proxy_with_listener(
     listener: TcpListener,
     policy_decider: Option<Arc<dyn NetworkPolicyDecider>>,
     environment_id: Option<String>,
+    guard: ShutdownGuard,
 ) -> Result<()> {
     let addr = listener
         .local_addr()
@@ -134,7 +139,10 @@ async fn run_http_proxy_with_listener(
     info!("HTTP proxy listening on {addr}");
 
     listener
-        .serve(http_proxy_service(state, policy_decider, environment_id))
+        .serve_graceful(
+            guard,
+            CancelOnShutdown::new(http_proxy_service(state, policy_decider, environment_id)),
+        )
         .await;
     Ok(())
 }
@@ -161,7 +169,7 @@ pub(crate) fn http_proxy_service(
                         http_connect_accept(policy_decider.clone(), environment_id.clone(), req)
                     }
                 }),
-                service_fn(http_connect_proxy),
+                CancelOnShutdown::new(service_fn(http_connect_proxy)),
             ),
             RemoveResponseHeaderLayer::hop_by_hop(),
         )
@@ -292,7 +300,7 @@ async fn http_connect_accept(
             return Err(text_response(StatusCode::INTERNAL_SERVER_ERROR, "error"));
         }
     };
-    let host_mitm_requirement = match app_state.host_mitm_requirement(&host).await {
+    let host_mitm_requirement = match app_state.host_mitm_requirement(&host, authority.port).await {
         Ok(requirement) => requirement,
         Err(err) => {
             error!("failed to inspect MITM requirements for {host}: {err}");
@@ -304,7 +312,9 @@ async fn http_connect_accept(
     } else {
         match host_mitm_requirement {
             HostMitmRequirement::None => ConnectMitmMode::Disabled,
-            HostMitmRequirement::Tls => ConnectMitmMode::DetectTls,
+            HostMitmRequirement::Credential(protocols) => {
+                ConnectMitmMode::DetectProtocol(protocols)
+            }
             HostMitmRequirement::Always => ConnectMitmMode::Enabled,
         }
     };
@@ -379,11 +389,17 @@ async fn http_connect_proxy(upgraded: Upgraded) -> Result<(), Infallible> {
     let result: Result<(), OpaqueError> = match connect_mitm_mode {
         ConnectMitmMode::Disabled => forward_connect_tunnel(upgraded).await,
         ConnectMitmMode::Enabled => mitm_connect_tunnel(upgraded).await,
-        ConnectMitmMode::DetectTls => match mitm::peek_tls_prefix(upgraded).await {
-            Ok((true, stream)) => mitm_connect_tunnel(stream).await,
-            Ok((false, stream)) => forward_connect_tunnel(stream).await,
-            Err(err) => Err(OpaqueError::from_display(format!("detect TLS: {err:#}"))),
-        },
+        ConnectMitmMode::DetectProtocol(protocols) => {
+            match crate::brokered_tunnel::peek_protocol(upgraded, protocols).await {
+                Ok((crate::brokered_tunnel::TunnelProtocol::Tls, stream)) => {
+                    mitm_connect_tunnel(stream).await
+                }
+                Ok((crate::brokered_tunnel::TunnelProtocol::Opaque, stream)) => {
+                    forward_connect_tunnel(stream).await
+                }
+                Err(err) => Err(OpaqueError::from_display(format!("detect TLS: {err:#}"))),
+            }
+        }
     };
     if let Err(err) = result {
         warn!("CONNECT tunnel error: {err}");
@@ -777,7 +793,7 @@ async fn http_plain_proxy(
         }
     }
 
-    let host_mitm_requirement = match app_state.host_mitm_requirement(&host).await {
+    let host_mitm_requirement = match app_state.host_mitm_requirement(&host, port).await {
         Ok(requirement) => requirement,
         Err(err) => {
             return Ok(internal_error("failed to inspect MITM requirements", err));
@@ -872,7 +888,7 @@ async fn http_plain_proxy(
     }
 
     if let Err(err) =
-        inject_plaintext_credentials_if_enabled(app_state.as_ref(), &host, req.headers_mut()).await
+        inject_forward_request_credentials(app_state.as_ref(), &request_ctx, &mut req).await
     {
         return Ok(internal_error(
             "failed to read plaintext credential injection config",
@@ -909,13 +925,28 @@ async fn http_plain_proxy(
     }
 }
 
-async fn inject_plaintext_credentials_if_enabled(
+async fn inject_forward_request_credentials(
     app_state: &NetworkProxyState,
-    host: &str,
-    headers: &mut HeaderMap,
+    context: &RequestContext,
+    req: &mut Request,
 ) -> Result<()> {
-    if app_state.plaintext_credential_injection_enabled().await? {
-        app_state.inject_request_credentials(host, headers);
+    let authority = context.host_with_port();
+    let scheme = req.uri().scheme_str().unwrap_or("http");
+    // Server-wide OPTIONS may use root-scoped credentials without changing its wire target.
+    let request_path = req
+        .uri()
+        .path_and_query()
+        .map(rama_http::uri::PathAndQuery::as_str)
+        .filter(|path| *path != "*")
+        .unwrap_or("/");
+    let destination = format!("{scheme}://{authority}{request_path}");
+    let unrestricted_plaintext = app_state.plaintext_credential_injection_enabled().await?;
+    app_state.inject_request_credentials(&destination, req.headers_mut());
+    if unrestricted_plaintext {
+        app_state.inject_request_credentials(
+            &normalize_host(&authority.host.to_string()),
+            req.headers_mut(),
+        );
     }
     Ok(())
 }
@@ -1159,12 +1190,14 @@ struct BlockedResponse<'a> {
 mod tests {
     use super::*;
 
+    use crate::CredentialProviderConfig;
     use crate::config::NetworkMode;
     use crate::config::NetworkProxyConfig;
     use crate::runtime::network_proxy_state_for_policy;
     use pretty_assertions::assert_eq;
     use rama_http::Method;
     use rama_http::Request;
+    use std::collections::BTreeMap;
     use std::collections::HashMap;
     use std::net::Ipv4Addr;
     use std::net::TcpListener as StdTcpListener;
@@ -1299,69 +1332,126 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             request.extensions().get::<ConnectMitmMode>().copied(),
-            Some(ConnectMitmMode::DetectTls)
+            Some(ConnectMitmMode::DetectProtocol(
+                crate::brokered_tunnel::BrokeredProtocols { tls: true }
+            ))
         );
     }
 
     #[tokio::test]
     async fn plaintext_credential_injection_requires_explicit_opt_in() {
         let real_token = "ghp-real";
-        let mut disabled_network = NetworkProxyConfig {
-            credential_broker: true,
-            mitm: true,
-            ..NetworkProxyConfig::default()
-        };
-        disabled_network.set_allowed_domains(vec!["api.github.com".to_string()]);
-        let disabled_state = Arc::new(network_proxy_state_for_policy(disabled_network));
-        let mut disabled_env = HashMap::from([("GH_TOKEN".to_string(), real_token.to_string())]);
-        disabled_state.virtualize_child_credentials(&mut disabled_env);
-        let dummy_token = disabled_env.get("GH_TOKEN").expect("dummy GitHub token");
-        let mut disabled_headers = HeaderMap::from_iter([(
-            header::AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {dummy_token}"))
-                .expect("valid authorization header"),
-        )]);
+        for enabled in [false, true] {
+            let state = network_proxy_state_for_policy(NetworkProxyConfig {
+                credential_broker: true,
+                dangerously_allow_plaintext_credential_injection: enabled,
+                mitm: true,
+                ..NetworkProxyConfig::default()
+            });
+            let mut env = HashMap::from([("GH_TOKEN".to_string(), real_token.to_string())]);
+            state.virtualize_child_credentials(&mut env);
+            let dummy = env.get("GH_TOKEN").expect("dummy GitHub token");
+            let mut req = Request::builder()
+                .uri("http://api.github.com/")
+                .header(header::AUTHORIZATION, format!("Bearer {dummy}"))
+                .body(Body::empty())
+                .unwrap();
+            let context = RequestContext::try_from(&req).unwrap();
 
-        inject_plaintext_credentials_if_enabled(
-            disabled_state.as_ref(),
-            "api.github.com",
-            &mut disabled_headers,
-        )
-        .await
-        .expect("disabled plaintext injection check should succeed");
-        assert_eq!(
-            disabled_headers.get(header::AUTHORIZATION),
-            Some(&HeaderValue::from_str(&format!("Bearer {dummy_token}")).unwrap())
-        );
+            inject_forward_request_credentials(&state, &context, &mut req)
+                .await
+                .unwrap();
 
-        let mut enabled_network = NetworkProxyConfig {
-            credential_broker: true,
-            dangerously_allow_plaintext_credential_injection: true,
-            mitm: true,
-            ..NetworkProxyConfig::default()
-        };
-        enabled_network.set_allowed_domains(vec!["api.github.com".to_string()]);
-        let enabled_state = Arc::new(network_proxy_state_for_policy(enabled_network));
-        let mut enabled_env = HashMap::from([("GH_TOKEN".to_string(), real_token.to_string())]);
-        enabled_state.virtualize_child_credentials(&mut enabled_env);
-        let enabled_dummy = enabled_env.get("GH_TOKEN").expect("dummy GitHub token");
-        let mut enabled_headers = HeaderMap::from_iter([(
-            header::AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {enabled_dummy}"))
-                .expect("valid authorization header"),
-        )]);
+            let expected = if enabled { real_token } else { dummy };
+            assert_eq!(
+                req.headers()[header::AUTHORIZATION],
+                format!("Bearer {expected}")
+            );
+        }
+    }
 
-        inject_plaintext_credentials_if_enabled(
-            enabled_state.as_ref(),
-            "api.github.com",
-            &mut enabled_headers,
-        )
-        .await
-        .expect("enabled plaintext injection check should succeed");
-        assert_eq!(
-            enabled_headers.get(header::AUTHORIZATION),
-            Some(&HeaderValue::from_str(&format!("Bearer {real_token}")).unwrap())
-        );
+    #[tokio::test]
+    async fn configured_forward_requests_match_destination_scheme_and_port() {
+        let real_token = "provider_abcdefghijklmnopqrstuvwx";
+        for (host, port, prefix, scope) in [
+            ("localhost", 8080, ""),
+            ("127.0.0.1", 8081, ""),
+            ("api.provider.example", 443, "https://"),
+            ("api.provider.example", 8443, "https://"),
+        ]
+        .into_iter()
+        .flat_map(|(host, port, prefix)| ["/v1", "/"].map(move |scope| (host, port, prefix, scope)))
+        {
+            let state = network_proxy_state_for_policy(NetworkProxyConfig {
+                credential_broker: true,
+                dangerously_allow_plaintext_credential_injection: true,
+                credential_providers: BTreeMap::from([(
+                    "custom".to_string(),
+                    CredentialProviderConfig {
+                        env: vec!["PROVIDER_TOKEN".to_string()],
+                        patterns: vec!["^provider_[a-z]{24}$".to_string()],
+                        url_prefix_from_env: Some("PROVIDER_URL".to_string()),
+                        ..CredentialProviderConfig::default()
+                    },
+                )]),
+                ..NetworkProxyConfig::default()
+            });
+            let mut env = HashMap::from([
+                ("PROVIDER_TOKEN".to_string(), real_token.to_string()),
+                (
+                    "PROVIDER_URL".to_string(),
+                    format!("{prefix}{host}:{port}{scope}"),
+                ),
+            ]);
+            state.virtualize_child_credentials(&mut env);
+            let dummy = env.get("PROVIDER_TOKEN").expect("dummy provider token");
+            assert_ne!(dummy, real_token);
+            for (uri, inject) in [
+                (format!("http://{host}:{port}/v1/models"), prefix.is_empty()),
+                (format!("http://{host}:{}/v1/models", port + 1), false),
+                (format!("https://{host}:{}/v1/models", port + 1), false),
+                (
+                    format!("https://{host}:{port}/v1/models"),
+                    !prefix.is_empty(),
+                ),
+                ("/v1/models".to_string(), prefix.is_empty()),
+                (
+                    format!("https://{host}:{port}/other"),
+                    !prefix.is_empty() && scope == "/",
+                ),
+                ("*".to_string(), prefix.is_empty() && scope == "/"),
+            ] {
+                let request_uri: rama_http::Uri = uri.parse().unwrap();
+                let host_header = request_uri
+                    .authority()
+                    .map(|authority| authority.as_str().to_string())
+                    .unwrap_or_else(|| format!("{host}:{port}"));
+                let mut req = Request::builder()
+                    .method(if uri == "*" {
+                        Method::OPTIONS
+                    } else {
+                        Method::GET
+                    })
+                    .uri(request_uri)
+                    .header(header::HOST, host_header)
+                    .header(header::AUTHORIZATION, format!("Bearer {dummy}"))
+                    .body(Body::empty())
+                    .unwrap();
+                let context = RequestContext::try_from(&req).unwrap();
+
+                inject_forward_request_credentials(&state, &context, &mut req)
+                    .await
+                    .unwrap();
+
+                let expected = if inject { real_token } else { dummy };
+                assert_eq!(
+                    req.headers()[header::AUTHORIZATION],
+                    format!("Bearer {expected}"),
+                    "request: {uri}, configured scope: {scope}"
+                );
+                assert_eq!(req.uri().to_string(), uri);
+            }
+        }
     }
 
     #[tokio::test]
@@ -1445,8 +1535,13 @@ mod tests {
         let proxy_addr = listener
             .local_addr()
             .expect("proxy listener should expose local addr");
+        let lifecycle = crate::connection_lifecycle::ConnectionLifecycle::new();
         let proxy_task = tokio::spawn(run_http_proxy_with_std_listener(
-            state, listener, /*policy_decider*/ None, /*environment_id*/ None,
+            state,
+            listener,
+            /*policy_decider*/ None,
+            /*environment_id*/ None,
+            lifecycle.guard(),
         ));
 
         let mut stream = tokio::net::TcpStream::connect(proxy_addr)
@@ -1522,11 +1617,13 @@ mod tests {
         let proxy_addr = listener
             .local_addr()
             .expect("proxy listener should expose local addr");
+        let lifecycle = crate::connection_lifecycle::ConnectionLifecycle::new();
         let proxy_task = tokio::spawn(run_http_proxy_with_std_listener(
             state.clone(),
             listener,
             /*policy_decider*/ None,
             /*environment_id*/ None,
+            lifecycle.guard(),
         ));
 
         let mut stream = tokio::net::TcpStream::connect(proxy_addr)

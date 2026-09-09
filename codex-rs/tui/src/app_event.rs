@@ -278,7 +278,7 @@ pub(crate) enum AppEvent {
     },
     /// Start a background task directly from the shared dashboard.
     DispatchAgentsOverviewTask {
-        prompt: String,
+        prompt: UserMessage,
         cwd: Option<AbsolutePathBuf>,
     },
     /// Rename a task directly from the shared dashboard.
@@ -460,6 +460,18 @@ pub(crate) enum AppEvent {
         request: crate::worktree_browser::Request,
         entry: crate::worktree_browser::Entry,
     },
+    ConfirmManagedWorktreeRemoval {
+        request: crate::worktree_browser::Request,
+        root: PathBuf,
+    },
+    RemoveManagedWorktree {
+        request: crate::worktree_browser::Request,
+        root: PathBuf,
+    },
+    ManagedWorktreeRemoved {
+        root: PathBuf,
+        result: Result<(), String>,
+    },
 
     /// Change the working directory of the originating idle primary thread.
     ChangeWorkingDirectory {
@@ -495,6 +507,9 @@ pub(crate) enum AppEvent {
     ClearUi {
         name: Option<String>,
     },
+
+    /// Clear history queued by the previous thread before the new thread's replay events.
+    ResetTranscriptForThreadSwitch,
 
     /// Re-render the transcript using the selected scrollback rendering mode.
     RawOutputModeChanged {
