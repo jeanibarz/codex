@@ -2214,6 +2214,7 @@ dependencies = [
  "codex-model-provider",
  "codex-model-provider-info",
  "codex-models-manager",
+ "codex-network-proxy",
  "codex-otel",
  "codex-plugin",
  "codex-protocol",
@@ -2227,6 +2228,7 @@ dependencies = [
  "codex-state",
  "codex-thread-store",
  "codex-tools",
+ "codex-uds",
  "codex-user-verification",
  "codex-utils-absolute-path",
  "codex-utils-cargo-bin",
@@ -2867,6 +2869,7 @@ dependencies = [
  "codex-utils-path",
  "codex-utils-path-uri",
  "codex-utils-redacted-string",
+ "codex-windows-sandbox",
  "core-foundation 0.9.4",
  "dns-lookup",
  "dunce",
@@ -2990,6 +2993,7 @@ dependencies = [
  "codex-file-system",
  "codex-git-utils",
  "codex-guardian-context",
+ "codex-guardian-reviewer",
  "codex-history",
  "codex-home",
  "codex-hooks",
@@ -3427,6 +3431,7 @@ dependencies = [
  "codex-http-client",
  "codex-login",
  "codex-protocol",
+ "codex-rollout",
  "flate2",
  "http 1.4.0",
  "httpdate",
@@ -3554,6 +3559,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-guardian-reviewer"
+version = "0.154.0"
+dependencies = [
+ "anyhow",
+ "codex-analytics",
+ "codex-extension-api",
+ "codex-protocol",
+ "pretty_assertions",
+ "rand 0.9.3",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "codex-guardian-v2"
 version = "0.154.0"
 dependencies = [
@@ -3564,6 +3585,7 @@ dependencies = [
  "codex-extension-api",
  "codex-features",
  "codex-guardian-context",
+ "codex-guardian-reviewer",
  "codex-history",
  "codex-http-client",
  "codex-login",
@@ -4047,11 +4069,13 @@ dependencies = [
  "codex-protocol",
  "codex-utils-absolute-path",
  "codex-utils-path-uri",
+ "codex-windows-sandbox",
  "learning_mode_windows",
  "pretty_assertions",
  "tempfile",
  "thiserror 2.0.18",
  "tracelogging",
+ "windows-sys 0.61.2",
  "wxc_common",
 ]
 

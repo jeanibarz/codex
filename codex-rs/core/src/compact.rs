@@ -15,8 +15,6 @@ use crate::hook_runtime::run_pre_compact_hooks;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
-#[cfg(test)]
-use crate::session::PreviousTurnSettings;
 use crate::session::RequestEffortUsage;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
@@ -103,10 +101,7 @@ pub(crate) async fn build_compaction_initial_context(
             step_context,
         } => {
             let items = sess
-                .build_initial_context_with_world_state(
-                    step_context.turn.as_ref(),
-                    world_state.as_ref(),
-                )
+                .build_initial_context_with_world_state(step_context, world_state.as_ref())
                 .await;
             (
                 items.into_iter().map(ResponseItemEnvelope::new).collect(),
@@ -794,8 +789,12 @@ async fn drain_to_completed(
         };
         match event {
             Ok(ResponseEvent::OutputItemDone(item)) => {
-                sess.record_conversation_items(turn_context, std::slice::from_ref(&item))
-                    .await;
+                sess.record_conversation_items(
+                    turn_context,
+                    turn_context.model_info(),
+                    std::slice::from_ref(&item),
+                )
+                .await;
             }
             Ok(ResponseEvent::ServerReasoningIncluded(included)) => {
                 sess.set_server_reasoning_included(included).await;
