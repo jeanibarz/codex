@@ -925,7 +925,7 @@ jobs:
             --archive-dir "dist/${TARGET}" \
             --rg-bin "signed-resources/${TARGET}/rg" \
             --zsh-bin "signed-resources/${TARGET}/zsh" \
-            "${voice_args[@]}"
+            ${voice_args[@]+"${voice_args[@]}"}
 
       - name: Build unsigned macOS DMG
         if: ${{ matrix.build_dmg == 'true' }}
@@ -1393,6 +1393,16 @@ jobs:
           name: ${{ matrix.artifact_name }}
           path: codex-rs/dist/${{ matrix.target }}/*
           if-no-files-found: error
+
+  # Separate opt-in candidates never enter the normal release download patterns.
+  provisioned-macos-candidate:
+    needs: finalize-macos
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/rust-v') && vars.CODEX_PROVISIONED_MACOS_CANDIDATE == 'true'
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/rust-release-provisioned-macos.yml
+    secrets: inherit
 
   build-windows:
     needs: tag-check

@@ -173,6 +173,7 @@ use codex_thread_store::ThreadPersistenceMetadata;
 use codex_thread_store::ThreadStore;
 use codex_utils_audio::prepare_response_items as prepare_audio_response_items;
 use codex_utils_git_discovery::GitRootDiscovery;
+use codex_utils_output_truncation::with_serialization_allowance;
 use codex_utils_path_uri::PathUri;
 use futures::future::BoxFuture;
 use futures::future::Shared;
@@ -436,6 +437,7 @@ pub(crate) struct SessionSpawnArgs {
     pub(crate) code_mode_session_provider: Arc<dyn codex_code_mode::CodeModeSessionProvider>,
     pub(crate) extensions: Arc<codex_extension_api::ExtensionRegistry<crate::config::Config>>,
     pub(crate) conversation_history: InitialHistory,
+    pub(crate) disabled_plugin_ids: Option<Vec<String>>,
     pub(crate) requested_history_mode: Option<ThreadHistoryMode>,
     pub(crate) fork_persistence: ForkPersistence,
     pub(crate) session_source: SessionSource,
@@ -540,6 +542,7 @@ impl Session {
             code_mode_session_provider,
             extensions,
             conversation_history,
+            disabled_plugin_ids,
             requested_history_mode,
             fork_persistence,
             session_source,
@@ -727,6 +730,22 @@ impl Session {
         } else {
             dynamic_tools
         };
+        let disabled_plugin_ids = disabled_plugin_ids.unwrap_or_else(|| {
+            let settings_owner = match &conversation_history {
+                InitialHistory::Resumed(resumed) => Some(resumed.conversation_id),
+                InitialHistory::Forked(_) => forked_from_thread_id,
+                InitialHistory::New | InitialHistory::Cleared => None,
+            };
+            settings_owner
+                .and_then(|thread_id| {
+                    codex_history::latest_disabled_plugin_ids(
+                        conversation_history.get_rollout_items(),
+                        thread_id,
+                    )
+                })
+                .map(<[String]>::to_vec)
+                .unwrap_or_default()
+        });
         // TODO (aibrahim): Consolidate config.model and config.model_reasoning_effort into config.collaboration_mode
         // to avoid extracting these fields separately and constructing CollaborationMode here.
         let collaboration_mode = CollaborationMode {
@@ -771,6 +790,7 @@ impl Session {
             runtime_workspace_roots: config.workspace_roots.clone(),
             codex_home: config.codex_home.clone(),
             thread_name: None,
+            disabled_plugin_ids,
             original_config_do_not_use: Arc::clone(&config),
             metrics_service_name,
             app_server_client_name: None,
@@ -1088,28 +1108,20 @@ impl Session {
     ///
     /// `ModelClient` is session-scoped and intentionally does not depend on the full `Config`, so
     /// we precompute the comma-separated list of enabled experimental feature keys at session
-    /// creation time and thread it into the client.
+    /// creation time and thread it into the client. Remote compaction stays advertised unconditionally.
     fn build_model_client_beta_features_header(config: &Config) -> Option<String> {
-        let beta_features_header = FEATURES
-            .iter()
-            .filter_map(|spec| {
-                let advertise_in_model_client_header =
-                    spec.stage.experimental_menu_description().is_some()
-                        || spec.id == Feature::RemoteCompactionV2;
-                if advertise_in_model_client_header && config.features.enabled(spec.id) {
-                    Some(spec.key)
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(",");
-
-        if beta_features_header.is_empty() {
-            None
-        } else {
-            Some(beta_features_header)
-        }
+        Some(
+            FEATURES
+                .iter()
+                .filter(|spec| {
+                    spec.id == Feature::RemoteCompactionV2
+                        || (spec.stage.experimental_menu_description().is_some()
+                            && config.features.enabled(spec.id))
+                })
+                .map(|spec| spec.key)
+                .collect::<Vec<_>>()
+                .join(","),
+        )
     }
 
     async fn start_managed_network_proxy(
@@ -1644,8 +1656,6 @@ impl Session {
             state
                 .history
                 .restore_review_context(Some(&retained_context), guardian_history.as_ref());
-            // The next send supplies the selected effort. Refresh its trusted override too.
-            state.reasoning_effort_pin = ReasoningEffortPin::Unset;
             if let Some(world_state) = world_state_baseline {
                 state.history.set_world_state_baseline(world_state);
             }
@@ -1942,6 +1952,18 @@ impl Session {
             config.mcp_optional_startup_grace = next_config.mcp_optional_startup_grace;
             config.mcp_oauth_credentials_store_mode = next_config.mcp_oauth_credentials_store_mode;
             if let Err(err) = config.features.set_enabled(
+                Feature::Mcp20260728,
+                next_config.features.enabled(Feature::Mcp20260728),
+            ) {
+                warn!("failed to refresh MCP protocol config: {err}");
+            }
+            if let Err(err) = config.features.set_enabled(
+                Feature::CodexAppsMcp20260728,
+                next_config.features.enabled(Feature::CodexAppsMcp20260728),
+            ) {
+                warn!("failed to refresh Codex Apps MCP protocol config: {err}");
+            }
+            if let Err(err) = config.features.set_enabled(
                 Feature::SecretAuthStorage,
                 next_config.features.enabled(Feature::SecretAuthStorage),
             ) {
@@ -1997,6 +2019,18 @@ impl Session {
         config.mcp_servers = next_config.mcp_servers;
         config.mcp_optional_startup_grace = next_config.mcp_optional_startup_grace;
         config.mcp_oauth_credentials_store_mode = next_config.mcp_oauth_credentials_store_mode;
+        if let Err(err) = config.features.set_enabled(
+            Feature::Mcp20260728,
+            next_config.features.enabled(Feature::Mcp20260728),
+        ) {
+            warn!("failed to refresh MCP protocol config: {err}");
+        }
+        if let Err(err) = config.features.set_enabled(
+            Feature::CodexAppsMcp20260728,
+            next_config.features.enabled(Feature::CodexAppsMcp20260728),
+        ) {
+            warn!("failed to refresh Codex Apps MCP protocol config: {err}");
+        }
         if let Err(err) = config.features.set_enabled(
             Feature::SecretAuthStorage,
             next_config.features.enabled(Feature::SecretAuthStorage),
@@ -2507,6 +2541,15 @@ impl Session {
         item: TurnItem,
     ) {
         record_turn_ttfm_metric(turn_context, &item).await;
+        for contributor in self.services.extensions.turn_lifecycle_contributors() {
+            contributor
+                .on_item_completed(
+                    &self.services.thread_extension_data,
+                    turn_context.extension_data.as_ref(),
+                    &item,
+                )
+                .await;
+        }
         let completed_at_ms = now_unix_timestamp_ms();
         let item_id = item.id();
         let started_at_ms = turn_context
@@ -3294,22 +3337,20 @@ impl Session {
         item.set_create_time_if_missing(Self::response_item_create_time());
     }
 
-    /// Records conversation items: append to history, persist to rollout, and
-    /// notify clients observing raw response items.
+    /// Prepares media using the originating model and preserves existing item identity.
     pub(crate) fn prepare_conversation_items_for_history<'a>(
         &self,
         turn_context: &TurnContext,
+        model_info: &ModelInfo,
         items: &'a [ResponseItem],
     ) -> (Cow<'a, [ResponseItem]>, Vec<ImagePreparationMetadata>) {
         let mut items = items.to_vec();
-        let image_preparation_mode = if unified_image_budget_enabled(
-            &turn_context.config.features,
-            turn_context.model_info(),
-        ) {
-            ImagePreparationMode::UnifiedBudget
-        } else {
-            ImagePreparationMode::DetailBased
-        };
+        let image_preparation_mode =
+            if unified_image_budget_enabled(&turn_context.config.features, model_info) {
+                ImagePreparationMode::UnifiedBudget
+            } else {
+                ImagePreparationMode::DetailBased
+            };
         let image_resize_notice_mode = if turn_context
             .config
             .features
@@ -3403,29 +3444,54 @@ impl Session {
         item
     }
 
+    /// Appends to history, persists the prepared items, then notifies raw-item observers.
+    /// Execution callers supply their captured model; standalone callers need no tool runtime.
     #[tracing::instrument(level = "trace", skip_all, fields(item_count = items.len()))]
     pub(crate) async fn record_conversation_items(
         &self,
         turn_context: &TurnContext,
+        model_info: &ModelInfo,
         items: &[ResponseItem],
     ) {
         let (items, image_preparations) =
-            self.prepare_conversation_items_for_history(turn_context, items);
+            self.prepare_conversation_items_for_history(turn_context, model_info, items);
         let items = items
             .into_owned()
             .into_iter()
             .map(ResponseItemEnvelope::new)
             .collect();
-        self.record_prepared_conversation_items(turn_context, items, image_preparations)
-            .await;
+        self.record_prepared_conversation_items(
+            turn_context,
+            model_info,
+            items,
+            image_preparations,
+        )
+        .await;
     }
 
     async fn record_prepared_conversation_items(
         &self,
         turn_context: &TurnContext,
-        items: Vec<ResponseItemEnvelope>,
+        model_info: &ModelInfo,
+        mut items: Vec<ResponseItemEnvelope>,
         image_preparations: Vec<ImagePreparationMetadata>,
     ) {
+        // Save the originating history budget for replay.
+        // Preserve any existing tool-specific override.
+        let policy: codex_utils_output_truncation::TruncationPolicy =
+            model_info.truncation_policy.into();
+        for envelope in &mut items {
+            if matches!(
+                envelope.item,
+                ResponseItem::FunctionCallOutput { .. } | ResponseItem::CustomToolCallOutput { .. }
+            ) {
+                envelope
+                    .metadata
+                    .get_or_insert_default()
+                    .history_truncation_token_limit
+                    .get_or_insert_with(|| with_serialization_allowance(policy).token_budget());
+            }
+        }
         let response_items = items
             .iter()
             .map(|envelope| envelope.item.clone())
@@ -3437,7 +3503,7 @@ impl Session {
                 .note_recorded_items(&response_items);
             state
                 .history
-                .record_annotated_items(&items, turn_context.model_info().truncation_policy.into());
+                .record_annotated_items(&items, model_info.truncation_policy.into());
         }
         for image in image_preparations {
             self.services
@@ -3479,7 +3545,8 @@ impl Session {
             world_state.render_diff(&previous_snapshot),
         );
         if !items.is_empty() {
-            self.record_conversation_items(turn_context, &items).await;
+            self.record_conversation_items(turn_context, &step_context.settings.model_info, &items)
+                .await;
         }
 
         // ContextManager remembers this for later turns; run_turn owns the live value.
@@ -3671,13 +3738,10 @@ impl Session {
         });
         extension_data.insert(selected_plugins.clone());
         turn_context.extension_data.insert(selected_plugins);
-        // Tool availability still follows the admitted turn; the async message
-        // description comes from the captured step model.
         let tool_router = turn::built_tools(
             self.as_ref(),
             turn_context.as_ref(),
-            // TODO(CDXENT-441): use the step scoped model
-            turn_context.model_info(),
+            &settings.model_info,
             settings.model_info.model_messages.as_ref(),
             &environments,
             &mcp,
@@ -3686,8 +3750,7 @@ impl Session {
         )
         .or_cancel(cancellation_token)
         .await??;
-        // Publish inventory after planning rather than during finalization, so constructing
-        // additional candidate plans cannot overwrite turn-wide metadata.
+        // Publish inventory only after the step's tool plan has been finalized.
         if turn_context
             .config
             .tool_registry
@@ -3718,11 +3781,13 @@ impl Session {
     pub(crate) async fn record_inter_agent_communication(
         &self,
         turn_context: &TurnContext,
+        model_info: &ModelInfo,
         communication: InterAgentCommunication,
     ) {
         let response_item = communication.to_model_input_item();
         let (items, _) = self.prepare_conversation_items_for_history(
             turn_context,
+            model_info,
             std::slice::from_ref(&response_item),
         );
         let items = items.as_ref();
@@ -3730,10 +3795,7 @@ impl Session {
         {
             let mut state = self.state.lock().await;
             state.current_time_reminder.note_recorded_items(items);
-            state.record_items(
-                items.iter(),
-                turn_context.model_info().truncation_policy.into(),
-            );
+            state.record_items(items.iter(), model_info.truncation_policy.into());
         }
         self.persist_rollout_items(&[
             RolloutItem::InterAgentCommunicationMetadata {
@@ -3965,7 +4027,7 @@ impl Session {
                     session_store: &self.services.session_extension_data,
                     thread_store: &self.services.thread_extension_data,
                     turn_store: turn_context.extension_data.as_ref(),
-                    model_context_window: turn_context.model_context_window(),
+                    model_context_window: step_context.settings.model_info.usable_context_window(),
                 })
                 .await
             {
@@ -3978,11 +4040,15 @@ impl Session {
             .collect()
     }
 
+    /// `step_context` and `world_state` must come from the same captured step.
+    /// If more callers need this pair, bundle them into a captured-context struct
+    /// so callers cannot mix settings and WorldState from different steps.
     pub(crate) async fn build_initial_context_with_world_state(
         &self,
-        turn_context: &TurnContext,
+        step_context: &StepContext,
         world_state: &WorldState,
     ) -> Vec<ResponseItem> {
+        let turn_context = step_context.turn.as_ref();
         let mut developer_sections = Vec::<RenderedFragment>::with_capacity(8);
         let mut contextual_user_sections = Vec::<RenderedFragment>::with_capacity(2);
         let mut separate_developer_sections = Vec::<RenderedFragment>::new();
@@ -4063,7 +4129,7 @@ impl Session {
                     session_store: &self.services.session_extension_data,
                     thread_store: &self.services.thread_extension_data,
                     turn_store: turn_context.extension_data.as_ref(),
-                    model_context_window: turn_context.model_context_window(),
+                    model_context_window: step_context.settings.model_info.usable_context_window(),
                 })
                 .await
             {
@@ -4072,7 +4138,11 @@ impl Session {
         }
         // This is full-context metadata. Steady-state context diffs should not re-emit it.
         if turn_context.config.features.enabled(Feature::TokenBudget)
-            && turn_context.model_context_window().is_some()
+            && step_context
+                .settings
+                .model_info
+                .resolved_context_window()
+                .is_some()
         {
             // Keep the legacy bridge hint when native Notes is disabled. A failed
             // native request must not fall back to the bridge.
@@ -4292,7 +4362,7 @@ impl Session {
         };
         let (window_number, window_ids) = window;
         let context_items = self
-            .build_initial_context_with_world_state(turn_context, world_state.as_ref())
+            .build_initial_context_with_world_state(step_context, world_state.as_ref())
             .await
             .into_iter()
             .map(ResponseItemEnvelope::new)
@@ -4351,7 +4421,7 @@ impl Session {
         // Full initial context resets the baseline; later turns persist only its changes.
         let (mut context_items, world_state_item) = if should_inject_full_context {
             let context_items = self
-                .build_initial_context_with_world_state(turn_context, world_state.as_ref())
+                .build_initial_context_with_world_state(step_context, world_state.as_ref())
                 .await;
             let snapshot = world_state.snapshot();
             self.state
@@ -4387,8 +4457,12 @@ impl Session {
             return Ok(world_state);
         }
         if !context_items.is_empty() {
-            self.record_conversation_items(turn_context, &context_items)
-                .await;
+            self.record_conversation_items(
+                turn_context,
+                &step_context.settings.model_info,
+                &context_items,
+            )
+            .await;
         }
         // Persist state only after any model-visible context generated from it.
         if let Some(world_state_item) = world_state_item {
@@ -4611,11 +4685,16 @@ impl Session {
     pub(crate) async fn record_response_item_and_emit_turn_item(
         &self,
         turn_context: &TurnContext,
+        model_info: &ModelInfo,
         response_item: ResponseItem,
     ) {
         // Add to conversation history and persist response item to rollout.
-        self.record_conversation_items(turn_context, std::slice::from_ref(&response_item))
-            .await;
+        self.record_conversation_items(
+            turn_context,
+            model_info,
+            std::slice::from_ref(&response_item),
+        )
+        .await;
 
         // Derive a turn item and emit lifecycle events if applicable.
         if let Some(item) = parse_turn_item(&response_item) {
@@ -4627,6 +4706,7 @@ impl Session {
     pub(crate) async fn record_user_prompt_and_emit_turn_item(
         &self,
         turn_context: &TurnContext,
+        model_info: &ModelInfo,
         input: &[UserInput],
         client_id: Option<String>,
         acceptance_order: Option<u64>,
@@ -4638,6 +4718,7 @@ impl Session {
         let response_item = self.response_item_from_user_input(input.to_vec());
         self.record_annotated_conversation_items(
             turn_context,
+            model_info,
             vec![ResponseItemEnvelope {
                 item: response_item,
                 metadata: acceptance_order.map(|order| CodexHarnessMetadata {
