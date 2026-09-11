@@ -12,6 +12,48 @@ use core_test_support::streaming_sse::start_streaming_sse_server;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
+async fn archive_confirmation_number_keys_act_immediately() {
+    for key in ['1', '2'] {
+        let (mut app, mut rx, _op_rx) = crate::app::tests::make_test_app_with_channels().await;
+        let id = ThreadId::new();
+        app.agents_overview.threads.insert(
+            id,
+            Some(overview_thread(
+                id,
+                /*parent_thread_id*/ None,
+                "Current task",
+                ThreadStatus::Idle,
+            )),
+        );
+        app.confirm_agents_overview_action(id, AgentsOverviewAction::Archive);
+        insta::assert_snapshot!(
+            "archive_task_confirmation",
+            render_bottom_popup(&app.chat_widget, /*width*/ 72)
+        );
+
+        app.chat_widget.handle_key_event(KeyCode::Char(key).into());
+
+        assert!(!app.chat_widget.has_active_view());
+        let actions = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| match event {
+                AppEvent::RunAgentsOverviewAction { thread_id, action } => {
+                    Some((thread_id, action))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actions,
+            if key == '2' {
+                vec![(id, AgentsOverviewAction::Archive)]
+            } else {
+                Vec::new()
+            }
+        );
+    }
+}
+
+#[tokio::test]
 async fn lifecycle_shortcuts_target_filtered_task_in_any_state() {
     let mut app = make_test_app().await;
     let mut keymap = TuiKeymap::default();
@@ -315,7 +357,7 @@ async fn lifecycle_removes_background_and_current_tasks_without_losing_the_dashb
         };
         let mut tui = crate::tui::test_support::make_test_tui()?;
         tui.pause_events();
-        app.open_agents_overview(&app_server);
+        app.open_agents_overview(&app_server, AgentsOverviewFocus::List);
         if action == AgentsOverviewAction::Archive {
             let rollout = app_server
                 .thread_read(id, /*include_turns*/ false)
@@ -360,7 +402,7 @@ async fn lifecycle_removes_background_and_current_tasks_without_losing_the_dashb
             .await?;
             app.enqueue_primary_thread_session(resumed.session, resumed.turns)
                 .await?;
-            app.open_agents_overview(&app_server);
+            app.open_agents_overview(&app_server, AgentsOverviewFocus::List);
         }
         let background = ThreadId::from_string(
             &app_test_support::create_fake_rollout(
@@ -434,7 +476,6 @@ async fn lifecycle_removes_background_and_current_tasks_without_losing_the_dashb
             render_bottom_popup(&app.chat_widget, /*width*/ 80)
         );
         app.chat_widget.handle_key_event(KeyCode::Enter.into());
-        app.chat_widget.handle_key_event(KeyCode::Esc.into());
         app_server
             .request_handle()
             .request_typed::<TurnStartResponse>(ClientRequest::TurnStart {

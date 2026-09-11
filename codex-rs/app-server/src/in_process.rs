@@ -114,6 +114,7 @@ fn server_notification_requires_delivery(notification: &ServerNotification) -> b
         ServerNotification::TurnCompleted(_)
             | ServerNotification::ThreadQueueChanged(_)
             | ServerNotification::ThreadSettingsUpdated(_)
+            | ServerNotification::ThreadAttachmentUpdated(_)
             | ServerNotification::ExternalAgentConfigImportCompleted(_)
             | ServerNotification::ItemCompleted(ItemCompletedNotification {
                 item: ThreadItem::AgentMessage {
@@ -805,6 +806,8 @@ mod tests {
     use codex_app_server_protocol::ConfigRequirementsReadResponse;
     use codex_app_server_protocol::ExternalAgentConfigImportCompletedNotification;
     use codex_app_server_protocol::SessionSource as ApiSessionSource;
+    use codex_app_server_protocol::ThreadAttachmentOperation;
+    use codex_app_server_protocol::ThreadAttachmentUpdatedNotification;
     use codex_app_server_protocol::ThreadQueueChangedNotification;
     use codex_app_server_protocol::ThreadStartParams;
     use codex_app_server_protocol::ThreadStartResponse;
@@ -1006,7 +1009,7 @@ mod tests {
     }
 
     #[test]
-    fn guaranteed_delivery_helpers_cover_terminal_server_notifications() {
+    fn guaranteed_delivery_helpers_cover_required_server_notifications() {
         assert!(server_notification_requires_delivery(
             &ServerNotification::TurnCompleted(TurnCompletedNotification {
                 thread_id: "thread-1".to_string(),
@@ -1034,6 +1037,15 @@ mod tests {
                     item_type_results: Vec::new(),
                 },
             )
+        ));
+        assert!(server_notification_requires_delivery(
+            &ServerNotification::ThreadAttachmentUpdated(ThreadAttachmentUpdatedNotification {
+                thread_id: "thread-1".to_string(),
+                attachment_type: "pull_request".to_string(),
+                identity_key: r#"["github.com","openai","codex",123]"#.to_string(),
+                attachment_id: "attachment-1".to_string(),
+                operation: ThreadAttachmentOperation::Deleted,
+            })
         ));
         assert!(server_notification_requires_delivery(
             &ServerNotification::ItemCompleted(ItemCompletedNotification {
