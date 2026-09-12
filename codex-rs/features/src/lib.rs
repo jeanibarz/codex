@@ -215,6 +215,8 @@ pub enum Feature {
     CodexAppsMcp20260728,
     /// Let RMCP coordinate OAuth refresh through the configured credential store.
     McpOAuthRefreshCoordination,
+    /// Enable enterprise refresh-token authorization for configured MCP resources.
+    UseXaa,
     /// Removed compatibility flag for the legacy Apps MCP path override.
     AppsMcpPathOverride,
     /// Removed compatibility flag retained as a no-op now that tool_search is always enabled.
@@ -346,7 +348,7 @@ pub enum Feature {
     FastMode,
     /// Enable explicitly requested model changes for later step captures.
     StepModelSwitching,
-    /// Removed compatibility flag. Realtime sessions no longer require a per-thread opt-in.
+    /// Enable voice conversations in the TUI.
     RealtimeConversation,
     /// Prevent idle system sleep while a turn is actively running.
     PreventIdleSleep,
@@ -1252,12 +1254,8 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::Worktrees,
         key: "worktrees",
-        stage: Stage::Experimental {
-            name: "Worktrees",
-            menu_description: "Create isolated Git worktrees and group sessions by repository.",
-            announcement: "NEW: Worktrees can now be enabled from /experimental. Restart Codex after enabling it.",
-        },
-        default_enabled: false,
+        stage: Stage::Stable,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::RespectSystemProxy,
@@ -1322,6 +1320,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::McpOAuthRefreshCoordination,
         key: "mcp_oauth_refresh_coordination",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::UseXaa,
+        key: "use_xaa",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
@@ -1688,12 +1692,8 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::RealtimeConversation,
         key: "realtime_conversation",
-        stage: Stage::Experimental {
-            name: "Voice conversations",
-            menu_description: "Talk with Codex using /voice.",
-            announcement: "NEW: Voice conversations can now be enabled from /experimental. Restart Codex after enabling, then use /voice.",
-        },
-        default_enabled: false,
+        stage: Stage::Stable,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::RemoteControl,

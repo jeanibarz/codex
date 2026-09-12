@@ -9,6 +9,15 @@
 //! The plain-text preset keeps command prefixes literal, including `!`, so Enter and Tab
 //! submit ordinary text without enabling shell mode.
 //!
+//! # Astra Sparkle
+//!
+//! Selecting Astra animates stars in the untouched composer for 15 seconds from its first visible
+//! frame, then fades them smoothly for one second. The deadline runs even without terminal focus.
+//! Keys, paste, an existing draft, voice input, or a popup start a quick fade; offline Enter and
+//! Tab do too. Placeholder and draft text, including spaces, stay unchanged. Mouse reporting stays
+//! disabled for native selection and scrolling; hover or selection alone does not stop the stars.
+//! Reselecting Astra starts a new flourish.
+//!
 //! # Mention Menus
 //!
 //! By default, `@` lists plugins, filesystem entries, and skills. Skills are hidden when their
@@ -559,7 +568,6 @@ pub(crate) struct ChatComposer {
     service_tier_commands: Vec<ServiceTierCommand>,
     mentions_v2_enabled: bool,
     goal_command_enabled: bool,
-    personality_command_enabled: bool,
     voice_command_enabled: bool,
     worktrees_enabled: bool,
     windows_degraded_sandbox_active: bool,
@@ -725,7 +733,6 @@ impl ChatComposer {
             service_tier_commands: Vec::new(),
             mentions_v2_enabled: false,
             goal_command_enabled: false,
-            personality_command_enabled: false,
             voice_command_enabled: false,
             worktrees_enabled: false,
             windows_degraded_sandbox_active: false,
@@ -1006,10 +1013,6 @@ impl ChatComposer {
         self.footer.ide_context_active = active;
     }
 
-    pub fn set_personality_command_enabled(&mut self, enabled: bool) {
-        self.personality_command_enabled = enabled;
-    }
-
     pub fn set_side_conversation_active(&mut self, active: bool) {
         self.side_conversation_active = active;
     }
@@ -1227,6 +1230,7 @@ impl ChatComposer {
     /// In all cases, clears any paste-burst Enter suppression state so a real paste cannot affect
     /// the next user Enter key, then syncs popup state.
     pub fn handle_paste(&mut self, pasted: String) -> bool {
+        self.interact_with_astra_sparkle();
         let pasted = pasted.replace("\r\n", "\n").replace('\r', "\n");
         let pasted = sanitize_user_text(pasted.into());
         if let Some(query) = self.draft.textarea.vim_query_mut() {
@@ -2028,6 +2032,7 @@ impl ChatComposer {
             return (InputResult::None, false);
         }
 
+        self.interact_with_astra_sparkle();
         if self.history_search.is_none()
             && !self.popups.active()
             && self.draft.textarea.wants_vim_search_key(key_event)
@@ -5068,6 +5073,7 @@ impl ChatComposer {
         if self.astra_sparkle.is_some() {
             self.render_sparkle(
                 composer_rect,
+                textarea_rect,
                 self.cursor_pos_with_textarea_right_reserve(area, textarea_right_reserve),
                 buf,
             );
@@ -5167,39 +5173,6 @@ mod tests {
                 composer.footer.mode = FooterMode::ShortcutOverlay;
             },
         );
-    }
-
-    #[test]
-    fn parent_owned_thread_allows_bare_navigation_commands() {
-        for (command, expected) in [
-            ("/agents", SlashCommand::Agents),
-            ("/subagents", SlashCommand::MultiAgents),
-            ("/side", SlashCommand::Side),
-            ("/btw", SlashCommand::Btw),
-            ("/diff ", SlashCommand::Diff),
-        ] {
-            let (mut composer, _rx) = new_test_composer();
-            composer.set_parent_owned_thread();
-            composer.set_text_content(command.to_string(), Vec::new(), Vec::new());
-
-            assert_eq!(
-                composer.handle_submission(/*should_queue*/ false).0,
-                InputResult::Command(expected)
-            );
-        }
-    }
-
-    #[test]
-    fn parent_owned_thread_allows_safe_command_selected_from_prefix() {
-        let (mut composer, _rx) = new_test_composer();
-        composer.set_parent_owned_thread();
-        type_chars_humanlike(&mut composer, &['/', 'a', 'g']);
-
-        let result = composer
-            .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
-            .0;
-
-        assert_eq!(result, InputResult::Command(SlashCommand::Agents));
     }
 
     #[test]

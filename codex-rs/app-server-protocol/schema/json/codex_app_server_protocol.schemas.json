@@ -691,30 +691,6 @@
             },
             "method": {
               "enum": [
-                "thread/rollback"
-              ],
-              "title": "Thread/rollbackRequestMethod",
-              "type": "string"
-            },
-            "params": {
-              "$ref": "#/definitions/v2/ThreadRollbackParams"
-            }
-          },
-          "required": [
-            "id",
-            "method",
-            "params"
-          ],
-          "title": "Thread/rollbackRequest",
-          "type": "object"
-        },
-        {
-          "properties": {
-            "id": {
-              "$ref": "#/definitions/v2/RequestId"
-            },
-            "method": {
-              "enum": [
                 "thread/revert"
               ],
               "title": "Thread/revertRequestMethod",
@@ -14692,6 +14668,9 @@
             ],
             "description": "Current thread-runtime connection state; null when unavailable or the configuration changed."
           },
+          "serverCapabilities": {
+            "description": "Capabilities advertised by the initialized MCP server; null when unavailable."
+          },
           "serverInfo": {
             "anyOf": [
               {
@@ -15112,6 +15091,18 @@
               }
             ]
           },
+          "availableAccessPrograms": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ModelAccessPrograms"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Null when the catalog does not provide access-program metadata."
+          },
           "defaultReasoningEffort": {
             "$ref": "#/definitions/v2/ReasoningEffort"
           },
@@ -15212,6 +15203,22 @@
           "isDefault",
           "model",
           "supportedReasoningEfforts"
+        ],
+        "type": "object"
+      },
+      "ModelAccessPrograms": {
+        "description": "Caller-specific explicit access programs advertised by model discovery.",
+        "properties": {
+          "cyber": {
+            "description": "Accepted explicit selections.",
+            "items": {
+              "$ref": "#/definitions/v2/CyberAccessProgram"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "cyber"
         ],
         "type": "object"
       },
@@ -20576,7 +20583,7 @@
             "description": "Optional analytics source classification for this thread."
           },
           "turns": {
-            "description": "Only populated on `thread/resume`, `thread/rollback`, `thread/fork`, and `thread/read` (when `includeTurns` is true) responses. For all other responses and notifications returning a Thread, the turns field will be an empty list.",
+            "description": "Only populated on `thread/resume`, `thread/fork`, and `thread/read` (when `includeTurns` is true) responses. For all other responses and notifications returning a Thread, the turns field will be an empty list.",
             "items": {
               "$ref": "#/definitions/v2/Turn"
             },
@@ -21078,6 +21085,14 @@
           },
           "cwd": {
             "$ref": "#/definitions/v2/AbsolutePathBuf"
+          },
+          "disabledPluginIds": {
+            "default": [],
+            "description": "Saved list of disabled plugin IDs. Does not yet filter plugin capabilities.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "instructionSources": {
             "default": [],
@@ -23327,6 +23342,14 @@
           "cwd": {
             "$ref": "#/definitions/v2/AbsolutePathBuf"
           },
+          "disabledPluginIds": {
+            "default": [],
+            "description": "Saved list of disabled plugin IDs. Does not yet filter plugin capabilities.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "instructionSources": {
             "default": [],
             "description": "Environment-native paths to instruction source files currently loaded for this thread.",
@@ -23459,45 +23482,6 @@
           "threadId"
         ],
         "title": "ThreadRevertedNotification",
-        "type": "object"
-      },
-      "ThreadRollbackParams": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "description": "DEPRECATED: `thread/rollback` will be removed soon.",
-        "properties": {
-          "numTurns": {
-            "description": "The number of turns to drop from the end of the thread. Must be >= 1.\n\nThis only modifies the thread's history and does not revert local file changes that have been made by the agent. Clients are responsible for reverting these changes.",
-            "format": "uint32",
-            "minimum": 0.0,
-            "type": "integer"
-          },
-          "threadId": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "numTurns",
-          "threadId"
-        ],
-        "title": "ThreadRollbackParams",
-        "type": "object"
-      },
-      "ThreadRollbackResponse": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "properties": {
-          "thread": {
-            "allOf": [
-              {
-                "$ref": "#/definitions/v2/Thread"
-              }
-            ],
-            "description": "The updated thread after applying the rollback, with `turns` populated.\n\nThe ThreadItems stored in each Turn are lossy since we explicitly do not persist all agent interactions, such as command executions. This is the same behavior as `thread/resume`."
-          }
-        },
-        "required": [
-          "thread"
-        ],
-        "title": "ThreadRollbackResponse",
         "type": "object"
       },
       "ThreadSearchResult": {
@@ -23806,6 +23790,14 @@
           "cwd": {
             "$ref": "#/definitions/v2/AbsolutePathBuf"
           },
+          "disabledPluginIds": {
+            "default": [],
+            "description": "Saved list of disabled plugin IDs. Does not yet filter plugin capabilities.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "effort": {
             "anyOf": [
               {
@@ -24078,6 +24070,14 @@
           },
           "cwd": {
             "$ref": "#/definitions/v2/AbsolutePathBuf"
+          },
+          "disabledPluginIds": {
+            "default": [],
+            "description": "Saved list of disabled plugin IDs. Does not yet filter plugin capabilities.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "instructionSources": {
             "default": [],
@@ -25106,6 +25106,16 @@
             "description": "Override the working directory for this turn and subsequent turns.",
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "disabledPluginIds": {
+            "description": "Replace this thread's disabled plugin IDs. Omitted/null preserves the list; [] clears it.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
               "null"
             ]
           },

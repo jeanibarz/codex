@@ -69,6 +69,8 @@ mod transcript_composer;
 mod turn_submission;
 #[path = "tests/user_verification_routes_tests.rs"]
 mod user_verification_routes;
+#[path = "tests/worktree_background_terminals_tests.rs"]
+mod worktree_background_terminals_tests;
 
 use super::*;
 use crate::app_backtrack::BacktrackSelection;
@@ -398,6 +400,7 @@ async fn handle_mcp_inventory_result_respects_origin_thread() {
 
     app.handle_mcp_inventory_result(
         Ok(vec![McpServerStatus {
+            server_capabilities: None,
             tools_error: None,
             name: "docs".to_string(),
             runtime_status: None,
@@ -7629,9 +7632,8 @@ async fn remote_resume_keeps_server_only_cwd_out_of_local_config() -> Result<()>
             auth_token: None,
         },
     };
-    let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config))
-        .await?
-        .with_remote_cwd_override(Some(remote_cwd.clone()));
+    app.harness_overrides.cwd = Some(remote_cwd.clone());
+    let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
     app_server
         .resume_thread(
             &crate::local_settings::LocalSettings::from(&app.config),
@@ -7666,7 +7668,7 @@ async fn remote_resume_keeps_server_only_cwd_out_of_local_config() -> Result<()>
         .await?;
 
     assert!(matches!(control, AppRunControl::Continue));
-    assert_eq!(app_server.remote_cwd_override(), Some(remote_cwd.as_path()));
+    assert_eq!(app.harness_overrides.cwd, Some(remote_cwd));
     assert!(!crate::session_resume::cwds_differ(
         app.config.cwd.as_path(),
         &local_cwd,
@@ -8706,6 +8708,7 @@ async fn override_turn_context_sends_thread_settings_update() {
         let thread_id = started.session.thread_id;
         let initial_model = started.session.model.clone();
         let initial_effort = started.session.reasoning_effort.clone();
+        let initial_personality = started.session.personality;
         app.enqueue_primary_thread_session(started.session, started.turns)
             .await
             .expect("primary thread should be registered");
@@ -8779,8 +8782,8 @@ async fn override_turn_context_sends_thread_settings_update() {
             collaboration_mode.settings.reasoning_effort
         );
         assert_eq!(
-            notification.thread_settings.personality,
-            Some(Personality::Pragmatic)
+            notification.thread_settings.personality, initial_personality,
+            "the Pragmatic turn override should not change personality"
         );
 
         app.handle_app_server_event(
@@ -8809,7 +8812,7 @@ async fn override_turn_context_sends_thread_settings_update() {
             updated_mode.settings.reasoning_effort,
             collaboration_mode.settings.reasoning_effort
         );
-        assert_eq!(updated_session.personality, Some(Personality::Pragmatic));
+        assert_eq!(updated_session.personality, initial_personality);
         assert_eq!(updated_session.service_tier, Some(service_tier));
         assert_eq!(updated_session.approval_policy, AskForApproval::OnRequest);
         assert_eq!(
@@ -9234,6 +9237,7 @@ async fn inactive_thread_settings_notification_updates_cached_collaboration_mode
     let notification = ThreadSettingsUpdatedNotification {
         thread_id: inactive_thread_id.to_string(),
         thread_settings: ThreadSettings {
+            disabled_plugin_ids: Vec::new(),
             cwd: test_absolute_path("/tmp/thread-settings"),
             approval_policy: AskForApproval::OnRequest,
             approvals_reviewer: codex_app_server_protocol::ApprovalsReviewer::AutoReview,
