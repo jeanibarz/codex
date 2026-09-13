@@ -10,7 +10,6 @@ use std::sync::atomic::Ordering;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::ensure;
-use codex_windows_sandbox::clean_up_packaged_windows_sandbox;
 use codex_windows_sandbox::string_from_sid_bytes;
 use windows::ApplicationModel::Package;
 use windows::ApplicationModel::PackageCatalog;
@@ -31,6 +30,8 @@ use windows_sys::Win32::System::RemoteDesktop::WTSQueryUserToken;
 use crate::installation_record::DesktopInstallation;
 use crate::installation_record::InstallationRecord;
 use crate::ipc::OwnedHandle;
+
+mod cleanup;
 
 struct UserInstallation {
     codex_home: Option<PathBuf>,
@@ -187,61 +188,7 @@ impl PackageLifecycle {
         let installation = installation
             .as_mut()
             .context("the authenticated package installation was not recorded")?;
-        crate::service::log_information(
-            crate::service::EVENT_CLEANUP_STARTED,
-            "sandbox uninstall cleanup started",
-        );
-        // A partial uninstall must not let a later install inherit stale directory ownership.
-        crate::installation_record::remove()?;
-        let codex_home = installation.codex_home.clone();
-        clean_up_packaged_windows_sandbox(codex_home.as_deref(), || {
-            let Some(desktop) = &installation.desktop_installation else {
-                return Ok(());
-            };
-            // The marker is user-writable. It must never authorize deletion as LocalSystem.
-            with_owner_impersonation(installation.user_token.0, || {
-                let mut errors = Vec::new();
-                let mut record_error = |result: io::Result<()>| {
-                    if let Err(error) = result
-                        && error.kind() != io::ErrorKind::NotFound
-                    {
-                        errors.push(error.to_string());
-                    }
-                };
-                if let Some(home) = &codex_home
-                    && desktop.created_codex_home
-                {
-                    // Release the home itself so it can be deleted; keep its ancestors pinned.
-                    installation.directory_handles.pop();
-                    record_error(std::fs::remove_dir_all(home));
-                }
-                // The cache may have been created after provisioning. Pin it only for cleanup.
-                let mut cache_directory_handles = Vec::new();
-                if desktop.cache_home.is_dir() {
-                    match crate::ipc::pin_existing_ancestors(
-                        &desktop.cache_home,
-                        &mut cache_directory_handles,
-                    ) {
-                        Ok(()) => record_error(std::fs::remove_dir_all(
-                            desktop.cache_home.join("codex-runtimes"),
-                        )),
-                        Err(error) => errors.push(error.to_string()),
-                    }
-                }
-                ensure!(
-                    errors.is_empty(),
-                    "remove desktop directories: {}",
-                    errors.join("; ")
-                );
-                Ok(())
-            })
-        })
-        .context("remove packaged Windows sandbox resources")?;
-        crate::service::log_information(
-            crate::service::EVENT_CLEANUP_FINISHED,
-            "sandbox uninstall cleanup finished",
-        );
-        Ok(())
+        cleanup::clean_up(installation)
     }
 }
 

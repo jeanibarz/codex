@@ -4,19 +4,10 @@
 //! completed slash commands to atomic elements, and handles Enter submission/newlines.
 //! It also shows Luna Reserve's yellow prompt arrow and detects unbracketed paste bursts
 //! from raw key streams, particularly on Windows.
-//! The live voice strip renders after effort ignition and before stars, which skip its text.
+//! The live voice strip renders after effort ignition.
 //!
 //! The plain-text preset keeps command prefixes literal, including `!`, so Enter and Tab
 //! submit ordinary text without enabling shell mode.
-//!
-//! # Astra Sparkle
-//!
-//! Selecting Astra animates stars in the untouched composer for 15 seconds from its first visible
-//! frame, then fades them smoothly for one second. The deadline runs even without terminal focus.
-//! Keys, paste, an existing draft, voice input, or a popup start a quick fade; offline Enter and
-//! Tab do too. Placeholder and draft text, including spaces, stay unchanged. Mouse reporting stays
-//! disabled for native selection and scrolling; hover or selection alone does not stop the stars.
-//! Reselecting Astra starts a new flourish.
 //!
 //! # Mention Menus
 //!
@@ -325,7 +316,6 @@ mod inline_input;
 mod popup_state;
 mod reconnect;
 mod slash_input;
-mod sparkle;
 mod vim_history;
 mod vim_search;
 
@@ -541,7 +531,6 @@ pub(crate) struct ChatComposer {
     effort_animation_style: Option<IgnitionStyle>,
     effort_ignition: Option<EffortIgnition>,
     voice_strip: Option<VoiceStrip>,
-    astra_sparkle: Option<sparkle::Sparkle>,
     effort_status_line_transition: Option<EffortStatusLineTransition>,
     effort_observed: bool,
     luna_reserve_active: bool,
@@ -710,7 +699,6 @@ impl ChatComposer {
             effort_animation_style: None,
             effort_ignition: None,
             voice_strip: None,
-            astra_sparkle: None,
             effort_status_line_transition: None,
             effort_observed: false,
             luna_reserve_active: false,
@@ -1230,7 +1218,6 @@ impl ChatComposer {
     /// In all cases, clears any paste-burst Enter suppression state so a real paste cannot affect
     /// the next user Enter key, then syncs popup state.
     pub fn handle_paste(&mut self, pasted: String) -> bool {
-        self.interact_with_astra_sparkle();
         let pasted = pasted.replace("\r\n", "\n").replace('\r', "\n");
         let pasted = sanitize_user_text(pasted.into());
         if let Some(query) = self.draft.textarea.vim_query_mut() {
@@ -2032,7 +2019,6 @@ impl ChatComposer {
             return (InputResult::None, false);
         }
 
-        self.interact_with_astra_sparkle();
         if self.history_search.is_none()
             && !self.popups.active()
             && self.draft.textarea.wants_vim_search_key(key_event)
@@ -5070,14 +5056,6 @@ impl ChatComposer {
         }
         drop(state);
         self.render_voice_strip(composer_rect, buf);
-        if self.astra_sparkle.is_some() {
-            self.render_sparkle(
-                composer_rect,
-                textarea_rect,
-                self.cursor_pos_with_textarea_right_reserve(area, textarea_right_reserve),
-                buf,
-            );
-        }
     }
 }
 
@@ -5092,6 +5070,10 @@ mod effort_tests;
 #[cfg(test)]
 #[path = "chat_composer/embedded_input_tests.rs"]
 mod embedded_input_tests;
+
+#[cfg(test)]
+#[path = "chat_composer/snapshot_tests.rs"]
+mod snapshot_tests;
 
 #[cfg(test)]
 mod tests {

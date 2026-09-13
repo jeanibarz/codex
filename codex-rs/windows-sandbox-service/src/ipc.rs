@@ -10,14 +10,13 @@ mod request;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
+pub(crate) use authentication::ClientIdentity;
 use authentication::authenticate_client;
 use codex_windows_sandbox::FramedProvisioningMessage;
 use codex_windows_sandbox::PROVISIONING_PROTOCOL_VERSION;
 use codex_windows_sandbox::ProvisioningMessage;
 use codex_windows_sandbox::SandboxProvisioningResponse;
 use codex_windows_sandbox::ensure_sandbox_users_group;
-use codex_windows_sandbox::run_elevated_provisioning_setup_with_retained_handles;
-use codex_windows_sandbox::sandbox_setup_is_complete_with_settings;
 use codex_windows_sandbox::string_from_sid_bytes;
 use codex_windows_sandbox::to_wide;
 use codex_windows_sandbox::write_provisioning_frame;
@@ -27,8 +26,6 @@ pub(crate) use home::pin_existing_ancestors;
 use request::ProvisioningRequest;
 use request::validate_request;
 use std::mem::size_of;
-use std::os::windows::fs::MetadataExt;
-use std::os::windows::io::BorrowedHandle;
 use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -338,66 +335,7 @@ fn handle_request(
         return Err(error)
             .context("requested sandbox settings violate administrator-controlled machine policy");
     }
-    // A policy-rejected request must not choose the uninstall owner. Use the
-    // token already authenticated above instead of impersonating the pipe again.
-    let previous = crate::installation_record::load()?.filter(|record| {
-        record.user_sid == identity.user_sid && record.codex_home == identity.codex_home
-    });
-    let installation = InstallationRecord {
-        codex_home: identity.codex_home.clone(),
-        user_sid: identity.user_sid,
-        session_id: identity.session_id,
-        desktop_installation: previous
-            .and_then(|record| record.desktop_installation)
-            .or(identity.desktop_installation),
-    };
-    on_authenticated_user(&installation, identity.token)?;
-    if sandbox_setup_is_complete_with_settings(&identity.codex_home, &request.settings) {
-        crate::service::record_provisioned_user(&installation)?;
-        return Ok(SandboxProvisioningResponse::Ok);
-    }
-    let helper = std::env::current_exe()
-        .context("locate the provisioning service executable")?
-        .with_file_name("codex-windows-sandbox-setup.exe");
-    let helper_metadata = helper
-        .symlink_metadata()
-        .with_context(|| format!("inspect packaged setup helper {}", helper.display()))?;
-    if !helper_metadata.is_file()
-        || helper_metadata.file_attributes() & filesystem::FILE_ATTRIBUTE_REPARSE_POINT != 0
-    {
-        bail!(
-            "refusing invalid packaged setup helper {}",
-            helper.display()
-        );
-    }
-    let retained_handles = identity
-        .directory_handles
-        .iter()
-        // The identity owns these handles through the synchronous helper launch and wait.
-        .map(|handle| unsafe { BorrowedHandle::borrow_raw(handle.0 as _) })
-        .collect::<Vec<_>>();
-    match run_elevated_provisioning_setup_with_retained_handles(
-        &identity.codex_home,
-        &identity.account,
-        request.settings,
-        &retained_handles,
-    ) {
-        Ok(()) => {
-            crate::service::record_provisioned_user(&installation)?;
-            crate::service::log_information(
-                crate::service::EVENT_PROVISIONING_SUCCEEDED,
-                "Codex sandbox provisioning completed successfully.",
-            );
-            Ok(SandboxProvisioningResponse::Ok)
-        }
-        Err(error) => {
-            crate::service::log_error(
-                crate::service::EVENT_PROVISIONING_FAILED,
-                &format!("Codex sandbox provisioning failed: {error}"),
-            );
-            Err(error).context("sandbox provisioning failed")
-        }
-    }
+    crate::provisioning::run(identity, request.settings, on_authenticated_user)
 }
 
 fn is_config_parse_error(error: &anyhow::Error) -> bool {
