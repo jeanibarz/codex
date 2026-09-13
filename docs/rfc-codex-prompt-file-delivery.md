@@ -18,10 +18,12 @@ that lack it — see §5.2 and §6 row E.
 ## 2. Problem & evidence (verified)
 
 ### Symptom
+
 A kookr-launched Codex task starts and does nothing; the prompt is never visible.
 Reported instance: task `46f60757-8657-4e98-aa99-f21ffbc74b27`.
 
 ### Verified facts
+
 - **Task `46f60757`** — `~/.kookr/tasks.json`: `agentType: codex-cli`,
   `status: inProgress`, prompt length **23,468 bytes** (~23 KiB — small; not an
   `ARG_MAX` case).
@@ -30,7 +32,7 @@ Reported instance: task `46f60757-8657-4e98-aa99-f21ffbc74b27`.
   is a `codex-tui` session containing **exactly one line** (session meta) — it
   started and submitted nothing.
 - **The bug is intermittent.** A scan of recent `codex-tui` rollouts shows the
-  *majority* received their prompt as the first user message (pre-PR-review
+  _majority_ received their prompt as the first user message (pre-PR-review
   specialist sessions, checkpoint-resume sessions, etc.). Only some sessions
   drop it. This is the signature of a **race**, not a systematic failure.
 - **`E2BIG` for large prompts is real** — kookr issue **#319**: pasting a
@@ -39,12 +41,13 @@ Reported instance: task `46f60757-8657-4e98-aa99-f21ffbc74b27`.
   PR #337 fixed #319 by moving to terminal-write — which introduced this race.
 
 ### Correction to PR #352's evidence
+
 PR #352 cites rollout `…23-27-00…019e2862…` as the bug, reading its first
 `user_message: "continue"` as "the user typed continue because the prompt was
 dropped." **That reading is wrong.** kookr's ralph-loop relaunches a looped task
 with the literal prompt `"continue"` (`ralph-loop-service`:
 `launchFreshTaskSession(task, 'continue', …)`). In that rollout the real task
-prompt arrives normally as the *second* user message. That rollout is a healthy
+prompt arrives normally as the _second_ user message. That rollout is a healthy
 ralph continuation, not a dropped prompt. The bug is real (see above) — but
 PR #352's specific artifact does not demonstrate it, and its 100 KiB threshold
 is calibrated against a misread.
@@ -52,13 +55,15 @@ is calibrated against a misread.
 ## 3. Root cause
 
 ### 3.1 What kookr does today
+
 `CodexCliAdapter.launch()` (after kookr PR #337) builds an argv **without** the
 prompt, spawns Codex through the dtach/terminal backend, then calls
 `deliverInitialPromptToSession()` — which writes the prompt bytes + `Enter` to
 the PTY after spawn.
 
 ### 3.2 Why the post-spawn terminal write is racy
-Delivering the prompt as PTY bytes *after* spawn depends on Codex's terminal
+
+Delivering the prompt as PTY bytes _after_ spawn depends on Codex's terminal
 input pipeline being in the right state at the right moment. Two mechanisms can
 each swallow those bytes; this RFC does **not** need to pin which one fires in a
 given session, because the proposed fix removes the terminal-write path entirely:
@@ -76,6 +81,7 @@ given session, because the proposed fix removes the terminal-write path entirely
    **inert** for kookr sessions.
 
 ### 3.3 Why a CLI-argument prompt is structurally race-free
+
 A prompt supplied as the positional `PROMPT` argument never touches the PTY:
 `cli.prompt` → `App::run(prompt)` → `initial_prompt` → `create_initial_user_message()`
 → `ChatWidget.initial_user_message`, submitted by the widget once the thread is
@@ -84,6 +90,7 @@ feeds this exact path by populating `cli.prompt` — it inherits the race-free
 property without re-implementing anything.
 
 ### 3.4 Why not PR #352
+
 PR #352 keeps **both** paths and branches on a 100 KiB size threshold. It works,
 but: it keeps the racy terminal-write path alive for large prompts; it adds a
 runtime branch on a magic number (calibrated against the misread evidence of
@@ -97,12 +104,13 @@ on TUI timing or PTY state); handles the `E2BIG` case (#319) by construction;
 minimal, contained change.
 
 **Non-goals:** changing follow-up `sendInput` delivery (genuine interactive
-input, sent when the TUI *is* ready); changing the Claude Code adapter (its
+input, sent when the TUI _is_ ready); changing the Claude Code adapter (its
 terminal-write path works); `codex exec` headless mode.
 
 ## 5. Proposed solution
 
 ### 5.1 Codex fork: add `--prompt-file <PATH>`
+
 A general CLI option — read the initial prompt from a file instead of the
 positional `PROMPT`.
 
@@ -141,7 +149,7 @@ code). The two correctness traps the critic review found are explicitly handled:
 - **`merge_interactive_cli_flags` (`main.rs:2007`) destructures `TuiCli` with `..`**
   — a `--prompt-file` passed to `codex resume`/`codex fork` would be silently
   dropped. Fix: add `prompt_file` to that destructure and merge it like `prompt`.
-  (kookr's adapter launches the *base* `codex` command and never resumes, so this
+  (kookr's adapter launches the _base_ `codex` command and never resumes, so this
   is not on kookr's hot path — but leaving a silently-dropped flag is the exact
   failure class this RFC exists to kill.)
 - **`run_debug_prompt_input_command` (`main.rs:1543`)** also reads
@@ -157,6 +165,7 @@ one extra line in `merge_interactive_cli_flags`. No change to `App::run`,
 `create_initial_user_message`, submission, or `skip_update_prompt`.
 
 ### 5.2 Kookr: write the prompt as a launch artifact
+
 `src/adapters/codex-cli-adapter.ts` — treat the prompt like the `--settings`
 JSON: write it next to the settings file, pass its path, drop the terminal
 write. Whether to use `--prompt-file` is **capability-probed** once per adapter
@@ -171,13 +180,25 @@ if (promptFileSupported && this.writeFile) {
   await this.writeFile(promptPath, promptWithCheckpoint);
 }
 
-const args = ['-c', 'features.codex_hooks=true', permissionFlagStr,
-              '--settings', settingsPath];
-if (promptFileSupported) args.push('--prompt-file', promptPath);
+const args = [
+  "-c",
+  "features.codex_hooks=true",
+  permissionFlagStr,
+  "--settings",
+  settingsPath,
+];
+if (promptFileSupported) args.push("--prompt-file", promptPath);
 // … existing --plugin-dir injection unchanged …
 if (!promptFileSupported) args.push(promptWithCheckpoint); // positional fallback, last
 
-await this.backend.createSession({ id: tmuxName, command: this.agentBin, args, env, cwd, size });
+await this.backend.createSession({
+  id: tmuxName,
+  command: this.agentBin,
+  args,
+  env,
+  cwd,
+  size,
+});
 // deliverInitialPromptToSession() call REMOVED for codex.
 ```
 
@@ -193,9 +214,10 @@ await this.backend.createSession({ id: tmuxName, command: this.agentBin, args, e
   constant and boundary tests are never introduced.
 
 ### 5.3 Why this is race-free
+
 - kookr `await`s the file write **before** `createSession()`, so the file is
   fully written before Codex is spawned. The file lives on the local Linux
-  filesystem (`~/.kookr/…`, ext4 — *not* a `/mnt/c` 9p mount), so its page cache
+  filesystem (`~/.kookr/…`, ext4 — _not_ a `/mnt/c` 9p mount), so its page cache
   is coherent across processes; a read after the completed write sees the data.
   This is the **same property the existing `--settings <path>` already relies
   on** — if it did not hold, `--settings` would already be broken.
@@ -203,20 +225,20 @@ await this.backend.createSession({ id: tmuxName, command: this.agentBin, args, e
 - The file-sourced prompt populates `cli.prompt` ⇒ identical to a positional
   prompt: no PTY, no composer timing, no paste heuristic, and `skip_update_prompt`
   is set.
-- The `--plugin-dir`-style capability probe means the *intended* config (the
+- The `--plugin-dir`-style capability probe means the _intended_ config (the
   kookr-fork) always takes the single `--prompt-file` path; the positional-argv
   fallback is reached only by binaries lacking the flag, and is itself race-free
   (argv, not a terminal write) — just bounded by `ARG_MAX`. This is a
-  **capability** branch, not the prompt-*size* branch PR #352 was rejected for.
+  **capability** branch, not the prompt-_size_ branch PR #352 was rejected for.
 
 ## 6. Alternatives considered
 
-| Alternative | Verdict | Why |
-|---|---|---|
-| **A. kookr PR #352** — branch on a 100 KiB size threshold | Rejected | Keeps the racy terminal-write path for large prompts; runtime branch on a magic number; threshold calibrated against misread evidence (§2); prompt still in argv for small prompts. |
-| **B. Always deliver via positional argv** (revert PR #337) | Rejected | `E2BIG` is **verified real** (issue #319 — a ~100 KiB+ pasted prompt). Always-argv reintroduces #319. |
-| **C. Fix the TUI to not drop early PTY input** | Rejected | Honestly: correctly buffering raw terminal input across the alt-screen switch, bracketed-paste enable, trust check, and composer construction is timing-dependent and complex, and would still not address `E2BIG`. `--prompt-file` is deterministic and size-independent. Note: this RFC *routes around* the TUI's early-input fragility rather than fixing it; that fragility still affects other terminal-write callers (see §9, and `sendInput` follow-ups). Fixing the TUI input pipeline remains worthwhile as separate hardening — it is just not the right vehicle for reliable *initial-prompt* delivery. |
-| **D. Prompt on stdin** | Rejected | The interactive TUI owns stdin/the PTY for the whole session; there is no separate stdin channel for a one-shot prompt. |
+| Alternative                                                 | Verdict                      | Why                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ----------------------------------------------------------- | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **A. kookr PR #352** — branch on a 100 KiB size threshold   | Rejected                     | Keeps the racy terminal-write path for large prompts; runtime branch on a magic number; threshold calibrated against misread evidence (§2); prompt still in argv for small prompts.                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| **B. Always deliver via positional argv** (revert PR #337)  | Rejected                     | `E2BIG` is **verified real** (issue #319 — a ~100 KiB+ pasted prompt). Always-argv reintroduces #319.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| **C. Fix the TUI to not drop early PTY input**              | Rejected                     | Honestly: correctly buffering raw terminal input across the alt-screen switch, bracketed-paste enable, trust check, and composer construction is timing-dependent and complex, and would still not address `E2BIG`. `--prompt-file` is deterministic and size-independent. Note: this RFC _routes around_ the TUI's early-input fragility rather than fixing it; that fragility still affects other terminal-write callers (see §9, and `sendInput` follow-ups). Fixing the TUI input pipeline remains worthwhile as separate hardening — it is just not the right vehicle for reliable _initial-prompt_ delivery.                           |
+| **D. Prompt on stdin**                                      | Rejected                     | The interactive TUI owns stdin/the PTY for the whole session; there is no separate stdin channel for a one-shot prompt.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | **E. Capability-probe `--prompt-file` like `--plugin-dir`** | **Adopted** (review round 2) | Initially rejected — "prompt delivery is core, the codexcli agent already requires the fork." A reviewer specialist flagged that unconditional `--prompt-file` hard-fails any binary lacking the flag (stock codex, or a fork built before this change), regressing graceful degradation. The original rejection missed that **positional argv is a clean race-free fallback** (it only fails on >~`ARG_MAX` prompts). So: probe `--prompt-file` once per adapter (existing `probeBinaryFlagSupport` mechanism); supported ⇒ `--prompt-file`; unsupported ⇒ positional argv + one-time warning. Capability branch, not a prompt-size branch. |
 
 ## 7. Edge cases & failure modes (from critic review)
@@ -236,7 +258,7 @@ await this.backend.createSession({ id: tmuxName, command: this.agentBin, args, e
   UTF-8 task text; a non-UTF-8 prompt file is a kookr bug, and failing fast is
   acceptable (the old lossy `TextDecoder` path silently corrupted instead).
 - **Large / runaway file:** the file size is checked against a 10 MiB cap
-  (`MAX_PROMPT_FILE_BYTES`) *before* the read, so an accidental log/binary file
+  (`MAX_PROMPT_FILE_BYTES`) _before_ the read, so an accidental log/binary file
   is rejected with a fatal error rather than read into memory — `--prompt-file`
   removes the implicit `ARG_MAX` ceiling, so the cap reintroduces a bound. A
   real multi-MB prompt is well under the cap; the read itself is a blocking few
@@ -258,6 +280,7 @@ await this.backend.createSession({ id: tmuxName, command: this.agentBin, args, e
 ## 8. Test plan
 
 **Codex fork**
+
 - `--prompt-file` populates `prompt`; `conflicts_with` rejects file+positional;
   missing file ⇒ `ExitReason::Fatal` ⇒ `exit(1)`; CRLF in file ⇒ normalized.
 - `merge_interactive_cli_flags` carries `prompt_file` (regression test:
@@ -266,6 +289,7 @@ await this.backend.createSession({ id: tmuxName, command: this.agentBin, args, e
   `user_message` equals the file content and skips the update-prompt screen.
 
 **Kookr**
+
 - `codex-cli-adapter.test.ts`: `launch()` writes `${tmuxName}.prompt.txt` with
   the checkpoint-prefixed prompt; argv contains `--prompt-file <path>` and **no**
   trailing positional prompt; `deliverInitialPromptToSession` is **not** called.
