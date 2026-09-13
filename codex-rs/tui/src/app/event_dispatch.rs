@@ -2465,7 +2465,10 @@ impl App {
             }
             AppEvent::RenameAgentsOverviewThread { thread_id, name } => {
                 match app_server.thread_set_name(thread_id, name.clone()).await {
-                    Ok(()) => self.chat_widget.expect_manual_thread_name(thread_id, name),
+                    Ok(()) => {
+                        self.chat_widget.expect_manual_thread_name(thread_id, name);
+                        self.cancel_thread_title_generation(thread_id);
+                    }
                     Err(error) => {
                         if let Ok(mut state) = self.agents_overview.view_state.lock() {
                             state.input = name;
@@ -2483,6 +2486,7 @@ impl App {
                     .await;
             }
             AppEvent::ThreadTitleStarted {
+                cancellation,
                 thread_id,
                 destination,
                 prompt,
@@ -2496,9 +2500,11 @@ impl App {
                     prompt,
                     effort,
                     result,
+                    cancellation,
                 );
             }
             AppEvent::GeneratedThreadTitle {
+                cancellation,
                 thread_id,
                 temporary_thread_id,
                 destination,
@@ -2507,6 +2513,9 @@ impl App {
                 self.temporary_structured_requests
                     .remove(&temporary_thread_id);
 
+                if cancellation.is_cancelled() {
+                    return Ok(AppRunControl::Continue);
+                }
                 self.finish_thread_title_generation(thread_id, destination);
                 match destination {
                     ThreadTitleDestination::Automatic => {
@@ -2950,7 +2959,9 @@ impl App {
             AppEvent::CheckRecap { thread_id } => {
                 if self.current_displayed_thread_id() == Some(thread_id)
                     && !self.chat_widget.is_user_turn_pending_or_running()
-                    && self.recap.should_generate(std::time::Instant::now())
+                    && self
+                        .recap
+                        .should_generate(tokio::time::Instant::now().into_std())
                 {
                     self.request_recap(app_server, thread_id, RecapTrigger::Automatic);
                 }

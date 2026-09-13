@@ -18,15 +18,15 @@ use super::home::OwnedHandle;
 use super::home::prepare_codex_home;
 use super::request::ProvisioningRequest;
 
-pub(super) struct ClientIdentity {
-    pub(super) account: String,
-    pub(super) codex_home: PathBuf,
-    pub(super) user_sid: String,
-    pub(super) session_id: u32,
-    pub(super) token: OwnedHandle,
-    pub(super) desktop_installation: Option<crate::installation_record::DesktopInstallation>,
+pub(crate) struct ClientIdentity {
+    pub(crate) account: String,
+    pub(crate) codex_home: PathBuf,
+    pub(crate) user_sid: String,
+    pub(crate) session_id: u32,
+    pub(crate) token: OwnedHandle,
+    pub(crate) desktop_installation: Option<crate::installation_record::DesktopInstallation>,
     // Retained by both the service and helper throughout provisioning.
-    pub(super) directory_handles: Vec<OwnedHandle>,
+    pub(crate) directory_handles: Vec<OwnedHandle>,
 }
 
 pub(super) fn authenticate_client(
