@@ -43,6 +43,12 @@ class AmazonBedrockAccount(BaseModel):
     ] = False
 
 
+class AccountRoutingOverride(Enum):
+    no_constraint = "NO_CONSTRAINT"
+    us = "us"
+    us_cr = "us_cr"
+
+
 class AccountTokenUsageDailyBucket(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -6470,6 +6476,17 @@ class WorkspaceMessageType(Enum):
     unknown = "unknown"
 
 
+class WorkspaceRouting(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    account_routing_override: Annotated[
+        AccountRoutingOverride, Field(alias="accountRoutingOverride")
+    ]
+    backend_origin: Annotated[str, Field(alias="backendOrigin")]
+    chatgpt_account_id: Annotated[str, Field(alias="chatgptAccountId")]
+
+
 class WriteStatus(Enum):
     ok = "ok"
     ok_overridden = "okOverridden"
@@ -7772,8 +7789,8 @@ class InputImageContentItem(BaseModel):
         populate_by_name=True,
     )
     detail: ImageDetail | None = None
-    image_url: str
     type: Annotated[Literal["input_image"], Field(title="InputImageContentItemType")]
+    image_url: str
 
 
 class ContentItem(
@@ -7784,9 +7801,7 @@ class ContentItem(
     model_config = ConfigDict(
         populate_by_name=True,
     )
-    root: (
-        InputTextContentItem | InputImageContentItem | InputAudioContentItem | OutputTextContentItem
-    )
+    root: InputTextContentItem | InputImageContentItem | InputAudioContentItem | OutputTextContentItem
 
 
 class ExperimentalFeature(BaseModel):
@@ -7968,10 +7983,10 @@ class InputImageFunctionCallOutputContentItem(BaseModel):
         populate_by_name=True,
     )
     detail: ImageDetail | None = None
-    image_url: str
     type: Annotated[
         Literal["input_image"], Field(title="InputImageFunctionCallOutputContentItemType")
     ]
+    image_url: str
 
 
 class FunctionCallOutputContentItem(
@@ -11285,6 +11300,13 @@ class ConfigRequirements(BaseModel):
     allowed_approval_policies: Annotated[
         list[AskForApproval] | None, Field(alias="allowedApprovalPolicies")
     ] = None
+    allowed_login_methods: Annotated[
+        list[ForcedLoginMethod] | None,
+        Field(
+            alias="allowedLoginMethods",
+            description="Effective login methods after managed, forced-login, and workspace restrictions. An empty list permits no login method. Older servers may omit this field.",
+        ),
+    ] = None
     allowed_permission_profiles: Annotated[
         dict[str, Any] | None, Field(alias="allowedPermissionProfiles")
     ] = None
@@ -11847,6 +11869,13 @@ class ThreadResumeResponse(BaseModel):
             description="Reviewer currently used for approval requests on this thread.",
         ),
     ]
+    collaboration_mode: Annotated[
+        CollaborationMode | None,
+        Field(
+            alias="collaborationMode",
+            description="Effective collaboration mode. Absent when resuming from an older server.",
+        ),
+    ] = None
     cwd: AbsolutePathBuf
     disabled_plugin_ids: Annotated[
         list[str] | None,

@@ -383,6 +383,10 @@
     },
     "AutoReviewToml": {
       "properties": {
+        "experimental_policy_template": {
+          "description": "Experimental full Guardian prompt template containing the tenant policy placeholder.",
+          "type": "string"
+        },
         "policy": {
           "description": "Additional policy instructions inserted into the guardian prompt.",
           "type": "string"
@@ -4118,6 +4122,7 @@
               "delete": null,
               "hide": null,
               "new_task": null,
+              "new_worktree": null,
               "rename": null,
               "resume": null,
               "search": null,
@@ -4457,7 +4462,15 @@
               "$ref": "#/definitions/KeybindingsSpec"
             }
           ],
-          "description": "Start composing a new agent task."
+          "description": "Open a new session in the selected checkout."
+        },
+        "new_worktree": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Open a new session in a worktree from the project default branch."
         },
         "rename": {
           "allOf": [
@@ -4960,6 +4973,7 @@
             "delete": null,
             "hide": null,
             "new_task": null,
+            "new_worktree": null,
             "rename": null,
             "resume": null,
             "search": null,
