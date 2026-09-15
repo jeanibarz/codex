@@ -18,7 +18,6 @@
 //! # Key Event Routing
 //!
 //! Plain Left opens agents when the local-daemon composer is empty and available for input.
-//! The agents dashboard uses the matching empty-editor guards for Right to open a task.
 //! Explicit editor remaps take precedence.
 //! Most key handling goes through [`ChatComposer::handle_key_event`], which dispatches to a
 //! popup-specific handler if a popup is visible and otherwise to
@@ -61,6 +60,7 @@
 //! Recall moves the cursor to the end. Question editors copy primary history on recall/search;
 //! draft capture cancels previews, and restoration resets traversal.
 //! Ctrl+R searches history in the footer and previews matches in the composer.
+//! Typing and pasting edit the active search query, including large pastes and image paths.
 //! Enter accepts the preview; Esc restores the original draft.
 //! Vim undo/redo snapshots complete drafts and groups direct edits with active Vim transactions.
 //! An active edit keeps one separately capped snapshot; canceling does not evict committed history.
@@ -167,7 +167,7 @@
 //! # Non-bracketed Paste Bursts
 //!
 //! On some terminals (especially on Windows), pastes arrive as a rapid sequence of
-//! `KeyCode::Char` and `KeyCode::Enter` key events instead of a single paste event.
+//! `KeyCode::Char`, `KeyCode::Enter`, and `KeyCode::Tab` key events instead of a single paste event.
 //!
 //! To avoid misinterpreting these bursts as real typing (and to prevent transient UI effects like
 //! shortcut overlays toggling on a pasted `?`), we feed text-producing character events (plain,
@@ -198,6 +198,8 @@
 //!   input to either buffer it or insert normally.
 //! - [`ChatComposer::handle_non_ascii_char`]: handles the non-ASCII/IME path without holding the
 //!   first char, while still allowing paste detection via retro-capture.
+//! - Unmodified Tab joins detected bursts, including short Unicode prefixes, before popup dispatch.
+//!   Expired bursts are flushed first so manual Tab keeps its normal shortcut behavior.
 //! - [`ChatComposer::flush_paste_burst_if_due`]/[`ChatComposer::handle_paste_burst_flush`]: called
 //!   from UI ticks to turn a pending burst into either an explicit paste (`handle_paste`) or a
 //!   normal typed character.
@@ -313,6 +315,7 @@ mod draft_state;
 mod footer_state;
 mod history_search;
 mod inline_input;
+mod paste_input;
 mod popup_state;
 mod reconnect;
 mod slash_input;
@@ -1209,17 +1212,25 @@ impl ChatComposer {
     ///
     /// Behavior:
     ///
-    /// - If the paste is larger than `LARGE_PASTE_CHAR_THRESHOLD` chars, inserts a placeholder
-    ///   element (expanded on submit) and stores the full text in `pending_pastes`.
+    /// - If history search is active, inserts nonempty text into its query and ignores empty pastes.
+    /// - If Vim search is active, inserts text into its query.
+    /// - Otherwise, if the paste is larger than `LARGE_PASTE_CHAR_THRESHOLD` chars, inserts a
+    ///   placeholder element (expanded on submit) and stores the full text in `pending_pastes`.
     /// - Otherwise, if the paste looks like an image path, attaches the image and inserts a
     ///   trailing space so the user can keep typing naturally.
     /// - Otherwise, inserts the pasted text directly into the textarea.
     ///
-    /// In all cases, clears any paste-burst Enter suppression state so a real paste cannot affect
-    /// the next user Enter key, then syncs popup state.
+    /// For composer edits, clears any paste-burst Enter suppression state so a real paste cannot
+    /// affect the next user Enter key, then syncs popup state.
     pub fn handle_paste(&mut self, pasted: String) -> bool {
         let pasted = pasted.replace("\r\n", "\n").replace('\r', "\n");
         let pasted = sanitize_user_text(pasted.into());
+        if self.history_search.is_some() {
+            if !pasted.is_empty() {
+                self.update_history_search_query(|query| query.push_str(&pasted));
+            }
+            return true;
+        }
         if let Some(query) = self.draft.textarea.vim_query_mut() {
             query.editor.insert_str(&pasted);
             return true;
@@ -2036,6 +2047,10 @@ impl ChatComposer {
 
         if Self::is_history_search_key(&key_event, &self.history_search_previous_keys) {
             return self.begin_history_search();
+        }
+
+        if self.handle_paste_tab(key_event, Instant::now()) {
+            return (InputResult::None, true);
         }
 
         let result = match &mut self.popups.active {
@@ -3693,7 +3708,10 @@ impl ChatComposer {
         if matches!(input.code, KeyCode::Enter)
             && !self.draft.disable_paste_burst
             && self.draft.paste_burst.is_active()
-            && self.draft.paste_burst.append_newline_if_active(now)
+            && self
+                .draft
+                .paste_burst
+                .append_control_char_if_active('\n', now)
         {
             return (InputResult::None, true);
         }
@@ -5070,6 +5088,10 @@ mod effort_tests;
 #[cfg(test)]
 #[path = "chat_composer/embedded_input_tests.rs"]
 mod embedded_input_tests;
+
+#[cfg(test)]
+#[path = "chat_composer/paste_tests.rs"]
+mod paste_tests;
 
 #[cfg(test)]
 #[path = "chat_composer/snapshot_tests.rs"]

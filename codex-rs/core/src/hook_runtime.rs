@@ -69,6 +69,7 @@ use tracing::instrument;
 use crate::context::ContextualUserFragment;
 use crate::context::HookAdditionalContext;
 use crate::event_mapping::parse_turn_item;
+use crate::guardian::GuardianReviewContext;
 use crate::session::TurnInput;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
@@ -76,7 +77,7 @@ use crate::session::turn_context::TurnContext;
 use crate::state::TurnState;
 use crate::tools::hook_names::HookToolName;
 use crate::tools::sandboxing::PermissionRequestPayload;
-use crate::turn_metadata::McpTurnMetadataContext;
+use crate::turn_metadata::ExecutionMetadata;
 
 pub(crate) struct HookRuntimeOutcome {
     pub should_stop: bool,
@@ -170,7 +171,7 @@ pub(crate) async fn run_pending_session_start_hooks(
             cwd: hook_cwd(turn_context),
             transcript_path: sess.hook_transcript_path().await,
             model: turn_context.model_info().slug.clone(),
-            permission_mode: hook_permission_mode(turn_context),
+            permission_mode: hook_permission_mode(turn_context.approval_policy()),
             target,
         };
         let hooks = sess.hooks();
@@ -199,19 +200,20 @@ pub(crate) async fn run_pending_session_start_hooks(
 /// handlers.
 pub(crate) async fn run_pre_tool_use_hooks(
     sess: &Arc<Session>,
-    turn_context: &Arc<TurnContext>,
+    step_context: &StepContext,
     tool_use_id: String,
     tool_name: &HookToolName,
     tool_input: &Value,
 ) -> PreToolUseHookResult {
+    let turn_context = &step_context.turn;
     let request = PreToolUseRequest {
         session_id: sess.session_id().into(),
         turn_id: turn_context.sub_id.clone(),
         subagent: thread_spawn_subagent_hook_context(sess, turn_context),
         cwd: hook_cwd(turn_context),
         transcript_path: sess.hook_transcript_path().await,
-        model: turn_context.model_info().slug.clone(),
-        permission_mode: hook_permission_mode(turn_context),
+        model: step_context.settings.model_info.slug.clone(),
+        permission_mode: hook_permission_mode(step_context.settings.approval_policy()),
         tool_name: tool_name.name().to_string(),
         matcher_aliases: tool_name.matcher_aliases().to_vec(),
         tool_use_id,
@@ -260,18 +262,19 @@ pub(crate) async fn run_pre_tool_use_hooks(
 // tool input or post-run state.
 pub(crate) async fn run_permission_request_hooks(
     sess: &Arc<Session>,
-    turn_context: &Arc<TurnContext>,
+    review_context: &GuardianReviewContext,
     run_id_suffix: &str,
     payload: PermissionRequestPayload,
 ) -> Option<PermissionRequestDecision> {
+    let turn_context = review_context.turn();
     let request = PermissionRequestRequest {
         session_id: sess.session_id().into(),
         turn_id: turn_context.sub_id.clone(),
         subagent: thread_spawn_subagent_hook_context(sess, turn_context),
         cwd: hook_cwd(turn_context).into_path_buf(),
         transcript_path: sess.hook_transcript_path().await,
-        model: turn_context.model_info().slug.clone(),
-        permission_mode: hook_permission_mode(turn_context),
+        model: review_context.model_info.slug.clone(),
+        permission_mode: hook_permission_mode(review_context.approval_policy),
         tool_name: payload.tool_name.name().to_string(),
         matcher_aliases: payload.tool_name.matcher_aliases().to_vec(),
         run_id_suffix: run_id_suffix.to_string(),
@@ -298,21 +301,22 @@ pub(crate) async fn run_permission_request_hooks(
 /// matchers and hook logs.
 pub(crate) async fn run_post_tool_use_hooks(
     sess: &Arc<Session>,
-    turn_context: &Arc<TurnContext>,
+    step_context: &StepContext,
     tool_use_id: String,
     tool_name: String,
     matcher_aliases: Vec<String>,
     tool_input: Value,
     tool_response: Value,
 ) -> PostToolUseOutcome {
+    let turn_context = &step_context.turn;
     let request = PostToolUseRequest {
         session_id: sess.session_id().into(),
         turn_id: turn_context.sub_id.clone(),
         subagent: thread_spawn_subagent_hook_context(sess, turn_context),
         cwd: hook_cwd(turn_context),
         transcript_path: sess.hook_transcript_path().await,
-        model: turn_context.model_info().slug.clone(),
-        permission_mode: hook_permission_mode(turn_context),
+        model: step_context.settings.model_info.slug.clone(),
+        permission_mode: hook_permission_mode(step_context.settings.approval_policy()),
         tool_name,
         matcher_aliases,
         tool_use_id,
@@ -341,7 +345,7 @@ pub(crate) async fn run_file_changed_hooks(
         cwd: hook_cwd(turn_context),
         transcript_path: sess.hook_transcript_path().await,
         model: turn_context.model_info().slug.clone(),
-        permission_mode: hook_permission_mode(turn_context),
+        permission_mode: hook_permission_mode(turn_context.approval_policy()),
         tool_name,
         tool_use_id,
         changes,
@@ -404,11 +408,7 @@ fn build_request_metadata(
         .unwrap_or(turn_context.initial_settings.as_ref());
     turn_context
         .turn_metadata_state
-        .current_meta_value_for_mcp_request(McpTurnMetadataContext {
-            model: settings.model_info.slug.as_str(),
-            reasoning_effort: settings.effective_reasoning_effort(),
-            node_repl_disabled: settings.model_info.node_repl_disabled,
-        })
+        .current_meta_value_for_mcp_request(ExecutionMetadata::from_settings(settings))
         .map(|turn_metadata| {
             Map::from_iter([(
                 crate::X_CODEX_TURN_METADATA_HEADER.to_string(),
@@ -481,7 +481,7 @@ pub(crate) async fn run_turn_stop_hooks(
         cwd: hook_cwd(turn_context),
         transcript_path,
         model: turn_context.model_info().slug.clone(),
-        permission_mode: hook_permission_mode(turn_context),
+        permission_mode: hook_permission_mode(turn_context.approval_policy()),
         request_metadata: (!request_metadata.is_empty()).then_some(request_metadata),
         stop_hook_active,
         last_assistant_message,
@@ -514,7 +514,7 @@ pub(crate) async fn run_session_end_hooks(sess: &Arc<Session>) {
         cwd,
         transcript_path: sess.hook_transcript_path().await,
         model,
-        permission_mode: hook_permission_mode_for_approval(approval_policy),
+        permission_mode: hook_permission_mode(approval_policy),
         reason: SessionEndReason::Other,
     };
     let preview_runs = hooks.preview_session_end(&request);
@@ -559,7 +559,7 @@ pub(crate) async fn run_turn_interrupt_hooks(
         cwd: hook_cwd(turn_context),
         transcript_path: sess.hook_transcript_path().await,
         model: turn_context.model_info().slug.clone(),
-        permission_mode: hook_permission_mode(turn_context),
+        permission_mode: hook_permission_mode(turn_context.approval_policy()),
         request_metadata: (!request_metadata.is_empty()).then_some(request_metadata),
     };
     if let Err(err) = sess.flush_rollout().await {
@@ -715,7 +715,7 @@ pub(crate) async fn inspect_pending_input(
                 cwd: hook_cwd(turn_context),
                 transcript_path: sess.hook_transcript_path().await,
                 model: turn_context.model_info().slug.clone(),
-                permission_mode: hook_permission_mode(turn_context),
+                permission_mode: hook_permission_mode(turn_context.approval_policy()),
                 prompt: UserMessageItem::new(content).message(),
             };
             let hooks = sess.hooks();
@@ -1058,18 +1058,8 @@ fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str); 
     ]
 }
 
-fn hook_permission_mode_for_approval(approval_policy: AskForApproval) -> String {
+fn hook_permission_mode(approval_policy: AskForApproval) -> String {
     match approval_policy {
-        AskForApproval::Never => "bypassPermissions",
-        AskForApproval::UnlessTrusted | AskForApproval::OnRequest | AskForApproval::Granular(_) => {
-            "default"
-        }
-    }
-    .to_string()
-}
-
-fn hook_permission_mode(turn_context: &TurnContext) -> String {
-    match turn_context.approval_policy() {
         AskForApproval::Never => "bypassPermissions",
         AskForApproval::UnlessTrusted | AskForApproval::OnRequest | AskForApproval::Granular(_) => {
             "default"
@@ -1189,7 +1179,7 @@ pub(crate) async fn run_stop_failure_hooks(
         cwd: hook_cwd(turn_context).into_path_buf(),
         transcript_path: sess.hook_transcript_path().await,
         model: turn_context.model_info().slug.clone(),
-        permission_mode: hook_permission_mode(turn_context),
+        permission_mode: hook_permission_mode(turn_context.approval_policy()),
         error,
         last_assistant_message,
     };
