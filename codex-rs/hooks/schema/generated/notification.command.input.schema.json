@@ -26,6 +26,11 @@
     "notification_type": {
       "type": "string"
     },
+    "observed_at_ms": {
+      "description": "Unix milliseconds when nonempty provider output was observed.",
+      "format": "int64",
+      "type": "integer"
+    },
     "session_id": {
       "type": "string"
     },

@@ -45,6 +45,12 @@ use codex_protocol::protocol::HookOutputEntryKind;
 
 const MAX_CONCURRENT_ASYNC_HOOKS: usize = 8;
 
+/// Whether a completed hook may leave child processes running.
+pub(crate) enum CommandLifetime {
+    AllowBackground,
+    Scoped,
+}
+
 /// Owns command execution and bounded asynchronous work for one session.
 #[derive(Clone)]
 pub(crate) struct CommandHookRuntime {
@@ -122,7 +128,16 @@ impl CommandHookRuntime {
         self.schedule_async_task(async move {
             let result = match &handler.kind {
                 ConfiguredHandlerKind::Command { command, env, .. } => {
-                    run_command(&runtime, &handler, command, env, &input_json, &cwd).await
+                    run_command(
+                        &runtime,
+                        &handler,
+                        command,
+                        env,
+                        &input_json,
+                        &cwd,
+                        CommandLifetime::AllowBackground,
+                    )
+                    .await
                 }
                 ConfiguredHandlerKind::McpTool { .. } => return,
             };
@@ -210,6 +225,7 @@ pub(crate) async fn run_command(
     env: &HashMap<String, String>,
     input_json: &str,
     cwd: &Path,
+    lifetime: CommandLifetime,
 ) -> HandlerRunResult {
     let started_at = chrono::Utc::now().timestamp();
     let started = Instant::now();
@@ -292,12 +308,16 @@ pub(crate) async fn run_command(
     // include stdin writes in the deadline even when the hook never reads them.
     match timeout(timeout_duration, try_join(write_stdin, wait_with_output)).await {
         Ok(Ok(((), output))) => {
-            // Successfully completed hooks may intentionally leave detached helpers running.
-            #[cfg(windows)]
-            if let Some(job) = process_tree_guard.job.as_ref() {
-                let _ = job.preserve_descendants();
+            if matches!(lifetime, CommandLifetime::AllowBackground) {
+                // Ordinary hooks may intentionally leave detached helpers running.
+                #[cfg(windows)]
+                if let Some(job) = process_tree_guard.job.as_ref() {
+                    let _ = job.preserve_descendants();
+                }
+                process_tree_guard.process_id = None;
             }
-            process_tree_guard.process_id = None;
+            // Scoped hooks retain the guard even when the root shell exits.
+            // Otherwise a redirected background child could outlive delivery.
             finish_command_run(
                 started_at,
                 started,

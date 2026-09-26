@@ -684,6 +684,9 @@ pub(crate) struct NotificationCommandInput {
     pub model: String,
     pub notification_type: String,
     pub message: String,
+    /// Unix milliseconds when nonempty provider output was observed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -1008,6 +1011,7 @@ mod tests {
     use super::INTERRUPT_INPUT_FIXTURE;
     use super::INTERRUPT_OUTPUT_FIXTURE;
     use super::InterruptCommandInput;
+    use super::NOTIFICATION_INPUT_FIXTURE;
     use super::NullableString;
     use super::PERMISSION_REQUEST_INPUT_FIXTURE;
     use super::PERMISSION_REQUEST_OUTPUT_FIXTURE;
@@ -1057,6 +1061,9 @@ mod tests {
 
     fn expected_fixture(name: &str) -> &'static str {
         match name {
+            NOTIFICATION_INPUT_FIXTURE => {
+                include_str!("../schema/generated/notification.command.input.schema.json")
+            }
             POST_TOOL_USE_INPUT_FIXTURE => {
                 include_str!("../schema/generated/post-tool-use.command.input.schema.json")
             }
@@ -1158,6 +1165,7 @@ mod tests {
         write_schema_fixtures(&schema_root).expect("write generated hook schemas");
 
         for fixture in [
+            NOTIFICATION_INPUT_FIXTURE,
             POST_TOOL_USE_INPUT_FIXTURE,
             POST_TOOL_USE_OUTPUT_FIXTURE,
             PERMISSION_REQUEST_INPUT_FIXTURE,

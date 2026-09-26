@@ -18,6 +18,7 @@ use super::ConfiguredHandler;
 use super::ConfiguredHandlerKind;
 use super::HandlerRunResult;
 use super::HandlerSourcePath;
+use super::command_runner::CommandLifetime;
 use super::command_runner::run_command;
 use super::mcp_runner::run_mcp_tool;
 use crate::events::common::matches_matcher;
@@ -369,6 +370,40 @@ pub(crate) async fn execute_handlers_with_metadata<T: 'static>(
     completed.into_iter().map(|(_, parsed)| parsed).collect()
 }
 
+/// Keep command progress handlers inside the caller's cancellation/deadline scope,
+/// including handlers normally configured to run asynchronously. Their results
+/// do not create transcript events, which would manufacture another liveness signal.
+pub(crate) async fn execute_provider_progress_handlers(
+    engine: &ClaudeHooksEngine,
+    handlers: Vec<ConfiguredHandler>,
+    input_json: &str,
+    cwd: &Path,
+) {
+    let mut pending = FuturesUnordered::new();
+    for handler in &handlers {
+        // Dropping an MCP call does not cancel the remote request. Progress is
+        // best-effort command telemetry: do not accumulate uncancellable remote
+        // work when a notification target is slow or never replies.
+        let ConfiguredHandlerKind::Command { command, env, .. } = &handler.kind else {
+            continue;
+        };
+        pending.push(run_command(
+            &engine.command_runtime,
+            handler,
+            command,
+            env,
+            input_json,
+            cwd,
+            CommandLifetime::Scoped,
+        ));
+    }
+    while let Some(result) = pending.next().await {
+        if result.error.is_some() || result.exit_code.is_some_and(|code| code != 0) {
+            tracing::debug!("provider progress hook failed");
+        }
+    }
+}
+
 async fn execute_handler(
     engine: &ClaudeHooksEngine,
     handler: &ConfiguredHandler,
@@ -385,6 +420,7 @@ async fn execute_handler(
                 env,
                 input_json,
                 cwd,
+                CommandLifetime::AllowBackground,
             )
             .await
         }

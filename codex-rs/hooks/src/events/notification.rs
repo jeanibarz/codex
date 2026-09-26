@@ -31,6 +31,8 @@ pub struct NotificationRequest {
     pub model: String,
     pub notification_type: String,
     pub message: String,
+    /// Unix milliseconds when Codex observed nonempty provider output.
+    pub observed_at_ms: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -52,6 +54,7 @@ pub(crate) async fn run(
     engine: &ClaudeHooksEngine,
     request: NotificationRequest,
 ) -> NotificationOutcome {
+    let is_provider_progress = request.notification_type == "provider_progress";
     let matched = dispatcher::select_handlers(&engine.handlers, HookEventName::Notification, None);
     if matched.is_empty() {
         return NotificationOutcome {
@@ -68,6 +71,7 @@ pub(crate) async fn run(
         model: request.model.clone(),
         notification_type: request.notification_type,
         message: request.message,
+        observed_at_ms: request.observed_at_ms,
     }) {
         Ok(input_json) => input_json,
         Err(error) => {
@@ -80,6 +84,21 @@ pub(crate) async fn run(
             };
         }
     };
+
+    // Progress has its own bounded worker. Detaching configured async hooks here
+    // would let them escape that worker's deadline and the sampling lifetime.
+    if is_provider_progress {
+        dispatcher::execute_provider_progress_handlers(
+            engine,
+            matched,
+            &input_json,
+            request.cwd.as_path(),
+        )
+        .await;
+        return NotificationOutcome {
+            hook_events: Vec::new(),
+        };
+    }
 
     let results = dispatcher::execute_handlers(
         engine,

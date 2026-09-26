@@ -1,3 +1,4 @@
+use super::CommandLifetime;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::ffi::OsString;
@@ -139,7 +140,16 @@ async fn hook_shell_startup_does_not_stop_on_controlling_terminal() {
         result_sender,
     );
 
-    let result = run_command(&runtime, &handler, command, &env, "{}", temp.path()).await;
+    let result = run_command(
+        &runtime,
+        &handler,
+        command,
+        &env,
+        "{}",
+        temp.path(),
+        CommandLifetime::AllowBackground,
+    )
+    .await;
 
     assert_eq!(result.exit_code, Some(0), "stderr: {}", result.stderr);
     assert_eq!(result.stdout, "hook-ran");
@@ -197,7 +207,16 @@ async fn cmd_shell_runs_quoted_hook_command_path() {
             ThreadId::new(),
             result_sender,
         );
-        let result = run_command(&runtime, &handler, &command, &env, "{}", temp.path()).await;
+        let result = run_command(
+            &runtime,
+            &handler,
+            &command,
+            &env,
+            "{}",
+            temp.path(),
+            CommandLifetime::AllowBackground,
+        )
+        .await;
 
         assert_eq!(result.exit_code, Some(0), "stderr: {}", result.stderr);
         assert_eq!(result.stdout.trim(), "hook-ran");
@@ -231,7 +250,16 @@ async fn fast_exiting_hook_preserves_stdout_when_stdin_is_not_consumed() {
     let input_json = format!(r#"{{"padding":"{}"}}"#, "x".repeat(1024 * 1024));
     let (runtime, _result_receiver) = runtime();
 
-    let result = run_command(&runtime, &handler, command, &env, &input_json, temp.path()).await;
+    let result = run_command(
+        &runtime,
+        &handler,
+        command,
+        &env,
+        &input_json,
+        temp.path(),
+        CommandLifetime::AllowBackground,
+    )
+    .await;
 
     assert_eq!(result.exit_code, Some(0), "stderr: {}", result.stderr);
     assert_eq!(result.stdout.trim(), "hook-ran");
@@ -277,7 +305,15 @@ time.sleep(30)
 
     let result = timeout(
         Duration::from_secs(10),
-        run_command(&runtime, &handler, command, env, &input_json, temp.path()),
+        run_command(
+            &runtime,
+            &handler,
+            command,
+            env,
+            &input_json,
+            temp.path(),
+            CommandLifetime::AllowBackground,
+        ),
     )
     .await
     .expect("the hook timeout must also cover blocked stdin writes");
@@ -318,7 +354,16 @@ async fn command_hook_does_not_expose_configured_noise_auth_token() {
     };
     let (runtime, _result_receiver) = runtime();
 
-    let result = run_command(&runtime, &handler, command, &env, "{}", temp.path()).await;
+    let result = run_command(
+        &runtime,
+        &handler,
+        command,
+        &env,
+        "{}",
+        temp.path(),
+        CommandLifetime::AllowBackground,
+    )
+    .await;
 
     assert_eq!(result.exit_code, Some(0), "stderr: {}", result.stderr);
     assert!(result.stdout.contains("CODEX_HOOK_SAFE_ENV=visible"));
