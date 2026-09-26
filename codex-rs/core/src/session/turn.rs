@@ -2517,6 +2517,12 @@ async fn try_run_sampling_request(
         !sess.services.extensions.turn_item_contributors().is_empty();
     let mut active_item_is_streaming_to_client = false;
     let receiving_span = trace_span!("receiving_stream");
+    let provider_progress = crate::hook_runtime::start_provider_progress_hooks(
+        &sess,
+        &turn_context,
+        cancellation_token.clone(),
+    )
+    .await;
     let outcome: CodexResult<SamplingRequestResult> = loop {
         let handle_responses = trace_span!(
             parent: &receiving_span,
@@ -2554,6 +2560,18 @@ async fn try_run_sampling_request(
                 ));
             }
         };
+
+        // Observe before any consumer-specific early return (especially custom
+        // tool input, which commonly has no argument-diff consumer).
+        match &event {
+            ResponseEvent::OutputTextDelta(delta)
+            | ResponseEvent::ToolCallInputDelta { delta, .. }
+            | ResponseEvent::ReasoningSummaryDelta { delta, .. }
+            | ResponseEvent::ReasoningContentDelta { delta, .. } => {
+                provider_progress.observe_delta(delta);
+            }
+            _ => {}
+        }
 
         sess.services
             .session_telemetry
@@ -3012,6 +3030,7 @@ async fn try_run_sampling_request(
             }
         }
     };
+    provider_progress.stop().await;
     drop(sampling_timing_guard);
 
     flush_assistant_text_segments_all(

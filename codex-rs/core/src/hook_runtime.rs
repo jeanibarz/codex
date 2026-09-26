@@ -1116,6 +1116,7 @@ pub(crate) async fn run_session_bootstrap_notification_hooks(
         model,
         notification_type,
         message,
+        observed_at_ms: None,
     };
 
     for run in sess.hooks().preview_notification(&request) {
@@ -1155,6 +1156,7 @@ pub(crate) async fn run_notification_hooks(
         model: turn_context.model_info().slug.clone(),
         notification_type,
         message,
+        observed_at_ms: None,
     };
 
     let preview_runs = sess.hooks().preview_notification(&request);
@@ -1162,6 +1164,28 @@ pub(crate) async fn run_notification_hooks(
 
     let outcome = sess.hooks().run_notification(request).await;
     emit_hook_completed_events(sess, turn_context, outcome.hook_events).await;
+}
+
+/// Bind progress to this session and turn before sampling. The returned guard
+/// owns a bounded worker so no notification handler runs in the stream loop.
+pub(crate) async fn start_provider_progress_hooks(
+    sess: &Arc<Session>,
+    turn_context: &Arc<TurnContext>,
+    cancellation_token: tokio_util::sync::CancellationToken,
+) -> codex_hooks::ProviderProgressReporter {
+    let request = NotificationRequest {
+        session_id: sess.thread_id,
+        turn_id: turn_context.sub_id.clone(),
+        cwd: hook_cwd(turn_context).into_path_buf(),
+        transcript_path: sess.hook_transcript_path().await,
+        model: turn_context.model_info().slug.clone(),
+        notification_type: "provider_progress".to_string(),
+        message: "Provider output received".to_string(),
+        observed_at_ms: None,
+    };
+    codex_hooks::ProviderProgressReporter::new(sess.hooks(), request, async move {
+        cancellation_token.cancelled().await;
+    })
 }
 
 /// Fires the StopFailure hook when a turn ends via an API error (rate
