@@ -435,6 +435,10 @@ pub(crate) async fn maybe_emit_implicit_skill_invocation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_utils_plugins::PluginIdentity;
+    use codex_utils_plugins::SkillDiscoveryMode;
+    use std::fs;
+    use tempfile::tempdir;
     #[tokio::test]
     async fn include_cli_plugin_skill_roots_adds_roots_from_config() {
         let tmp = tempdir().expect("tempdir");

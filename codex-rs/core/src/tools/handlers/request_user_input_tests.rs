@@ -128,6 +128,7 @@ async fn request_user_input_sets_non_blocking_outside_plan_mode(
             async move {
                 RequestUserInputHandler {
                     available_modes: vec![ModeKind::Default],
+                    active_mode: Some(turn.collaboration_mode().mode),
                 }
                 .handle(ToolInvocation {
                     session,
@@ -278,6 +279,7 @@ async fn request_user_input_sets_blocking_from_turn_mode() {
         async move {
             RequestUserInputHandler {
                 available_modes: vec![ModeKind::Plan],
+                active_mode: Some(turn.collaboration_mode().mode),
             }
             .handle(ToolInvocation {
                 session,

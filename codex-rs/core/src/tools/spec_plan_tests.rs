@@ -1,3 +1,4 @@
+use crate::session::tests::update_selected_settings_for_test;
 use crate::session::tests::update_turn_settings_for_test;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -836,7 +837,11 @@ async fn wait_for_environment_falls_back_for_oversized_host_configuration() {
 #[tokio::test]
 async fn request_user_input_tool_respects_experimental_config_gate() {
     let enabled = probe(|turn| {
-        turn.mode = ModeKind::Plan;
+        update_turn_settings_for_test(turn, |settings| {
+            update_selected_settings_for_test(settings, |selected| {
+                selected.collaboration_mode.mode = ModeKind::Plan;
+            });
+        });
     })
     .await;
     enabled.assert_visible_contains(&["request_user_input"]);
@@ -847,7 +852,11 @@ async fn request_user_input_tool_respects_experimental_config_gate() {
     );
 
     let disabled = probe(|turn| {
-        turn.mode = ModeKind::Plan;
+        update_turn_settings_for_test(turn, |settings| {
+            update_selected_settings_for_test(settings, |selected| {
+                selected.collaboration_mode.mode = ModeKind::Plan;
+            });
+        });
         update_config(turn, |config| {
             config.experimental_request_user_input_enabled = false;
         });
