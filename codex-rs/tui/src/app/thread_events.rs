@@ -100,6 +100,7 @@ impl ThreadEventStore {
                 ServerNotification::HookStarted(_)
                     | ServerNotification::HookCompleted(_)
                     | ServerNotification::McpServerStatusUpdated(_)
+                    | ServerNotification::McpServerOauthLoginCompleted(_)
             ),
             ThreadBufferedEvent::HistoryEntryResponse(_) => false,
         }
@@ -661,6 +662,7 @@ mod tests {
 
     fn test_thread_session(thread_id: ThreadId, cwd: PathBuf) -> ThreadSessionState {
         ThreadSessionState {
+            windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
             thread_id,
             forked_from_id: None,
             fork_parent_title: None,

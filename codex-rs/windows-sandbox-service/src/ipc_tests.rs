@@ -1,3 +1,4 @@
+use super::MAX_RESPONSE_MESSAGE_BYTES;
 use super::OwnedHandle;
 use super::PipeConnection;
 use super::ServiceRequest;
@@ -6,8 +7,10 @@ use super::home::prepare_codex_home;
 use super::is_config_parse_error;
 use super::pin_existing_ancestors;
 use super::pipe_security_descriptor;
+use super::policy_rejection_diagnostic;
 use super::refresh_session;
 use super::request::ProvisioningRequest;
+use super::response_error_message;
 use super::validate_request;
 use super::wake;
 use codex_windows_sandbox::DirectoryOpenDisposition;
@@ -36,6 +39,22 @@ use windows_sys::Win32::Foundation as foundation;
 use windows_sys::Win32::Storage::FileSystem as filesystem;
 use windows_sys::Win32::Storage::Packaging::Appx;
 use windows_sys::Win32::System::Pipes as pipes;
+
+#[test]
+fn provisioning_error_response_preserves_causes_within_message_limits() {
+    let error = anyhow::anyhow!("Windows error\t5\n")
+        .context("load profile")
+        .context("registered sandbox provisioning failed");
+    assert_eq!(
+        response_error_message(&error),
+        "registered sandbox provisioning failed: load profile: Windows error 5 "
+    );
+
+    let error = anyhow::anyhow!("é".repeat(MAX_RESPONSE_MESSAGE_BYTES)).context("setup");
+    let message = response_error_message(&error);
+    assert!(message.starts_with("setup: é"));
+    assert_eq!(message.len(), MAX_RESPONSE_MESSAGE_BYTES - 1);
+}
 
 #[test]
 fn session_refresh_observes_cleanup_completion_before_dispatch() {
@@ -243,6 +262,64 @@ fn config_parse_errors_are_distinguished_from_policy_and_io_failures() {
         assert!(!is_config_parse_error(
             &error.context("load managed configuration"),
         ));
+    }
+}
+
+#[test]
+fn policy_event_excludes_real_parser_values_but_retains_safe_codes() {
+    let contents = "Authorization = \"Bearer synthetic-secret";
+    let requirements =
+        codex_config::compose_requirements([codex_config::RequirementsLayerEntry::from_toml(
+            codex_config::RequirementSource::Unknown,
+            contents,
+        )])
+        .unwrap_err();
+    let fragment = codex_config::cloud_config_layers_from_fragments(
+        [codex_config::CloudConfigFragment {
+            id: "synthetic-id".into(),
+            name: "private-name".into(),
+            contents: contents.into(),
+        }],
+        &Path::new(r"C:\CodexTest").try_into().unwrap(),
+    )
+    .unwrap_err();
+    for error in [
+        std::io::Error::from(requirements),
+        std::io::Error::from(fragment),
+    ] {
+        let error = anyhow::Error::new(error).context("load managed configuration");
+        assert!(format!("{error:#}").contains("synthetic-secret"));
+        assert!(!is_config_parse_error(&error));
+        assert_eq!(
+            policy_rejection_diagnostic(&error),
+            "Codex sandbox provisioning was rejected by administrator policy: stage=managed io=InvalidData win32=None"
+        );
+    }
+
+    for (error, expected) in [
+        (
+            anyhow::Error::new(std::io::Error::from_raw_os_error(5))
+                .context("load bootstrap configuration"),
+            "stage=bootstrap io=PermissionDenied win32=Some(5)",
+        ),
+        (
+            anyhow::Error::new(codex_config::CloudConfigBundleLoadError::new(
+                codex_config::CloudConfigBundleLoadErrorCode::RequestFailed,
+                Some(503),
+                contents,
+            ))
+            .context("load managed configuration"),
+            "stage=managed cloud=RequestFailed http=Some(503)",
+        ),
+        (
+            anyhow::anyhow!("{contents}"),
+            "stage=unknown cause=unavailable",
+        ),
+    ] {
+        assert_eq!(
+            policy_rejection_diagnostic(&error),
+            format!("Codex sandbox provisioning was rejected by administrator policy: {expected}")
+        );
     }
 }
 

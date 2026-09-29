@@ -26,54 +26,12 @@ use std::collections::HashMap;
 use tempfile::TempDir;
 
 #[test]
-fn mxc_selection_preserves_unsandboxed_requests_and_other_platforms() {
-    let manager = SandboxManager::new();
-    let platform_sandbox = if cfg!(windows) {
-        SandboxType::WindowsMxc
-    } else {
-        get_platform_sandbox(/*windows_sandbox_enabled*/ false).unwrap_or(SandboxType::None)
-    };
-    for (permissions, preference, expected) in [
-        (
-            PermissionProfile::read_only(),
-            SandboxablePreference::Auto,
-            platform_sandbox,
-        ),
-        (
-            PermissionProfile::Disabled,
-            SandboxablePreference::Require,
-            platform_sandbox,
-        ),
-        (
-            PermissionProfile::read_only(),
-            SandboxablePreference::Forbid,
-            SandboxType::None,
-        ),
-        (
-            PermissionProfile::Disabled,
-            SandboxablePreference::Auto,
-            SandboxType::None,
-        ),
-    ] {
-        assert_eq!(
-            manager.select_initial(
-                &permissions,
-                preference,
-                WindowsSandboxLevel::Mxc,
-                /*has_managed_network_requirements*/ false,
-            ),
-            expected,
-        );
-    }
-}
-
-#[test]
 fn danger_full_access_defaults_to_no_sandbox_without_network_requirements() {
     let manager = SandboxManager::new();
     let sandbox = manager.select_initial(
         &PermissionProfile::Disabled,
         SandboxablePreference::Auto,
-        WindowsSandboxLevel::Disabled,
+        SandboxType::None,
         /*has_managed_network_requirements*/ false,
     );
     assert_eq!(sandbox, SandboxType::None);
@@ -87,7 +45,7 @@ fn danger_full_access_uses_platform_sandbox_with_network_requirements() {
     let sandbox = manager.select_initial(
         &PermissionProfile::Disabled,
         SandboxablePreference::Auto,
-        WindowsSandboxLevel::Disabled,
+        SandboxType::None,
         /*has_managed_network_requirements*/ true,
     );
     assert_eq!(sandbox, expected);
@@ -111,9 +69,26 @@ fn restricted_file_system_uses_platform_sandbox_without_managed_network() {
     let sandbox = manager.select_initial(
         &permissions,
         SandboxablePreference::Auto,
-        WindowsSandboxLevel::Disabled,
+        SandboxType::None,
         /*has_managed_network_requirements*/ false,
     );
+    assert_eq!(sandbox, expected);
+}
+
+#[test]
+fn explicit_mxc_only_overrides_the_windows_sandbox() {
+    let manager = SandboxManager::new();
+    let sandbox = manager.select_initial(
+        &PermissionProfile::read_only(),
+        SandboxablePreference::Auto,
+        SandboxType::WindowsMxc,
+        /*has_managed_network_requirements*/ false,
+    );
+    let expected = if cfg!(windows) {
+        SandboxType::WindowsMxc
+    } else {
+        get_platform_sandbox(/*windows_sandbox_enabled*/ false).unwrap_or(SandboxType::None)
+    };
     assert_eq!(sandbox, expected);
 }
 
@@ -148,7 +123,6 @@ fn unsandboxed_transform_preserves_foreign_cwd_and_unrestricted_file_system_poli
             sandbox_exe: None,
             use_legacy_landlock: false,
             windows_sandbox_level: WindowsSandboxLevel::Disabled,
-            windows_sandbox_private_desktop: false,
         })
         .expect("transform");
 
@@ -205,7 +179,6 @@ fn symlinked_workspace_reports_seatbelt_preparation_error() {
             sandbox_exe: None,
             use_legacy_landlock: false,
             windows_sandbox_level: WindowsSandboxLevel::Disabled,
-            windows_sandbox_private_desktop: false,
         })
         .expect_err("symlinked workspace should be rejected");
 
@@ -260,7 +233,6 @@ fn transform_additional_permissions_enable_network_for_external_sandbox() {
             sandbox_exe: None,
             use_legacy_landlock: false,
             windows_sandbox_level: WindowsSandboxLevel::Disabled,
-            windows_sandbox_private_desktop: false,
         })
         .expect("transform");
 
@@ -331,7 +303,6 @@ fn transform_additional_permissions_preserves_denied_entries() {
             sandbox_exe: None,
             use_legacy_landlock: false,
             windows_sandbox_level: WindowsSandboxLevel::Disabled,
-            windows_sandbox_private_desktop: false,
         })
         .expect("transform");
 
@@ -409,8 +380,9 @@ fn managed_mitm_ca_bundle_becomes_readable_for_restricted_sandbox() {
 #[cfg(target_os = "linux")]
 fn transform_linux_seccomp_request(
     codex_linux_sandbox_exe: &std::path::Path,
+    mode: crate::LinuxSandboxPidNamespace,
 ) -> super::SandboxExecRequest {
-    let manager = SandboxManager::new();
+    let manager = SandboxManager::new().with_linux_sandbox_pid_namespace(mode);
     let cwd = AbsolutePathBuf::current_dir().expect("current dir");
     let cwd_uri = PathUri::from_abs_path(&cwd);
     let permissions = PermissionProfile::Disabled;
@@ -433,7 +405,6 @@ fn transform_linux_seccomp_request(
             sandbox_exe: Some(codex_linux_sandbox_exe),
             use_legacy_landlock: false,
             windows_sandbox_level: WindowsSandboxLevel::Disabled,
-            windows_sandbox_private_desktop: false,
         })
         .expect("transform")
 }
@@ -513,7 +484,10 @@ fn wsl1_allows_non_bubblewrap_linux_paths() {
 #[test]
 fn transform_linux_seccomp_preserves_helper_path_in_arg0_when_available() {
     let codex_linux_sandbox_exe = std::path::PathBuf::from("/tmp/codex-linux-sandbox");
-    let exec_request = transform_linux_seccomp_request(&codex_linux_sandbox_exe);
+    let exec_request = transform_linux_seccomp_request(
+        &codex_linux_sandbox_exe,
+        crate::LinuxSandboxPidNamespace::default(),
+    );
 
     assert_eq!(
         exec_request.arg0,
@@ -525,9 +499,20 @@ fn transform_linux_seccomp_preserves_helper_path_in_arg0_when_available() {
 #[test]
 fn transform_linux_seccomp_uses_helper_alias_when_launcher_is_not_helper_path() {
     let codex_linux_sandbox_exe = std::path::PathBuf::from("/tmp/codex");
-    let exec_request = transform_linux_seccomp_request(&codex_linux_sandbox_exe);
-
-    assert_eq!(exec_request.arg0, Some("codex-linux-sandbox".to_string()));
+    for (mode, first_helper_arg) in [
+        (
+            crate::LinuxSandboxPidNamespace::Isolate,
+            "--sandbox-policy-cwd",
+        ),
+        (
+            crate::LinuxSandboxPidNamespace::Inherit,
+            "--inherit-pid-namespace",
+        ),
+    ] {
+        let exec_request = transform_linux_seccomp_request(&codex_linux_sandbox_exe, mode);
+        assert_eq!(exec_request.arg0, Some("codex-linux-sandbox".to_string()));
+        assert_eq!(exec_request.command[1], first_helper_arg);
+    }
 }
 
 #[cfg(unix)]
@@ -562,10 +547,11 @@ async fn linux_unix_socket_grant_uses_effective_managed_policy() -> anyhow::Resu
     let state = build_config_state(
         NetworkProxyConfig {
             enabled: true,
-            dangerously_allow_all_unix_sockets: true,
+            dangerously_allow_all_unix_sockets: Some(true),
             ..Default::default()
         },
         NetworkProxyConstraints::default(),
+        codex_utils_path_uri::Platform::native(),
     )?;
     let network = NetworkProxy::builder()
         .state(Arc::new(NetworkProxyState::with_reloader(
@@ -642,7 +628,6 @@ async fn linux_unix_socket_grant_uses_effective_managed_policy() -> anyhow::Resu
             sandbox_exe: Some(std::path::Path::new("/tmp/codex-linux-sandbox")),
             use_legacy_landlock: false,
             windows_sandbox_level: WindowsSandboxLevel::Disabled,
-            windows_sandbox_private_desktop: false,
         })?;
         let transported_context = request
             .command
@@ -744,7 +729,7 @@ fn transform_for_direct_spawn_windows_materializes_inner_helper() {
             },
             FileSystemSandboxEntry {
                 path: blocked.into(),
-                access: FileSystemAccessMode::Deny,
+                access: FileSystemAccessMode::Read,
                 missing_path_behavior: None,
             },
         ]),
@@ -781,8 +766,7 @@ fn transform_for_direct_spawn_windows_materializes_inner_helper() {
                     sandbox_policy_cwd: &cwd_uri,
                     sandbox_exe: None,
                     use_legacy_landlock: false,
-                    windows_sandbox_level: WindowsSandboxLevel::Elevated,
-                    windows_sandbox_private_desktop: false,
+                    windows_sandbox_level: WindowsSandboxLevel::RestrictedToken,
                 },
             },
             codex_home.path(),
@@ -827,7 +811,7 @@ fn transform_for_direct_spawn_windows_materializes_inner_helper() {
         exec_request
             .command
             .iter()
-            .any(|arg| arg == "--deny-read-paths-json")
+            .any(|arg| arg == "--deny-write-paths-json")
     );
     assert_eq!(
         exec_request.command[separator_index + 2],

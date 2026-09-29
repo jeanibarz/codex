@@ -31,6 +31,7 @@ fn preset_to_info(preset: &ModelPreset, priority: i32) -> ModelInfo {
         available_access_programs: preset.available_access_programs.clone(),
         upgrade: preset.upgrade.as_ref().map(Into::into),
         model_messages: Some(ModelMessages {
+            content_filter_guidance: None,
             persistent_instructions: None,
             tools: None,
             instructions_template: Some("base instructions".to_string()),
@@ -67,6 +68,7 @@ fn preset_to_info(preset: &ModelPreset, priority: i32) -> ModelInfo {
         supports_search_tool: false,
         supports_experimental_context: false,
         use_responses_lite: false,
+        supports_reasoning_effort_updates: false,
         guardian: None,
         node_repl_auto_review_required: false,
         node_repl_disabled: false,

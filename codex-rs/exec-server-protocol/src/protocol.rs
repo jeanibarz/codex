@@ -5,6 +5,8 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use codex_file_system::FileSystemSandboxContext;
 pub use codex_file_system::WalkOptions;
 pub use codex_file_system::WalkOutcome;
+use codex_file_system::WireFileSystemSandboxContext;
+use codex_install_context::InstallContext;
 use codex_network_proxy::ManagedNetworkSandboxContext;
 use codex_network_proxy::RemoteNetworkProxyLaunchConfig;
 use codex_protocol::ThreadId;
@@ -15,6 +17,7 @@ use codex_utils_path_uri::PathUri;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::JSONRPCErrorError;
 use crate::ProcessId;
 
 pub const INITIALIZE_METHOD: &str = "initialize";
@@ -114,6 +117,9 @@ pub struct EnvironmentInfo {
     /// Operating system reported by the executor; absent for legacy exec-servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform_os: Option<String>,
+    /// Executor directories to prepend to `PATH` when missing, in priority order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prepend_path_dirs: Vec<PathUri>,
     /// Executor-local default directories for resolving `:tmpdir`, when reported.
     /// On Windows, a command's `TEMP` or `TMP` overrides take precedence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -140,6 +146,9 @@ pub struct EnvironmentCapabilities {
     /// Whether capability discovery applies the filesystem sandbox sent with each root.
     #[serde(default)]
     pub capability_discovery_sandbox: bool,
+    /// Whether this executor supports V2 capability discovery.
+    #[serde(default)]
+    pub capability_discovery_v2: bool,
     /// Whether this executor supports the `environmentConfig/read` request.
     #[serde(default)]
     pub environment_config_read: bool,
@@ -155,6 +164,12 @@ pub struct EnvironmentCapabilities {
     /// Whether requests may explicitly select the MXC Windows sandbox backend.
     #[serde(default)]
     pub windows_mxc: bool,
+    /// Whether a Linux filesystem sandbox preserves standard devices when `/` is writable.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub linux_root_write_preserves_devices: bool,
+    /// Whether approved Linux root writes preserve devices and denied root-metadata symlink targets.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub linux_approved_root_write_preserves_restrictions: bool,
 }
 
 /// Status returned by an initialized exec-server connection.
@@ -241,16 +256,26 @@ impl EnvironmentInfo {
             cwd: cwd.and_then(|cwd| PathUri::from_host_native_path(cwd).ok()),
             user_home_dir: PathUri::from_host_native_path("~").ok(),
             platform_os: Some(std::env::consts::OS.to_string()),
+            prepend_path_dirs: InstallContext::current()
+                .package_layout
+                .as_ref()
+                .and_then(|layout| layout.path_dir.as_ref())
+                .into_iter()
+                .map(PathUri::from_abs_path)
+                .collect(),
             temporary_directories: Some(temporary_directories),
             temp_dir,
             capabilities: EnvironmentCapabilities {
                 network_proxy_launch: true,
                 capability_discovery_sandbox: true,
+                capability_discovery_v2: true,
                 environment_config_read: true,
                 http_header_env_vars: true,
                 sandboxed_file_streaming: true,
                 shell_snapshot_v2: cfg!(unix),
                 windows_mxc,
+                linux_root_write_preserves_devices: cfg!(target_os = "linux"),
+                linux_approved_root_write_preserves_restrictions: cfg!(target_os = "linux"),
             },
         }
     }
@@ -326,6 +351,70 @@ pub struct ExecParams {
     /// Optional instructions for starting an executor-local managed-network proxy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_proxy: Option<RemoteNetworkProxyLaunchConfig>,
+}
+
+/// Executor ingress for process requests from clients that may omit the sandbox policy cwd.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireExecParams {
+    process_id: ProcessId,
+    metadata: Option<ExecMetadata>,
+    argv: Vec<String>,
+    cwd: PathUri,
+    env_policy: Option<ExecEnvPolicy>,
+    shell_snapshot: Option<ShellSnapshotRequest>,
+    env: HashMap<String, String>,
+    tty: bool,
+    #[serde(default)]
+    pipe_stdin: bool,
+    arg0: Option<String>,
+    sandbox: Option<WireFileSystemSandboxContext>,
+    #[serde(default)]
+    enforce_managed_network: bool,
+    managed_network: Option<ManagedNetworkSandboxContext>,
+    network_proxy: Option<RemoteNetworkProxyLaunchConfig>,
+}
+
+impl From<WireExecParams> for ExecParams {
+    fn from(wire: WireExecParams) -> Self {
+        let WireExecParams {
+            process_id,
+            metadata,
+            argv,
+            cwd,
+            env_policy,
+            shell_snapshot,
+            env,
+            tty,
+            pipe_stdin,
+            arg0,
+            sandbox,
+            enforce_managed_network,
+            managed_network,
+            network_proxy,
+        } = wire;
+        let sandbox = sandbox.map(|sandbox| {
+            // Legacy processes used the required process cwd as their sandbox policy cwd.
+            let policy_cwd = sandbox.cwd().unwrap_or(&cwd).clone();
+            sandbox.into_context(policy_cwd)
+        });
+        Self {
+            process_id,
+            metadata,
+            argv,
+            cwd,
+            env_policy,
+            shell_snapshot,
+            env,
+            tty,
+            pipe_stdin,
+            arg0,
+            sandbox,
+            enforce_managed_network,
+            managed_network,
+            network_proxy,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -461,6 +550,16 @@ pub struct FsReadFileParams {
     pub sandbox: Option<FileSystemSandboxContext>,
 }
 
+/// Filesystem RPC wire request with legacy optional sandbox policy cwd.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireFsReadFileParams {
+    path: PathUri,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    follow_symlinks: Option<bool>,
+    sandbox: Option<WireFileSystemSandboxContext>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FsReadFileResponse {
@@ -473,6 +572,15 @@ pub struct FsOpenParams {
     pub handle_id: String,
     pub path: PathUri,
     pub sandbox: Option<FileSystemSandboxContext>,
+}
+
+/// Filesystem RPC wire request with legacy optional sandbox policy cwd.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireFsOpenParams {
+    handle_id: String,
+    path: PathUri,
+    sandbox: Option<WireFileSystemSandboxContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -516,6 +624,17 @@ pub struct FsWriteFileParams {
     pub sandbox: Option<FileSystemSandboxContext>,
 }
 
+/// Filesystem RPC wire request with legacy optional sandbox policy cwd.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireFsWriteFileParams {
+    path: PathUri,
+    data_base64: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    follow_symlinks: Option<bool>,
+    sandbox: Option<WireFileSystemSandboxContext>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FsWriteFileResponse {}
@@ -530,6 +649,17 @@ pub struct FsCreateDirectoryParams {
     pub sandbox: Option<FileSystemSandboxContext>,
 }
 
+/// Filesystem RPC wire request with legacy optional sandbox policy cwd.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireFsCreateDirectoryParams {
+    path: PathUri,
+    recursive: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    follow_symlinks: Option<bool>,
+    sandbox: Option<WireFileSystemSandboxContext>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FsCreateDirectoryResponse {}
@@ -541,6 +671,16 @@ pub struct FsGetMetadataParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follow_symlinks: Option<bool>,
     pub sandbox: Option<FileSystemSandboxContext>,
+}
+
+/// Filesystem RPC wire request with legacy optional sandbox policy cwd.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireFsGetMetadataParams {
+    path: PathUri,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    follow_symlinks: Option<bool>,
+    sandbox: Option<WireFileSystemSandboxContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -561,6 +701,14 @@ pub struct FsCanonicalizeParams {
     pub sandbox: Option<FileSystemSandboxContext>,
 }
 
+/// Filesystem RPC wire request with legacy optional sandbox policy cwd.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireFsCanonicalizeParams {
+    path: PathUri,
+    sandbox: Option<WireFileSystemSandboxContext>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FsCanonicalizeResponse {
@@ -572,6 +720,14 @@ pub struct FsCanonicalizeResponse {
 pub struct FsReadDirectoryParams {
     pub path: PathUri,
     pub sandbox: Option<FileSystemSandboxContext>,
+}
+
+/// Filesystem RPC wire request with legacy optional sandbox policy cwd.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireFsReadDirectoryParams {
+    path: PathUri,
+    sandbox: Option<WireFileSystemSandboxContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -596,6 +752,15 @@ pub struct FsWalkParams {
     pub sandbox: Option<FileSystemSandboxContext>,
 }
 
+/// Filesystem RPC wire request with legacy optional sandbox policy cwd.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireFsWalkParams {
+    path: PathUri,
+    options: WalkOptions,
+    sandbox: Option<WireFileSystemSandboxContext>,
+}
+
 pub type FsWalkResponse = WalkOutcome;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -607,6 +772,18 @@ pub struct FsRemoveParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follow_symlinks: Option<bool>,
     pub sandbox: Option<FileSystemSandboxContext>,
+}
+
+/// Filesystem RPC wire request with legacy optional sandbox policy cwd.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireFsRemoveParams {
+    path: PathUri,
+    recursive: Option<bool>,
+    force: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    follow_symlinks: Option<bool>,
+    sandbox: Option<WireFileSystemSandboxContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -622,6 +799,16 @@ pub struct FsCopyParams {
     pub sandbox: Option<FileSystemSandboxContext>,
 }
 
+/// Filesystem RPC wire request with legacy optional sandbox policy cwd.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireFsCopyParams {
+    source_path: PathUri,
+    destination_path: PathUri,
+    recursive: bool,
+    sandbox: Option<WireFileSystemSandboxContext>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FsCopyResponse {}
@@ -631,6 +818,13 @@ pub struct FsCopyResponse {}
 #[serde(rename_all = "camelCase")]
 pub struct CapabilityRootsDiscoverParams {
     pub roots: Vec<CapabilityRootDiscoverRequest>,
+}
+
+/// Executor ingress for capability roots whose sandbox policy cwd may be absent.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireCapabilityRootsDiscoverParams {
+    roots: Vec<WireCapabilityRootDiscoverRequest>,
 }
 
 /// One caller-selected capability root.
@@ -644,6 +838,84 @@ pub struct CapabilityRootDiscoverRequest {
     /// Filesystem permissions for this root and its symlink targets.
     #[serde(default)]
     pub sandbox: Option<FileSystemSandboxContext>,
+}
+
+/// One executor-ingress capability root with legacy optional sandbox policy cwd.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireCapabilityRootDiscoverRequest {
+    id: String,
+    path: PathUri,
+    sandbox: Option<WireFileSystemSandboxContext>,
+}
+
+// Destructuring both types makes adding a request field require updating the wire conversion.
+macro_rules! impl_wire_filesystem_request {
+    ($($wire:ident => $request:ident { $($field:ident),+ $(,)? }),+ $(,)?) => {$(
+        impl From<$request> for $wire {
+            fn from(request: $request) -> Self {
+                let $request { $($field,)+ sandbox } = request;
+                Self { $($field,)+ sandbox: sandbox.map(Into::into) }
+            }
+        }
+
+        impl $wire {
+            /// Resolves optional wire sandbox intent before it reaches an executor handler.
+            pub fn try_into_request(
+                self,
+                resolve: fn(WireFileSystemSandboxContext) -> Result<FileSystemSandboxContext, JSONRPCErrorError>,
+            ) -> Result<$request, JSONRPCErrorError> {
+                let Self { $($field,)+ sandbox } = self;
+                Ok($request { $($field,)+ sandbox: sandbox.map(resolve).transpose()? })
+            }
+        }
+    )+};
+}
+
+impl_wire_filesystem_request! {
+    WireFsReadFileParams => FsReadFileParams { path, follow_symlinks },
+    WireFsOpenParams => FsOpenParams { handle_id, path },
+    WireFsWriteFileParams => FsWriteFileParams { path, data_base64, follow_symlinks },
+    WireFsCreateDirectoryParams => FsCreateDirectoryParams { path, recursive, follow_symlinks },
+    WireFsGetMetadataParams => FsGetMetadataParams { path, follow_symlinks },
+    WireFsCanonicalizeParams => FsCanonicalizeParams { path },
+    WireFsReadDirectoryParams => FsReadDirectoryParams { path },
+    WireFsWalkParams => FsWalkParams { path, options },
+    WireFsRemoveParams => FsRemoveParams { path, recursive, force, follow_symlinks },
+    WireFsCopyParams => FsCopyParams { source_path, destination_path, recursive },
+}
+
+impl WireCapabilityRootDiscoverRequest {
+    /// Resolves optional wire sandbox intent before it reaches an executor handler.
+    pub fn try_into_request(
+        self,
+        resolve: fn(
+            WireFileSystemSandboxContext,
+        ) -> Result<FileSystemSandboxContext, JSONRPCErrorError>,
+    ) -> Result<CapabilityRootDiscoverRequest, JSONRPCErrorError> {
+        let Self { id, path, sandbox } = self;
+        Ok(CapabilityRootDiscoverRequest {
+            id,
+            path,
+            sandbox: sandbox.map(resolve).transpose()?,
+        })
+    }
+}
+
+impl WireCapabilityRootsDiscoverParams {
+    /// Resolves each root's optional wire sandbox before it reaches an executor handler.
+    pub fn try_into_request(
+        self,
+        resolve: fn(
+            WireFileSystemSandboxContext,
+        ) -> Result<FileSystemSandboxContext, JSONRPCErrorError>,
+    ) -> Result<CapabilityRootsDiscoverParams, JSONRPCErrorError> {
+        let mut roots = Vec::with_capacity(self.roots.len());
+        for root in self.roots {
+            roots.push(root.try_into_request(resolve)?);
+        }
+        Ok(CapabilityRootsDiscoverParams { roots })
+    }
 }
 
 /// Executor-local discovery results in request order.
@@ -908,18 +1180,37 @@ mod base64_bytes {
 
 #[cfg(test)]
 mod tests {
+    use super::CapabilityRootDiscoverRequest;
+    #[test]
+    fn discovery_v2_support_defaults_off_for_older_executors() -> serde_json::Result<()> {
+        let legacy: super::EnvironmentCapabilities = serde_json::from_value(serde_json::json!({}))?;
+        assert!(!legacy.capability_discovery_v2);
+        let capabilities = super::EnvironmentInfo::local().capabilities;
+        assert_eq!(
+            serde_json::from_value::<super::EnvironmentCapabilities>(serde_json::to_value(
+                &capabilities
+            )?)?,
+            capabilities
+        );
+        Ok(())
+    }
+
     use super::EnvironmentCapabilities;
     use super::EnvironmentInfo;
     use super::ExecExitedNotification;
     use super::ExecMetadata;
     use super::ExecParams;
     use super::ExecResponse;
+    use super::FsOpenParams;
     use super::FsReadFileParams;
     use super::HttpRequestParams;
     use super::ProcessId;
     use super::ProcessSandboxType;
     use super::ShellInfo;
+    use super::WireFsOpenParams;
+    use super::WireFsReadFileParams;
     use codex_file_system::FileSystemSandboxContext;
+    use codex_file_system::WindowsSandboxSelection;
     use codex_network_proxy::ManagedNetworkSandboxContext;
     use codex_network_proxy::NetworkProxyAuditMetadata;
     use codex_network_proxy::NetworkProxyConfig;
@@ -1092,6 +1383,7 @@ mod tests {
                 cwd: None,
                 user_home_dir: None,
                 platform_os: None,
+                prepend_path_dirs: Vec::new(),
                 temporary_directories: None,
                 temp_dir: None,
                 capabilities: EnvironmentCapabilities::default(),
@@ -1112,12 +1404,49 @@ mod tests {
             EnvironmentCapabilities {
                 network_proxy_launch: true,
                 capability_discovery_sandbox: true,
+                capability_discovery_v2: false,
                 environment_config_read: false,
                 http_header_env_vars: false,
                 sandboxed_file_streaming: false,
                 shell_snapshot_v2: false,
                 windows_mxc: false,
+                linux_root_write_preserves_devices: false,
+                linux_approved_root_write_preserves_restrictions: false,
             }
+        );
+    }
+
+    #[test]
+    fn linux_approved_root_write_support_is_opt_in_on_the_wire() {
+        let mut capabilities = EnvironmentCapabilities::default();
+        let legacy = serde_json::to_value(&capabilities).unwrap();
+        assert!(legacy.get("linuxRootWritePreservesDevices").is_none());
+        assert!(
+            legacy
+                .get("linuxApprovedRootWritePreservesRestrictions")
+                .is_none()
+        );
+        capabilities.linux_root_write_preserves_devices = true;
+        let device_only = serde_json::from_value::<EnvironmentCapabilities>(
+            serde_json::to_value(&capabilities).unwrap(),
+        )
+        .unwrap();
+        assert!(!device_only.linux_approved_root_write_preserves_restrictions);
+        capabilities.linux_approved_root_write_preserves_restrictions = true;
+        assert_eq!(
+            serde_json::from_value::<EnvironmentCapabilities>(
+                serde_json::to_value(&capabilities).unwrap()
+            )
+            .unwrap(),
+            capabilities
+        );
+        let local = EnvironmentInfo::local().capabilities;
+        assert_eq!(
+            (
+                local.linux_root_write_preserves_devices,
+                local.linux_approved_root_write_preserves_restrictions,
+            ),
+            (cfg!(target_os = "linux"), cfg!(target_os = "linux"))
         );
     }
 
@@ -1130,10 +1459,12 @@ mod tests {
             "cwd": null,
             "userHomeDir": "file:///C:/Users/remote",
             "platformOs": "windows",
+            "prependPathDirs": ["file:///C:/tools/bin", "file:///D:/tools/bin"],
             "temporaryDirectories": ["file:///C:/Temp", "file:///D:/Temp"],
             "capabilities": {
                 "networkProxyLaunch": false,
                 "capabilityDiscoverySandbox": false,
+                "capabilityDiscoveryV2": false,
                 "environmentConfigRead": false,
                 "httpHeaderEnvVars": false,
                 "sandboxedFileStreaming": false,
@@ -1221,7 +1552,7 @@ mod tests {
         }))
         .expect_err("native absolute path should not deserialize as a URI");
 
-        let sandbox = FileSystemSandboxContext::from_permission_profile_with_cwd(
+        let sandbox = FileSystemSandboxContext::from_permission_profile(
             PermissionProfile::default(),
             PathUri::from_host_native_path(&native_cwd).expect("cwd URI"),
         );
@@ -1272,11 +1603,14 @@ mod tests {
             network: NetworkSandboxPolicy::Restricted,
         };
         let mut sandbox =
-            FileSystemSandboxContext::from_permission_profile_with_cwd(permissions, cwd.clone());
+            FileSystemSandboxContext::from_permission_profile(permissions, cwd.clone());
         sandbox.user_home_dir = Some(cwd.clone());
+        sandbox.windows_sandbox_selection = WindowsSandboxSelection::Mxc;
 
         let serialized = serde_json::to_value(&sandbox).expect("serialize sandbox");
 
+        assert_eq!(serialized["windowsSandboxLevel"], "mxc");
+        assert_eq!(serialized["cwd"], serde_json::json!(cwd.to_string()));
         assert_eq!(
             serialized["userHomeDir"],
             serde_json::json!(cwd.to_string())
@@ -1321,6 +1655,150 @@ mod tests {
         );
     }
 
+    /// The filesystem RPC preserves Windows drive and UNC permission URIs on any host.
+    #[test]
+    fn filesystem_protocol_preserves_foreign_permission_path_json() {
+        let cwd = PathUri::parse("file:///C:/a%20b").expect("drive cwd URI");
+        let unc = PathUri::parse("file://host/s/a%20b").expect("UNC path URI");
+        let permissions = PermissionProfile::Managed {
+            file_system: ManagedFileSystemPermissions::Restricted {
+                entries: [cwd.clone(), unc.clone()]
+                    .into_iter()
+                    .map(|path| {
+                        FileSystemSandboxEntry::new(path.into(), FileSystemAccessMode::Read)
+                    })
+                    .collect(),
+                glob_scan_max_depth: None,
+            },
+            network: NetworkSandboxPolicy::Restricted,
+        };
+        let params = FsReadFileParams {
+            path: unc,
+            follow_symlinks: None,
+            sandbox: Some(FileSystemSandboxContext::from_permission_profile(
+                permissions,
+                cwd,
+            )),
+        };
+        let serialized = serde_json::to_value(WireFsReadFileParams::from(params.clone()))
+            .expect("serialize filesystem wire request");
+        assert_eq!(
+            serialized["sandbox"]["permissions"],
+            serde_json::json!({
+                "type": "managed",
+                "file_system": {
+                    "type": "restricted",
+                    "entries": [
+                        {"path": {"type": "path", "path": "file:///C:/a%20b"}, "access": "read"},
+                        {"path": {"type": "path", "path": "file://host/s/a%20b"}, "access": "read"}
+                    ]
+                },
+                "network": "restricted"
+            }),
+        );
+        assert_eq!(
+            serde_json::from_value::<WireFsReadFileParams>(serialized)
+                .expect("deserialize filesystem wire request")
+                .try_into_request(|wire| {
+                    let cwd = wire.cwd().expect("explicit client policy cwd").clone();
+                    Ok(wire.into_context(cwd))
+                })
+                .expect("resolve filesystem request"),
+            params,
+        );
+    }
+
+    /// Executor ingress must use the full policy context instead of interpreting legacy helper fields.
+    #[test]
+    fn filesystem_protocol_prefers_explicit_policy_paths_over_legacy_fields() {
+        let cwd = PathUri::parse("file:///workspace/selected").expect("selected policy cwd");
+        let workspace = PathUri::parse("file:///workspace/other").expect("selected workspace");
+        let path = cwd.join("note.txt").expect("read path");
+        let sandbox = FileSystemSandboxContext {
+            workspace_roots: vec![workspace],
+            ..FileSystemSandboxContext::from_permission_profile(PermissionProfile::Disabled, cwd)
+        };
+        let params = FsReadFileParams {
+            path,
+            follow_symlinks: None,
+            sandbox: Some(sandbox),
+        };
+        let mut json = serde_json::to_value(WireFsReadFileParams::from(params.clone()))
+            .expect("serialize wire read");
+        json["sandbox"]["cwd"] = serde_json::json!("file:///legacy");
+        json["sandbox"]["workspaceRoots"] = serde_json::json!(["file:///legacy"]);
+        let wire: WireFsReadFileParams = serde_json::from_value(json).expect("wire read");
+        let request = wire
+            .try_into_request(|wire| {
+                let cwd = wire.cwd().expect("explicit policy cwd").clone();
+                Ok(wire.into_context(cwd))
+            })
+            .expect("strict executor read");
+        assert_eq!(request, params);
+    }
+
+    /// Only filesystem RPCs need the additive policy field; capability discovery keeps its original wire cwd.
+    #[test]
+    fn filesystem_open_and_capability_discovery_keep_their_existing_cwd_contracts() {
+        let cwd = PathUri::parse("file:///D:/selected").expect("Windows policy cwd");
+        let path = cwd.join("note.txt").expect("read path");
+        let mut sandbox = FileSystemSandboxContext::from_permission_profile(
+            PermissionProfile::Disabled,
+            cwd.clone(),
+        );
+        sandbox.windows_sandbox_selection = WindowsSandboxSelection::Mxc;
+        let open = FsOpenParams {
+            handle_id: "handle".to_owned(),
+            path: path.clone(),
+            sandbox: Some(sandbox.clone()),
+        };
+        let capability = CapabilityRootDiscoverRequest {
+            id: "root".to_owned(),
+            path,
+            sandbox: Some(sandbox),
+        };
+        let open_wire =
+            serde_json::to_value(WireFsOpenParams::from(open.clone())).expect("serialize open");
+        let capability_wire = serde_json::to_value(&capability).expect("serialize capability");
+        assert_eq!(
+            (
+                open_wire["sandbox"].get("cwd"),
+                open_wire["sandbox"].get("workspaceRoots"),
+                open_wire["sandbox"].get("policyContext"),
+                open_wire["sandbox"].get("windowsSandboxLevel"),
+                capability_wire["sandbox"].get("cwd"),
+                capability_wire["sandbox"].get("workspaceRoots"),
+                capability_wire["sandbox"].get("policyContext"),
+                capability_wire["sandbox"].get("windowsSandboxLevel"),
+            ),
+            (
+                None,
+                None,
+                Some(&serde_json::json!({"cwd": cwd, "workspaceRoots": [cwd]})),
+                Some(&serde_json::json!("mxc")),
+                Some(&serde_json::json!(cwd)),
+                Some(&serde_json::json!([cwd])),
+                None,
+                Some(&serde_json::json!("mxc")),
+            )
+        );
+        assert_eq!(
+            serde_json::from_value::<WireFsOpenParams>(open_wire)
+                .expect("deserialize wire open")
+                .try_into_request(|wire| {
+                    let cwd = wire.cwd().expect("explicit client policy cwd").clone();
+                    Ok(wire.into_context(cwd))
+                })
+                .expect("resolve open"),
+            open
+        );
+        assert_eq!(
+            serde_json::from_value::<CapabilityRootDiscoverRequest>(capability_wire)
+                .expect("deserialize capability"),
+            capability
+        );
+    }
+
     #[test]
     fn filesystem_protocol_round_trips_legacy_policy_paths_as_uris() {
         let native_cwd = std::env::current_dir().expect("current directory");
@@ -1336,8 +1814,7 @@ mod tests {
             &file_system_policy,
             NetworkSandboxPolicy::Restricted,
         );
-        let sandbox =
-            FileSystemSandboxContext::from_permission_profile_with_cwd(permissions, cwd.clone());
+        let sandbox = FileSystemSandboxContext::from_permission_profile(permissions, cwd.clone());
 
         let serialized = serde_json::to_value(&sandbox).expect("serialize sandbox");
 

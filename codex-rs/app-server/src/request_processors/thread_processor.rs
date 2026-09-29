@@ -1,3 +1,6 @@
+#[path = "daemon_continuation.rs"]
+mod daemon_continuation;
+
 #[path = "daemon_snapshot.rs"]
 mod daemon_snapshot;
 
@@ -12,6 +15,8 @@ use crate::error_code::method_not_found;
 use crate::process_config_overrides::apply_thread_runtime_overrides;
 use codex_app_server_protocol::SelectedCapabilityRoot;
 use codex_app_server_protocol::ThreadHistoryMode as ApiThreadHistoryMode;
+use codex_app_server_protocol::ThreadItemsListAnchor;
+use codex_app_server_protocol::ThreadItemsListCursor;
 use codex_app_server_protocol::ThreadRevertParams;
 use codex_app_server_protocol::ThreadRevertResponse;
 use codex_app_server_protocol::ThreadRevertedNotification;
@@ -19,6 +24,7 @@ use codex_app_server_protocol::ThreadSection;
 use codex_app_server_protocol::ThreadSectionAppearance;
 use codex_app_server_protocol::ThreadSectionMoveParams;
 use codex_app_server_protocol::ThreadSectionMoveResponse;
+use codex_config::types::WindowsSandboxModeToml;
 use codex_extension_api::ExtensionDataInit;
 use codex_extension_api::ThreadIdleCause;
 use codex_protocol::SanitizedGitUrl;
@@ -461,7 +467,7 @@ pub(crate) struct ThreadRequestProcessor {
 /// Whether resume attaches a client or restores a cold runtime during daemon startup.
 pub(crate) enum ThreadResumeTarget {
     Client(ConnectionRequestId),
-    DaemonRecovery,
+    DaemonRecovery(Option<codex_app_server_transport::daemon_recovery::InterruptedTurn>),
 }
 
 /// Outcome of trying to satisfy a resume request from an already loaded thread.
@@ -1358,6 +1364,7 @@ impl ThreadRequestProcessor {
 
         if requested_cwd.is_some()
             && config.active_project.trust_level.is_none()
+            && !config.config_layer_stack.is_projectless()
             && effective_permissions_trust_project
         {
             let trust_target = resolve_root_git_project_for_trust(LOCAL_FS.as_ref(), &config.cwd)
@@ -1478,7 +1485,15 @@ impl ThreadRequestProcessor {
             )
             .await?
         };
-        start_options.reserved_thread_id = reserved_thread_id;
+        let thread_id = reserved_thread_id
+            .unwrap_or_else(|| listener_task_context.thread_manager.reserve_thread_id());
+        start_options.reserved_thread_id = Some(thread_id);
+        // Startup can prewarm the Responses socket before start_thread returns.
+        // Register the creating client first so that handshake can request attestation.
+        listener_task_context
+            .thread_state_manager
+            .try_add_connection_to_thread(thread_id, request_id.connection_id)
+            .await;
         let create_thread_started_at = std::time::Instant::now();
         let new_thread = listener_task_context
             .thread_manager
@@ -1514,6 +1529,10 @@ impl ThreadRequestProcessor {
         } = match new_thread {
             Ok(new_thread) => new_thread,
             Err(err) => {
+                listener_task_context
+                    .thread_state_manager
+                    .remove_thread_state(thread_id)
+                    .await;
                 remove_pending_thread_metadata(thread_store.as_ref(), reserved_thread_id).await;
                 return Err(match err.details() {
                     CodexErrorDetails::InvalidRequest(message) => invalid_request(message.clone()),
@@ -1701,6 +1720,17 @@ impl ThreadRequestProcessor {
             .map_err(|err| invalid_request(format!("invalid session id: {err}")))?;
 
         let subtree_thread_ids = self.state_db_spawn_subtree_thread_ids(thread_id).await?;
+
+        // Fresh threads have no rollout until their first turn. Materialize the
+        // loaded persistent thread before looking it up for archival.
+        if let Ok(thread) = self.thread_manager.get_thread(thread_id).await
+            && !thread.config_snapshot().await.ephemeral
+        {
+            self.thread_store
+                .persist_thread(thread_id, PersistContext::Standard)
+                .await
+                .map_err(|err| thread_store_mutation_error("archive", err))?;
+        }
 
         let mut archive_thread_ids = Vec::new();
         match self
@@ -2037,7 +2067,7 @@ impl ThreadRequestProcessor {
             &self.config.cwd,
         );
         if let Ok(loaded_thread) = self.thread_manager.get_thread(thread_uuid).await {
-            thread.session_id = loaded_thread.session_configured().session_id.to_string();
+            thread.session_id = loaded_thread.startup_metadata().session_id.to_string();
             let config_snapshot = loaded_thread.config_snapshot().await;
             apply_live_thread_settings(&mut thread, &config_snapshot);
         }
@@ -2124,6 +2154,11 @@ impl ThreadRequestProcessor {
         let (thread_id, thread) = self.load_thread(&thread_id).await?;
         ensure_direct_input_allowed(thread.as_ref()).await?;
         let config_snapshot = thread.config_snapshot().await;
+        if config_snapshot.ephemeral {
+            return Err(invalid_request(
+                "ephemeral threads do not support thread/revert",
+            ));
+        }
         if !matches!(config_snapshot.history_mode, ThreadHistoryMode::Paginated) {
             return Err(invalid_request(
                 "thread/revert only supports paginated threads",
@@ -3273,7 +3308,7 @@ impl ThreadRequestProcessor {
                     thread_id,
                     turn_id: Some(turn_id.to_string()),
                     include_archived: true,
-                    cursor: cursor.clone(),
+                    position: cursor.clone().map(StoreListItemsPosition::Cursor),
                     page_size: THREAD_ITEMS_MAX_LIMIT,
                     sort_direction: StoreSortDirection::Asc,
                     sort_key: StoreItemSortKey::CreatedAtOrdinal,
@@ -3389,7 +3424,7 @@ impl ThreadRequestProcessor {
                 thread_id,
                 turn_id: None,
                 include_archived: true,
-                cursor: None,
+                position: None,
                 page_size: 1,
                 sort_direction: StoreSortDirection::Desc,
                 sort_key: StoreItemSortKey::CreatedAtOrdinal,
@@ -3411,6 +3446,18 @@ impl ThreadRequestProcessor {
             limit,
             sort_direction,
         } = params;
+        let position = cursor.map(|cursor| match cursor {
+            ThreadItemsListCursor::Opaque(cursor) => StoreListItemsPosition::Cursor(cursor),
+            ThreadItemsListCursor::Anchor(ThreadItemsListAnchor::Item { item_id }) => {
+                StoreListItemsPosition::ItemAnchor { item_id }
+            }
+        });
+        let has_anchor = matches!(position, Some(StoreListItemsPosition::ItemAnchor { .. }));
+        if has_anchor && turn_id.as_deref().is_none_or(str::is_empty) {
+            return Err(invalid_params(
+                "turnId is required when cursor is an item anchor",
+            ));
+        }
         let thread_id = ThreadId::from_string(&thread_id)
             .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
         let page_size = limit
@@ -3423,7 +3470,7 @@ impl ThreadRequestProcessor {
                 thread_id,
                 turn_id,
                 include_archived: true,
-                cursor,
+                position,
                 page_size,
                 sort_direction: match sort_direction.unwrap_or(SortDirection::Asc) {
                     SortDirection::Asc => StoreSortDirection::Asc,
@@ -3434,6 +3481,9 @@ impl ThreadRequestProcessor {
             })
             .await
             .map_err(|err| match err {
+                ThreadStoreError::InvalidRequest { message } if has_anchor => {
+                    invalid_params(message)
+                }
                 ThreadStoreError::InvalidRequest { message } => invalid_request(message),
                 ThreadStoreError::Unsupported { .. } => {
                     method_not_found("thread/items/list is not supported yet")
@@ -3448,8 +3498,15 @@ impl ThreadRequestProcessor {
             .into_iter()
             .map(|stored_item| {
                 let turn_id = stored_item.turn_id.clone();
+                let started_at_ms = stored_item.started_at_ms;
+                let completed_at_ms = stored_item.completed_at_ms;
                 let item = deserialize_stored_thread_item(stored_item)?;
-                Ok(ThreadItemEntry { turn_id, item })
+                Ok(ThreadItemEntry {
+                    turn_id,
+                    item,
+                    started_at_ms,
+                    completed_at_ms,
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -3636,11 +3693,15 @@ impl ThreadRequestProcessor {
                 }
                 RunningThreadResumeResult::NotRunning(stored_thread) => stored_thread,
             },
-            ThreadResumeTarget::DaemonRecovery => {
+            ThreadResumeTarget::DaemonRecovery(saved) => {
                 let thread_id = ThreadId::from_string(&params.thread_id)
                     .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
                 // Recheck under the same permit as client resume, including after config loading.
                 if self.thread_manager.get_thread(thread_id).await.is_ok() {
+                    if let Some(saved) = saved {
+                        self.continue_daemon_turn(&params.thread_id, saved.clone())
+                            .await;
+                    }
                     return Ok(ControlFlow::Break(()));
                 }
                 None
@@ -3925,7 +3986,7 @@ impl ThreadRequestProcessor {
                     ThreadResumeTarget::Client(request_id) => {
                         self.request_trace_context(request_id).await
                     }
-                    ThreadResumeTarget::DaemonRecovery => None,
+                    ThreadResumeTarget::DaemonRecovery(_) => None,
                 },
                 client_mcp_extensions,
             )
@@ -3946,6 +4007,10 @@ impl ThreadRequestProcessor {
                     codex_thread
                         .emit_thread_idle_lifecycle_if_idle(ThreadIdleCause::Completed)
                         .await;
+                    if let ThreadResumeTarget::DaemonRecovery(Some(saved)) = target {
+                        self.continue_daemon_turn(&thread_id.to_string(), saved.clone())
+                            .await;
+                    }
                     let state = self.thread_state_manager.thread_state(thread_id).await;
                     self.ensure_listener_task_running(thread_id, Arc::clone(&codex_thread), state)
                         .await?;
@@ -4391,7 +4456,7 @@ impl ThreadRequestProcessor {
                 config_snapshot.model_provider_id.as_str(),
                 /*include_turns*/ false,
             );
-            thread_summary.session_id = existing_thread.session_configured().session_id.to_string();
+            thread_summary.session_id = existing_thread.startup_metadata().session_id.to_string();
             thread_summary.thread_source = config_snapshot.thread_source.clone().map(Into::into);
             apply_live_thread_settings(&mut thread_summary, &config_snapshot);
             thread_summary.can_accept_direct_input = Some(can_accept_direct_input(
@@ -4681,7 +4746,7 @@ impl ThreadRequestProcessor {
         include_turns: bool,
     ) -> std::result::Result<Thread, String> {
         let config_snapshot = thread.config_snapshot().await;
-        let session_id = thread.session_configured().session_id.to_string();
+        let session_id = thread.startup_metadata().session_id.to_string();
         let can_accept_direct_input = can_accept_direct_input(
             thread.multi_agent_version(),
             &config_snapshot.session_source,
@@ -4927,18 +4992,17 @@ impl ThreadRequestProcessor {
         // Persist Windows sandbox mode.
         let mut cli_overrides = cli_overrides.unwrap_or_default();
         if cfg!(windows) {
-            match WindowsSandboxLevel::from_config(&self.config) {
-                WindowsSandboxLevel::Elevated => {
-                    cli_overrides
-                        .insert("windows.sandbox".to_string(), serde_json::json!("elevated"));
+            let mode = self.config.permissions.windows_sandbox_mode.or_else(|| {
+                match WindowsSandboxLevel::from_config(&self.config) {
+                    WindowsSandboxLevel::Elevated => Some(WindowsSandboxModeToml::Elevated),
+                    WindowsSandboxLevel::RestrictedToken => {
+                        Some(WindowsSandboxModeToml::Unelevated)
+                    }
+                    WindowsSandboxLevel::Disabled => None,
                 }
-                WindowsSandboxLevel::RestrictedToken => {
-                    cli_overrides.insert(
-                        "windows.sandbox".to_string(),
-                        serde_json::json!("unelevated"),
-                    );
-                }
-                WindowsSandboxLevel::Disabled | WindowsSandboxLevel::Mxc => {}
+            });
+            if let Some(mode) = mode {
+                cli_overrides.insert("windows.sandbox".to_string(), serde_json::json!(mode));
             }
         }
         let request_overrides = if cli_overrides.is_empty() {
@@ -5727,39 +5791,10 @@ pub(super) fn build_thread_resume_initial_turns_page(
 
 pub(super) fn apply_thread_turns_items_view(turns: &mut [Turn], items_view: TurnItemsView) {
     for turn in turns {
-        match items_view {
-            TurnItemsView::NotLoaded => {
-                turn.items.clear();
-                turn.items_view = TurnItemsView::NotLoaded;
-            }
-            TurnItemsView::Summary => {
-                let first_user_message = turn
-                    .items
-                    .iter()
-                    .find(|item| matches!(item, ThreadItem::UserMessage { .. }))
-                    .cloned();
-                let final_agent_message = turn
-                    .items
-                    .iter()
-                    .rev()
-                    .find(|item| matches!(item, ThreadItem::AgentMessage { .. }))
-                    .cloned();
-                turn.items = match (first_user_message, final_agent_message) {
-                    (Some(user_message), Some(agent_message))
-                        if user_message.id() != agent_message.id() =>
-                    {
-                        vec![user_message, agent_message]
-                    }
-                    (Some(user_message), _) => vec![user_message],
-                    (None, Some(agent_message)) => vec![agent_message],
-                    (None, None) => Vec::new(),
-                };
-                turn.items_view = TurnItemsView::Summary;
-            }
-            TurnItemsView::Full => {
-                turn.items_view = TurnItemsView::Full;
-            }
+        if !matches!(items_view, TurnItemsView::Full) && turn.items_view != items_view {
+            turn.items = items_view.project_items(&turn.items);
         }
+        turn.items_view = items_view;
     }
 }
 
@@ -6320,7 +6355,7 @@ fn build_thread_from_loaded_snapshot(
 ) -> Thread {
     build_thread_from_snapshot(
         thread_id,
-        loaded_thread.session_configured().session_id.to_string(),
+        loaded_thread.startup_metadata().session_id.to_string(),
         loaded_thread.multi_agent_version(),
         config_snapshot,
         loaded_thread.rollout_path(),

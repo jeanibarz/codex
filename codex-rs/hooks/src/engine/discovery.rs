@@ -30,8 +30,8 @@ use super::HookListEntry;
 use super::HookListEntryHandler;
 use super::dispatcher::hook_event_name_label;
 use crate::config_rules::hook_states_from_stack;
+use crate::engine::HookMatcher;
 use crate::events::common::matcher_pattern_for_event;
-use crate::events::common::validate_matcher_pattern;
 use crate::events::session_end::SESSION_END_DEFAULT_TIMEOUT_SEC;
 use crate::events::session_end::SESSION_END_MAX_TIMEOUT_SEC;
 use crate::output_spill::AdditionalContextLimit;
@@ -501,20 +501,22 @@ fn append_matcher_groups(
 ) {
     for (group_index, group) in groups.into_iter().enumerate() {
         let matcher = matcher_pattern_for_event(event_name, group.matcher.as_deref());
-        if let Some(matcher) = matcher
-            && let Err(err) = validate_matcher_pattern(matcher)
-        {
-            let warning = format!(
-                "invalid matcher {matcher:?} in {}: {err}",
-                source.path.display()
-            );
-            if group.hooks.is_empty() {
-                warnings.push(warning);
-            } else {
-                source.record_load_failure(warning, warnings);
+        let compiled_matcher = match matcher.map(HookMatcher::new).transpose() {
+            Ok(matcher) => matcher,
+            Err(err) => {
+                let matcher = matcher.unwrap_or_default();
+                let warning = format!(
+                    "invalid matcher {matcher:?} in {}: {err}",
+                    source.path.display()
+                );
+                if group.hooks.is_empty() {
+                    warnings.push(warning);
+                } else {
+                    source.record_load_failure(warning, warnings);
+                }
+                continue;
             }
-            continue;
-        }
+        };
         for (handler_index, handler) in group.hooks.iter().cloned().enumerate() {
             let normalized = match handler {
                 HookHandlerConfig::Command {
@@ -745,10 +747,8 @@ fn append_matcher_groups(
                 handlers.push(ConfiguredHandler {
                     builtin,
                     event_name,
-                    matcher: crate::engine::dispatcher::encode_claude_conditional_matcher(
-                        matcher,
-                        &claude_conditions,
-                    ),
+                    matcher: compiled_matcher.clone(),
+                    claude_conditions,
                     timeout_sec,
                     status_message,
                     additional_context_limit: AdditionalContextLimit::from_config(
@@ -1140,6 +1140,7 @@ pub(crate) fn append_settings_file_handlers(result: &mut DiscoveryResult, settin
 
 #[cfg(test)]
 mod tests {
+    use super::HookMatcher;
     use codex_config::ConfigLayerEntry;
     use codex_config::ConfigLayerSource;
     use codex_config::HookEventsToml;
@@ -1537,6 +1538,7 @@ mod tests {
                 builtin: false,
                 event_name: HookEventName::UserPromptSubmit,
                 matcher: None,
+                claude_conditions: Vec::new(),
                 timeout_sec: 600,
                 status_message: None,
                 additional_context_limit: Default::default(),
@@ -1576,7 +1578,8 @@ mod tests {
             vec![ConfiguredHandler {
                 builtin: false,
                 event_name: HookEventName::PreToolUse,
-                matcher: Some("^Bash$".to_string()),
+                matcher: Some(HookMatcher::new("^Bash$").expect("valid matcher")),
+                claude_conditions: Vec::new(),
                 timeout_sec: 600,
                 status_message: None,
                 additional_context_limit: Default::default(),
@@ -1646,7 +1649,7 @@ mod tests {
         assert_eq!(
             handlers
                 .iter()
-                .map(|handler| handler.matcher.as_deref())
+                .map(|handler| handler.matcher.as_ref().map(HookMatcher::as_str))
                 .collect::<Vec<_>>(),
             vec![Some("other"), Some("other")]
         );
@@ -1726,7 +1729,7 @@ mod tests {
                 .iter()
                 .map(|handler| (
                     handler.timeout_sec,
-                    handler.matcher.as_deref(),
+                    handler.matcher.as_ref().map(HookMatcher::as_str),
                     handler.execution_mode()
                 ))
                 .collect::<Vec<_>>(),
@@ -1838,7 +1841,10 @@ mod tests {
 
         assert_eq!(warnings, Vec::<String>::new());
         assert_eq!(handlers.len(), 1);
-        assert_eq!(handlers[0].matcher.as_deref(), Some("*"));
+        assert_eq!(
+            handlers[0].matcher.as_ref().map(HookMatcher::as_str),
+            Some("*")
+        );
     }
 
     #[test]
@@ -1862,7 +1868,10 @@ mod tests {
         assert_eq!(warnings, Vec::<String>::new());
         assert_eq!(handlers.len(), 1);
         assert_eq!(handlers[0].event_name, HookEventName::PostToolUse);
-        assert_eq!(handlers[0].matcher.as_deref(), Some("Edit|Write"));
+        assert_eq!(
+            handlers[0].matcher.as_ref().map(HookMatcher::as_str),
+            Some("Edit|Write")
+        );
     }
 
     #[test]

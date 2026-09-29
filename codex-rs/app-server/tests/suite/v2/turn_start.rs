@@ -34,6 +34,7 @@ use codex_app_server_protocol::CyberAccessProgram;
 use codex_app_server_protocol::FileChangeApprovalDecision;
 use codex_app_server_protocol::FileChangePatchUpdatedNotification;
 use codex_app_server_protocol::FileChangeRequestApprovalResponse;
+use codex_app_server_protocol::ImageReference as V2ImageReference;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::JSONRPCError;
@@ -267,7 +268,15 @@ async fn turn_start_omits_notification_media_without_changing_model_input() -> R
                         text_elements: Vec::new(),
                     },
                     V2UserInput::Image {
-                        url: TINY_PNG_DATA_URL.to_string(),
+                        image: V2ImageReference::Inline {
+                            url: TINY_PNG_DATA_URL.to_string(),
+                        },
+                        detail: None,
+                    },
+                    V2UserInput::Image {
+                        image: V2ImageReference::File {
+                            file_id: "file_123".to_string(),
+                        },
                         detail: None,
                     },
                 ],
@@ -315,6 +324,8 @@ async fn turn_start_omits_notification_media_without_changing_model_input() -> R
                     content[0]["type"].as_str(),
                     Some("text" | "input_text")
                 ));
+                assert!(content[0].get("fileId").is_none());
+                assert!(content[0].get("file_id").is_none());
                 user_message_notifications.push(notification.method);
             }
         }
@@ -332,14 +343,28 @@ async fn turn_start_omits_notification_media_without_changing_model_input() -> R
     );
 
     let model_input_images = received_response_input_images(&server).await?;
-    assert_eq!(model_input_images.len(), 1);
-    assert_eq!(model_input_images[0]["image_url"], TINY_PNG_DATA_URL);
+    assert_eq!(model_input_images.len(), 2);
+    assert!(
+        model_input_images
+            .iter()
+            .any(|image| image["image_url"] == TINY_PNG_DATA_URL)
+    );
+    assert!(
+        model_input_images
+            .iter()
+            .any(|image| image["file_id"] == "file_123")
+    );
 
     Ok(())
 }
 
+#[test_case(None; "analytics_unset")]
+#[test_case(Some(true); "analytics_enabled")]
+#[test_case(Some(false); "analytics_disabled")]
 #[tokio::test]
-async fn tool_call_metadata_stays_out_of_raw_response_item_notifications() -> Result<()> {
+async fn tool_call_metadata_stays_out_of_raw_response_item_notifications(
+    analytics_enabled: Option<bool>,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let arguments = json!({"query": "redaction"});
@@ -372,7 +397,8 @@ async fn tool_call_metadata_stays_out_of_raw_response_item_notifications() -> Re
             "params": {"name": "calendar_list_events", "arguments": arguments},
         })))
         .respond_with(move |request: &Request| {
-            let request: Value = serde_json::from_slice(&request.body).unwrap();
+            let request: Value =
+                serde_json::from_slice(&request.body).expect("valid MCP tool call JSON");
             ResponseTemplate::new(200).set_body_json(json!({
                 "jsonrpc": "2.0",
                 "id": request["id"],
@@ -384,7 +410,7 @@ async fn tool_call_metadata_stays_out_of_raw_response_item_notifications() -> Re
         .mount(&server)
         .await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
+    let mut config = MockResponsesConfig::new(&server.uri())
         .with_provider_name("OpenAI")
         .with_provider_config("supports_websockets = false")
         .with_root_config(&format!(
@@ -392,8 +418,11 @@ async fn tool_call_metadata_stays_out_of_raw_response_item_notifications() -> Re
             apps.chatgpt_base_url
         ))
         .enable_feature(Feature::Apps)
-        .enable_feature(Feature::ExecutedToolCallMetadata)
-        .write(codex_home.path())?;
+        .enable_feature(Feature::ExecutedToolCallMetadata);
+    if let Some(enabled) = analytics_enabled {
+        config = config.with_extra_config(&format!("[analytics]\nenabled = {enabled}"));
+    }
+    config.write(codex_home.path())?;
     write_chatgpt_auth(
         codex_home.path(),
         ChatGptAuthFixture::new("chatgpt-test-token")
@@ -510,11 +539,10 @@ async fn tool_call_metadata_stays_out_of_raw_response_item_notifications() -> Re
         .context("persisted MCP output")?;
     assert_eq!(captured["output"], raw_output["output"]);
     // The custom inference endpoint omits raw metadata, so verify capture in the rollout.
-    let expected_metadata: Option<&Value> = None;
     assert_eq!(
         captured["internal_chat_message_metadata_passthrough"]["executed_tool_calls"][0]
             .get("tool_result_metadata"),
-        expected_metadata,
+        (analytics_enabled != Some(false)).then_some(&result_metadata),
     );
     Ok(())
 }
@@ -675,7 +703,7 @@ async fn turn_start_steers_active_turn_and_returns_active_turn_id() -> Result<()
                     text: "start".to_string(),
                     text_elements: Vec::new(),
                 }],
-                turn_trigger: Some("user".to_string()),
+                turn_trigger: Some("goal".to_string()),
                 cyber_access_program: Some(CyberAccessProgram::DaybreakBlue),
                 ..Default::default()
             },
@@ -718,7 +746,7 @@ async fn turn_start_steers_active_turn_and_returns_active_turn_id() -> Result<()
                     text: "steer".to_string(),
                     text_elements: Vec::new(),
                 }],
-                turn_trigger: Some("goal".to_string()),
+                turn_trigger: Some("user".to_string()),
                 cyber_access_program: Some(CyberAccessProgram::Standard),
                 ..Default::default()
             },
@@ -745,7 +773,7 @@ async fn turn_start_steers_active_turn_and_returns_active_turn_id() -> Result<()
                 .as_str()
                 .context("expected x-codex-turn-metadata")?,
         )?;
-        assert_eq!(turn_metadata["turn_trigger"].as_str(), Some("user"));
+        assert_eq!(turn_metadata["turn_trigger"].as_str(), Some("goal"));
     }
     Ok(())
 }
@@ -816,15 +844,17 @@ async fn turn_start_additional_context_flows_to_model_input() -> Result<()> {
     Ok(())
 }
 
+#[test_case::test_case(None, TEST_ORIGINATOR)]
 #[tokio::test]
-async fn turn_start_sends_originator_header() -> Result<()> {
+async fn turn_start_sends_originator_header(
+    service_name: Option<&str>,
+    expected_originator: &str,
+) -> Result<()> {
     let responses = vec![create_final_assistant_message_sse_response("Done")?];
     let server = create_mock_responses_server_sequence_unchecked(responses).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
-        .enable_feature(Feature::Personality)
-        .write(codex_home.path())?;
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -844,6 +874,7 @@ async fn turn_start_sends_originator_header() -> Result<()> {
         .start_thread(ThreadStartParams {
             model: Some("mock-model".to_string()),
             thread_source: Some(ThreadSource::User),
+            service_name: service_name.map(str::to_string),
             ..Default::default()
         })
         .await?;
@@ -879,7 +910,7 @@ async fn turn_start_sends_originator_header() -> Result<()> {
             .headers
             .get("originator")
             .expect("originator header missing");
-        assert_eq!(originator.to_str()?, TEST_ORIGINATOR);
+        assert_eq!(originator.to_str()?, expected_originator);
     }
 
     Ok(())
@@ -891,9 +922,7 @@ async fn turn_start_emits_user_message_item_with_text_elements() -> Result<()> {
     let server = create_mock_responses_server_sequence_unchecked(responses).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
-        .enable_feature(Feature::Personality)
-        .write(codex_home.path())?;
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -969,9 +998,7 @@ async fn turn_start_emits_thread_scoped_warning_notification_for_trimmed_skills(
     let server = create_mock_responses_server_sequence_unchecked(responses).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
-        .enable_feature(Feature::Personality)
-        .write(codex_home.path())?;
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
     write_models_cache(codex_home.path()).await?;
     let cache_path = codex_home.path().join("models_cache.json");
     let mut cache: serde_json::Value =
@@ -1029,7 +1056,7 @@ async fn turn_start_emits_thread_scoped_warning_notification_for_trimmed_skills(
     assert_eq!(warning.thread_id.as_deref(), Some(thread.id.as_str()));
     assert_eq!(
         warning.message,
-        "Exceeded skills context budget. All skill descriptions were removed and 7 additional skills were not included in the model-visible skills list."
+        "Exceeded skills context budget. All skill descriptions were removed and 6 additional skills were not included in the model-visible skills list."
     );
 
     timeout(
@@ -1393,7 +1420,9 @@ async fn turn_start_tracks_thread_originator_in_analytics() -> Result<()> {
                 thread_id: thread.id.clone(),
                 client_user_message_id: None,
                 input: vec![V2UserInput::Image {
-                    url: TINY_PNG_DATA_URL.to_string(),
+                    image: V2ImageReference::Inline {
+                        url: TINY_PNG_DATA_URL.to_string(),
+                    },
                     detail: None,
                 }],
                 turn_trigger: Some("user".to_string()),
@@ -1804,9 +1833,7 @@ async fn turn_start_accepts_text_at_limit_with_mention_item() -> Result<()> {
     let server = create_mock_responses_server_sequence_unchecked(responses).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
-        .enable_feature(Feature::Personality)
-        .write(codex_home.path())?;
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -1854,9 +1881,7 @@ async fn turn_start_accepts_text_at_limit_with_mention_item() -> Result<()> {
 #[tokio::test]
 async fn turn_start_rejects_combined_oversized_text_input() -> Result<()> {
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new("http://localhost/unused")
-        .enable_feature(Feature::Personality)
-        .write(codex_home.path())?;
+    MockResponsesConfig::new("http://localhost/unused").write(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -1947,9 +1972,7 @@ async fn turn_start_rejects_combined_oversized_text_input() -> Result<()> {
 #[tokio::test]
 async fn turn_start_rejects_invalid_permission_selection_before_starting_turn() -> Result<()> {
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new("http://localhost/unused")
-        .enable_feature(Feature::Personality)
-        .write(codex_home.path())?;
+    MockResponsesConfig::new("http://localhost/unused").write(codex_home.path())?;
     std::fs::write(
         codex_home.path().join("managed_config.toml"),
         "sandbox_mode = \"read-only\"\n",
@@ -2381,9 +2404,7 @@ async fn turn_start_emits_notifications_and_accepts_model_override() -> Result<(
     let server = create_mock_responses_server_sequence_unchecked(responses).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
-        .enable_feature(Feature::Personality)
-        .write(codex_home.path())?;
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -2657,9 +2678,7 @@ async fn turn_start_accepts_deprecated_personality_override_v2() -> Result<()> {
     let response_mock = responses::mount_sse_once(&server, body).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
-        .enable_feature(Feature::Personality)
-        .write(codex_home.path())?;
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -2870,9 +2889,7 @@ async fn turn_start_ignores_personality_change_mid_thread_v2() -> Result<()> {
     let response_mock = responses::mount_sse_sequence(&server, vec![sse1, sse2]).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
-        .enable_feature(Feature::Personality)
-        .write(codex_home.path())?;
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -5483,9 +5500,13 @@ async fn run_turn_start_file_change_approval_rejection_v2(
     Ok(())
 }
 
+#[cfg_attr(not(windows), test_case(None; "started"))]
+#[test_case(Some(json!({"cmd": "echo unreachable", "workdir": "missing-work-directory", "tty": false})); "pipe_launch_failure")]
+#[test_case(Some(json!({"cmd": "echo unreachable\u{0}", "tty": true, "login": false})); "pty_launch_failure")]
 #[tokio::test]
-#[cfg_attr(windows, ignore = "process id reporting differs on Windows")]
-async fn command_execution_notifications_include_process_id() -> Result<()> {
+async fn command_execution_notifications_include_process_id(
+    launch_failure_args: Option<Value>,
+) -> Result<()> {
     // TODO(anp): Add target-Windows process-id expectations for remote executors.
     skip_if_wine_exec!(
         Ok(()),
@@ -5493,8 +5514,18 @@ async fn command_execution_notifications_include_process_id() -> Result<()> {
     );
     skip_if_no_network!(Ok(()));
 
+    let launch_failed = launch_failure_args.is_some();
+    let command = if let Some(args) = launch_failure_args {
+        responses::sse(vec![
+            responses::ev_response_created("launch"),
+            responses::ev_function_call("uexec-1", "exec_command", &args.to_string()),
+            responses::ev_completed("launch"),
+        ])
+    } else {
+        create_exec_command_sse_response("uexec-1")?
+    };
     let responses = vec![
-        create_exec_command_sse_response("uexec-1")?,
+        command,
         create_final_assistant_message_sse_response("done")?,
     ];
     let server = create_mock_responses_server_sequence(responses).await;
@@ -5502,6 +5533,8 @@ async fn command_execution_notifications_include_process_id() -> Result<()> {
     MockResponsesConfig::new(&server.uri())
         .with_sandbox_mode("danger-full-access")
         .enable_feature(Feature::UnifiedExec)
+        .disable_feature(Feature::ShellZshFork)
+        .disable_feature(Feature::ShellSnapshot)
         .write(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
@@ -5552,7 +5585,7 @@ async fn command_execution_notifications_include_process_id() -> Result<()> {
     };
     assert_eq!(id, "uexec-1");
     assert_eq!(status, CommandExecutionStatus::InProgress);
-    let started_process_id = started_process_id.expect("process id should be present");
+    assert_eq!(started_process_id.is_none(), launch_failed);
 
     let completed_command = timeout(DEFAULT_READ_TIMEOUT, async {
         loop {
@@ -5569,6 +5602,8 @@ async fn command_execution_notifications_include_process_id() -> Result<()> {
         process_id: completed_process_id,
         status: completed_status,
         exit_code,
+        duration_ms,
+        aggregated_output,
         ..
     } = completed_command
     else {
@@ -5582,15 +5617,22 @@ async fn command_execution_notifications_include_process_id() -> Result<()> {
         ),
         "unexpected command execution status: {completed_status:?}"
     );
-    if completed_status == CommandExecutionStatus::Completed {
+    if launch_failed {
+        assert_eq!(
+            (completed_status, exit_code, duration_ms),
+            (CommandExecutionStatus::Failed, Some(-1), Some(0))
+        );
+        assert!(
+            aggregated_output
+                .context("launch diagnostic")?
+                .starts_with("Failed to create unified exec process:")
+        );
+    } else if completed_status == CommandExecutionStatus::Completed {
         assert_eq!(exit_code, Some(0));
     } else {
         assert!(exit_code.is_some(), "expected exit_code for failed command");
     }
-    assert_eq!(
-        completed_process_id.as_deref(),
-        Some(started_process_id.as_str())
-    );
+    assert_eq!(completed_process_id, started_process_id);
 
     timeout(
         DEFAULT_READ_TIMEOUT,
@@ -5598,16 +5640,30 @@ async fn command_execution_notifications_include_process_id() -> Result<()> {
     )
     .await??;
 
+    for method in mcp.pending_notification_methods() {
+        let notification = mcp.read_stream_until_notification_message(&method).await?;
+        assert_ne!(
+            notification.params.context("notification params")?["item"]["id"],
+            "uexec-1"
+        );
+    }
+
     Ok(())
 }
 
 #[cfg_attr(windows, ignore = "plugin attribution fixture is Unix-only")]
+#[test_case(CommandExecutionStatus::Completed; "completed")]
+#[test_case(CommandExecutionStatus::Failed; "launch_failure")]
 #[tokio::test]
-async fn command_execution_notifications_include_trusted_plugin_id() -> Result<()> {
+async fn command_execution_notifications_include_trusted_plugin_id(
+    expected_status: CommandExecutionStatus,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_wine_exec!(Ok(()), "plugin attribution fixture is Unix-only");
 
     let codex_home = TempDir::new()?;
+    let missing_cwd = codex_home.path().join("missing-work-directory");
+    let launch_failed = expected_status == CommandExecutionStatus::Failed;
     let curated_sha = "0123456789abcdef0123456789abcdef01234567";
     let plugin_root = codex_home
         .path()
@@ -5649,7 +5705,7 @@ async fn command_execution_notifications_include_trusted_plugin_id() -> Result<(
                 "/bin/sh".to_string(),
                 script_path.to_string_lossy().into_owned(),
             ],
-            /*workdir*/ None,
+            launch_failed.then_some(missing_cwd.as_path()),
             /*timeout_ms*/ None,
             "plugin-command",
         )?,
@@ -5660,7 +5716,10 @@ async fn command_execution_notifications_include_trusted_plugin_id() -> Result<(
         .with_approval_policy("on-request")
         .with_sandbox_mode("danger-full-access")
         .enable_feature(Feature::Plugins)
+        .enable_feature(Feature::UnifiedExec)
         .disable_feature(Feature::RemotePlugin)
+        .disable_feature(Feature::ShellZshFork)
+        .disable_feature(Feature::ShellSnapshot)
         .with_extra_config("[plugins.\"google-calendar@openai-api-curated\"]\nenabled = true")
         .write(codex_home.path())?;
 
@@ -5721,7 +5780,7 @@ async fn command_execution_notifications_include_trusted_plugin_id() -> Result<(
         if method == "item/started" {
             assert_eq!(status, CommandExecutionStatus::InProgress);
         } else {
-            assert_eq!(status, CommandExecutionStatus::Completed);
+            assert_eq!(status, expected_status);
         }
     }
 
@@ -5740,9 +5799,7 @@ async fn turn_start_with_elevated_override_does_not_persist_project_trust() -> R
     let server = create_mock_responses_server_sequence_unchecked(responses).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
-        .enable_feature(Feature::Personality)
-        .write(codex_home.path())?;
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
 
     let workspace = TempDir::new()?;
 

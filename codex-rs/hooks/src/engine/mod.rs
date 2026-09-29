@@ -1,9 +1,12 @@
 pub(crate) mod command_runner;
 pub(crate) mod discovery;
 pub(crate) mod dispatcher;
+mod matcher;
 pub(crate) mod mcp_runner;
 pub(crate) mod output_parser;
 pub(crate) mod schema_loader;
+
+pub(crate) use matcher::HookMatcher;
 
 use crate::events::compact::PostCompactRequest;
 use crate::events::compact::PreCompactOutcome;
@@ -68,7 +71,8 @@ pub(crate) struct ConfiguredHandler {
     /// Internally admitted cleanup hook, enabled independently of per-hook state.
     pub builtin: bool,
     pub event_name: codex_protocol::protocol::HookEventName,
-    pub matcher: Option<String>,
+    pub matcher: Option<HookMatcher>,
+    pub claude_conditions: Vec<dispatcher::ClaudeHookCondition>,
     pub timeout_sec: u64,
     pub status_message: Option<String>,
     pub additional_context_limit: AdditionalContextLimit,
@@ -338,6 +342,7 @@ impl ClaudeHooksEngine {
                     builtin: true,
                     event_name,
                     matcher: None,
+                    claude_conditions: Vec::new(),
                     timeout_sec: timeout_sec.unwrap_or(5).max(1),
                     status_message,
                     additional_context_limit: Default::default(),

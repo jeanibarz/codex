@@ -144,7 +144,7 @@ pub(crate) struct MessageProcessor {
     models_refresh_worker: ModelsRefreshWorker,
     turn_cost_worker: Option<TurnCostWorker>,
     skills_watcher: Arc<SkillsWatcher>,
-    account_processor: AccountRequestProcessor,
+    account_processor: Arc<AccountRequestProcessor>,
     apps_processor: AppsRequestProcessor,
     catalog_processor: CatalogRequestProcessor,
     command_exec_processor: CommandExecRequestProcessor,
@@ -290,6 +290,10 @@ impl MessageProcessor {
             remote_control_handle,
             plugin_startup_tasks,
         } = args;
+        // Startup credential reads must not open a browser before initialize selects the policy.
+        let gateway_login_control =
+            codex_login::GatewayLoginControl::for_runtime(&auth_manager.runtime_config());
+        gateway_login_control.require_explicit_login();
         let thread_state_manager = ThreadStateManager::new();
         outgoing.watch_user_verification_auth(Arc::clone(&auth_manager));
         // The thread store is intentionally process-scoped. Config reloads can
@@ -370,9 +374,12 @@ impl MessageProcessor {
                 None => manager,
             }
         });
-        let models_manager = thread_manager.get_models_manager();
-        let models_refresh_worker =
-            crate::models_refresh_worker::spawn(&models_manager, config.http_client_factory());
+        let model_catalog = Arc::new(crate::model_catalog::ModelCatalog::new(
+            config_manager.clone(),
+            Arc::clone(&config),
+            thread_manager.get_models_manager(),
+        ));
+        let models_refresh_worker = crate::models_refresh_worker::spawn(&model_catalog);
         let turn_cost_worker =
             TurnCostWorker::spawn(Arc::clone(&config), Arc::clone(&auth_manager));
         thread_manager
@@ -424,6 +431,7 @@ impl MessageProcessor {
             Arc::clone(&thread_manager),
             Arc::clone(&config),
             config_manager.clone(),
+            model_catalog,
         );
         let command_exec_processor = CommandExecRequestProcessor::new(
             arg0_paths.clone(),
@@ -446,6 +454,7 @@ impl MessageProcessor {
         );
         let git_processor = GitRequestProcessor::new();
         let initialize_processor = InitializeRequestProcessor::new(
+            gateway_login_control,
             outgoing.clone(),
             analytics_events_client.clone(),
             Arc::clone(&config),
@@ -464,6 +473,7 @@ impl MessageProcessor {
             thread_state_manager.clone(),
             outgoing.clone(),
             config_manager.clone(),
+            account_processor.clone(),
         );
         let plugin_processor = PluginRequestProcessor::new(
             auth_manager.clone(),
@@ -520,7 +530,6 @@ impl MessageProcessor {
             Arc::clone(&thread_manager),
             outgoing.clone(),
             analytics_events_client.clone(),
-            arg0_paths.clone(),
             Arc::clone(&config),
             config_manager.clone(),
             pending_thread_unloads,
@@ -757,24 +766,26 @@ impl MessageProcessor {
         self.thread_processor.thread_created_receiver()
     }
 
-    pub(crate) async fn daemon_recovery_candidates(&self) -> Vec<String> {
-        self.thread_processor.daemon_recovery_candidates().await
+    pub(crate) async fn daemon_recovery_snapshot(
+        &self,
+    ) -> codex_app_server_transport::daemon_recovery::RecoverySnapshot {
+        self.thread_processor.daemon_recovery_snapshot().await
     }
 
     pub(crate) async fn restore_daemon_threads(
         &self,
-        candidates: std::collections::BTreeSet<String>,
+        mut snapshot: codex_app_server_transport::daemon_recovery::RecoverySnapshot,
     ) {
-        for thread_id in candidates {
+        for thread_id in snapshot.loaded {
             let Ok(_permit) = self.turn_admission.admit() else {
                 break;
             };
             if let Err(err) = self
                 .thread_processor
                 .thread_resume(
-                    ThreadResumeTarget::DaemonRecovery,
+                    ThreadResumeTarget::DaemonRecovery(snapshot.interrupted.remove(&thread_id)),
                     codex_app_server_protocol::ThreadResumeParams {
-                        thread_id,
+                        thread_id: thread_id.clone(),
                         exclude_turns: true,
                         ..Default::default()
                     },
@@ -857,6 +868,8 @@ impl MessageProcessor {
         session_state: &ConnectionSessionState,
     ) {
         session_state.rpc_gate.close().await;
+        self.account_processor
+            .gateway_connection_closed(connection_id);
         self.request_serialization_queues.discard_closed().await;
         self.outgoing
             .disconnect_user_verification_connection(connection_id)
@@ -1018,15 +1031,15 @@ impl MessageProcessor {
                     return;
                 }
                 let processor_for_request = Arc::clone(&processor);
-                let result = processor_for_request
-                    .handle_initialized_client_request(
-                        connection_request_id,
-                        codex_request,
-                        request_context,
-                        session,
-                        event_stream_ready,
-                    )
-                    .await;
+                // Keep queued requests small to avoid large stack temporaries during construction.
+                let result = Box::pin(processor_for_request.handle_initialized_client_request(
+                    connection_request_id,
+                    codex_request,
+                    request_context,
+                    session,
+                    event_stream_ready,
+                ))
+                .await;
                 if let Err(error) = result {
                     processor.outgoing.send_error(error_request_id, error).await;
                 }
@@ -1416,6 +1429,7 @@ impl MessageProcessor {
                 self.thread_processor.memory_status(params).await
             }
             ClientRequest::MemoryReset { .. } => self.thread_processor.memory_reset().await,
+            ClientRequest::RolloutCompress { .. } => self.thread_processor.rollout_compress(),
             ClientRequest::ThreadUnarchive { params, .. } => {
                 self.thread_processor
                     .thread_unarchive(request_id.clone(), params)
@@ -1667,7 +1681,8 @@ impl MessageProcessor {
                 self.turn_processor.review_start(&request_id, params).await
             }
             ClientRequest::McpServerOauthLogin { params, .. } => {
-                self.mcp_processor.mcp_server_oauth_login(params).await
+                // Keep MCP discovery's large future from inflating every request.
+                Box::pin(self.mcp_processor.mcp_server_oauth_login(params)).await
             }
             ClientRequest::McpServerRefresh { params, .. } => {
                 self.mcp_processor.mcp_server_refresh(params).await
@@ -1723,6 +1738,33 @@ impl MessageProcessor {
             }
             ClientRequest::BedrockSetup { params, .. } => {
                 self.account_processor.bedrock_setup(params).await
+            }
+            ClientRequest::GatewayOAuthRead { .. } => {
+                Box::pin(self.account_processor.gateway_oauth_read())
+                    .await
+                    .map(|response| Some(response.into()))
+            }
+            ClientRequest::GatewayOAuthLogin { .. } => {
+                if session
+                    .opted_out_notification_methods()
+                    .contains("account/gatewayOAuth/changed")
+                {
+                    Err(invalid_request(
+                        "Gateway login requires account/gatewayOAuth/changed notifications",
+                    ))
+                } else {
+                    Box::pin(
+                        self.account_processor
+                            .gateway_oauth_login(connection_id, &session.rpc_gate),
+                    )
+                    .await
+                    .map(|response| Some(response.into()))
+                }
+            }
+            ClientRequest::GatewayOAuthCancel { .. } => {
+                Box::pin(self.account_processor.gateway_oauth_cancel(connection_id))
+                    .await
+                    .map(|response| Some(response.into()))
             }
             ClientRequest::LogoutAccount { .. } => {
                 self.account_processor
@@ -1843,3 +1885,7 @@ impl MessageProcessor {
 #[cfg(test)]
 #[path = "message_processor_tracing_tests.rs"]
 mod message_processor_tracing_tests;
+
+#[cfg(test)]
+#[path = "message_processor_gateway_oauth_tests.rs"]
+mod gateway_oauth_tests;

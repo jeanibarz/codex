@@ -22,8 +22,6 @@ use super::command_runner::run_command;
 use super::mcp_runner::run_mcp_tool;
 use crate::events::common::matches_matcher;
 
-const CLAUDE_CONDITIONAL_MATCHER_PREFIX: &str = "__codex_claude_conditional_matcher__:";
-
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub(crate) enum ClaudeHookCondition {
     ToolCommandGlob {
@@ -32,33 +30,11 @@ pub(crate) enum ClaudeHookCondition {
     },
 }
 
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
-struct ClaudeConditionalMatcher {
-    matcher: Option<String>,
-    conditions: Vec<ClaudeHookCondition>,
-}
-
 #[derive(Debug)]
 pub(crate) struct ParsedHandler<T> {
     pub completed: HookCompletedEvent,
     pub data: T,
     pub completion_order: usize,
-}
-
-pub(crate) fn encode_claude_conditional_matcher(
-    matcher: Option<&str>,
-    conditions: &[ClaudeHookCondition],
-) -> Option<String> {
-    if conditions.is_empty() {
-        return matcher.map(ToOwned::to_owned);
-    }
-    let Ok(encoded) = serde_json::to_string(&ClaudeConditionalMatcher {
-        matcher: matcher.map(ToOwned::to_owned),
-        conditions: conditions.to_vec(),
-    }) else {
-        return matcher.map(ToOwned::to_owned);
-    };
-    Some(format!("{CLAUDE_CONDITIONAL_MATCHER_PREFIX}{encoded}"))
 }
 
 pub(crate) fn select_handlers(
@@ -109,57 +85,44 @@ fn select_handlers_for_matcher_inputs_and_tool_input(
     handlers
         .iter()
         .filter(|handler| handler.event_name == event_name)
-        .filter(|handler| {
-            let parsed = parse_claude_conditional_matcher(handler.matcher.as_deref());
-            let matcher = parsed
-                .as_ref()
-                .map_or(handler.matcher.as_deref(), |parsed| {
-                    parsed.matcher.as_deref()
-                });
-            match event_name {
-                HookEventName::PreToolUse
-                | HookEventName::PermissionRequest
-                | HookEventName::PostToolUse
-                | HookEventName::PreCompact
-                | HookEventName::PostCompact
-                | HookEventName::PostToolUseFailure
-                | HookEventName::SessionStart
-                | HookEventName::SessionEnd
-                | HookEventName::SubagentStart
-                | HookEventName::SubagentStop
-                | HookEventName::FileChanged => {
-                    if matcher_inputs.is_empty() {
-                        matches_matcher(matcher, /*input*/ None)
-                    } else {
-                        matcher_inputs
-                            .iter()
-                            .any(|input| matches_matcher(matcher, Some(input)))
-                    }
+        .filter(|handler| match event_name {
+            HookEventName::PreToolUse
+            | HookEventName::PermissionRequest
+            | HookEventName::PostToolUse
+            | HookEventName::SessionStart
+            | HookEventName::SessionEnd
+            | HookEventName::SubagentStart
+            | HookEventName::SubagentStop
+            | HookEventName::PreCompact
+            | HookEventName::PostCompact
+            | HookEventName::PostToolUseFailure
+            | HookEventName::FileChanged => {
+                if matcher_inputs.is_empty() {
+                    matches_matcher(handler.matcher.as_ref(), /*input*/ None)
+                } else {
+                    matcher_inputs
+                        .iter()
+                        .any(|input| matches_matcher(handler.matcher.as_ref(), Some(input)))
                 }
-                HookEventName::Notification
-                | HookEventName::UserPromptSubmit
-                | HookEventName::Stop
-                | HookEventName::StopFailure
-                | HookEventName::Interrupt => true,
             }
+            HookEventName::Notification
+            | HookEventName::UserPromptSubmit
+            | HookEventName::Stop
+            | HookEventName::StopFailure
+            | HookEventName::Interrupt => true,
         })
         .filter(|handler| {
-            let Some(parsed) = parse_claude_conditional_matcher(handler.matcher.as_deref()) else {
+            if handler.claude_conditions.is_empty() {
                 return true;
-            };
+            }
             tool_input.is_some_and(|tool_input| {
-                parsed.conditions.iter().all(|condition| {
+                handler.claude_conditions.iter().all(|condition| {
                     condition_matches_tool_use(condition, matcher_inputs, tool_input)
                 })
             })
         })
         .cloned()
         .collect()
-}
-
-fn parse_claude_conditional_matcher(matcher: Option<&str>) -> Option<ClaudeConditionalMatcher> {
-    let encoded = matcher?.strip_prefix(CLAUDE_CONDITIONAL_MATCHER_PREFIX)?;
-    serde_json::from_str(encoded).ok()
 }
 
 fn condition_matches_tool_use(
@@ -543,7 +506,9 @@ mod tests {
         ConfiguredHandler {
             builtin: false,
             event_name,
-            matcher: matcher.map(str::to_owned),
+            matcher: matcher
+                .map(|pattern| crate::engine::HookMatcher::new(pattern).expect("valid matcher")),
+            claude_conditions: Vec::new(),
             timeout_sec: 5,
             status_message: None,
             additional_context_limit: Default::default(),
@@ -800,7 +765,7 @@ mod tests {
             ),
             make_handler(
                 HookEventName::UserPromptSubmit,
-                Some("["),
+                Some("^unmatched$"),
                 "echo second",
                 /*display_order*/ 1,
             ),

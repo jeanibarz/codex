@@ -526,6 +526,7 @@ mod tests {
             builtin: false,
             event_name,
             matcher: None,
+            claude_conditions: Vec::new(),
             timeout_sec: 5,
             status_message: Some("running compact hook".to_string()),
             additional_context_limit: Default::default(),

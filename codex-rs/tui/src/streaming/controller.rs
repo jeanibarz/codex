@@ -19,6 +19,11 @@
 //! agent and proposed-plan streams. Lines in `Outside` and `Markdown` fence
 //! contexts are scanned; lines inside non-markdown fences are skipped.
 //!
+//! Transformable fences stay mutable while their containing top-level block is last. Markdown
+//! fences may gain literal delimiters when table rendering is disabled. For Mermaid, the closing fence replaces
+//! source with a diagram, and resizing can replace a diagram that no longer fits with its source.
+//! Once another block starts, the diagram enters scrollback so later prose does not grow the tail.
+//!
 //! ## Resize handling
 //!
 //! On terminal width change, `StreamCore::set_width` re-renders at the new
@@ -40,7 +45,8 @@ use crate::history_cell::HistoryCell;
 use crate::history_cell::HistoryRenderMode;
 use crate::history_cell::{self};
 use crate::inline_visualization::InlineVisualizationContext;
-use crate::markdown::render_markdown_agent_with_links_cwd_and_visualizations;
+use crate::markdown::render_markdown_agent_with_list_spacing;
+use crate::markdown_render::ListSpacing;
 use crate::style::proposed_plan_style;
 use crate::terminal_hyperlinks::HyperlinkLine;
 use crate::terminal_hyperlinks::prefix_hyperlink_lines;
@@ -55,7 +61,9 @@ use super::StreamState;
 use super::prose_preview::PreviewMode;
 use super::prose_preview::ProsePreview;
 use super::render::StreamingRender;
+#[cfg(test)]
 use super::render::render_source;
+use super::render::render_source_with_list_spacing;
 use super::table_holdback::TableHoldbackScanner;
 use super::table_holdback::TableHoldbackState;
 #[cfg(test)]
@@ -196,17 +204,18 @@ impl StreamCore {
     ///
     /// This intentionally re-renders from the full raw source instead of
     /// trying to stitch together queued stable lines and the current tail. The
-    /// final render is the canonical transcript representation used for
-    /// consolidation, so callers that skip `reset()` can accidentally replay a
-    /// finished stream into the next answer.
+    /// remaining rows keep the stream's spacing so emitted offsets stay valid. Consolidation
+    /// renders the returned source with the completed cell's spacing policy. Callers that skip
+    /// `reset()` can accidentally replay a finished stream into the next answer.
     fn finalize_remaining(&mut self) -> (Vec<HyperlinkLine>, String) {
         let source = self.state.collector.finalize_and_take_source();
-        let mut rendered = render_source(
+        let mut rendered = render_source_with_list_spacing(
             &source,
             self.width,
             self.cwd.as_path(),
             self.render_mode,
             self.inline_visualization_context.as_ref(),
+            self.render.list_spacing,
         );
         let remaining = rendered.split_off(self.emitted_stable_len.min(rendered.len()));
         (remaining, source)
@@ -286,6 +295,7 @@ impl StreamCore {
         }
         let had_pending_queue = self.state.queued_len() > 0;
         let had_live_tail = self.has_tail();
+        let previous_width = self.width;
         self.width = width;
         self.state.collector.set_width(width);
         let source = self.state.collector.committed_source();
@@ -294,15 +304,8 @@ impl StreamCore {
             return;
         }
 
-        self.render.recompute(
-            source,
-            self.width,
-            self.cwd.as_path(),
-            self.render_mode,
-            self.inline_visualization_context.as_ref(),
-        );
+        self.recompute_render(previous_width, self.render_mode);
         self.refresh_preview();
-        self.emitted_stable_len = self.emitted_stable_len.min(self.render.lines.len());
         if had_pending_queue
             && self.emitted_stable_len == self.render.lines.len()
             && self.emitted_stable_len > 0
@@ -317,6 +320,7 @@ impl StreamCore {
             // Avoid replaying already-emitted content after resize when no
             // stable lines were waiting in the queue and there was no mutable
             // tail to preserve.
+            self.emitted_stable_len = self.render.lines.len();
             self.enqueued_stable_len = self.render.lines.len();
             return;
         }
@@ -341,6 +345,7 @@ impl StreamCore {
 
         let had_pending_queue = self.state.queued_len() > 0;
         let had_live_tail = self.has_tail();
+        let previous_render_mode = self.render_mode;
         self.render_mode = render_mode;
         let source = self.state.collector.committed_source();
         if source.is_empty() {
@@ -348,15 +353,8 @@ impl StreamCore {
             return;
         }
 
-        self.render.recompute(
-            source,
-            self.width,
-            self.cwd.as_path(),
-            self.render_mode,
-            self.inline_visualization_context.as_ref(),
-        );
+        self.recompute_render(self.width, previous_render_mode);
         self.refresh_preview();
-        self.emitted_stable_len = self.emitted_stable_len.min(self.render.lines.len());
         if had_pending_queue
             && self.emitted_stable_len == self.render.lines.len()
             && self.emitted_stable_len > 0
@@ -365,10 +363,83 @@ impl StreamCore {
         }
         self.state.clear_queue();
         if self.emitted_stable_len > 0 && !had_pending_queue && !had_live_tail {
+            self.emitted_stable_len = self.render.lines.len();
             self.enqueued_stable_len = self.render.lines.len();
             return;
         }
         self.rebuild_stable_queue_from_render();
+    }
+
+    /// Preserve an emitted source prefix when resizing changes earlier diagrams' heights.
+    fn recompute_render(
+        &mut self,
+        previous_width: Option<usize>,
+        previous_render_mode: HistoryRenderMode,
+    ) {
+        let previous_tail_start = self.active_tail_source_start(previous_render_mode);
+        let source = self.state.collector.committed_source();
+        self.render.recompute(
+            source,
+            self.width,
+            self.cwd.as_path(),
+            self.render_mode,
+            self.inline_visualization_context.as_ref(),
+        );
+        if let Some(start) = previous_tail_start.or(self.active_tail_source_start(self.render_mode))
+        {
+            let prefix_len = |width, mode| {
+                render_source_with_list_spacing(
+                    &source[..start],
+                    width,
+                    self.cwd.as_path(),
+                    mode,
+                    self.inline_visualization_context.as_ref(),
+                    self.render.list_spacing,
+                )
+                .len()
+            };
+            let previous_prefix_len = prefix_len(previous_width, previous_render_mode);
+            let prefix_len = prefix_len(self.width, self.render_mode);
+            if self.emitted_stable_len >= previous_prefix_len {
+                self.emitted_stable_len =
+                    prefix_len.saturating_add(self.emitted_stable_len - previous_prefix_len);
+            } else {
+                self.emitted_stable_len = self.emitted_stable_len.min(prefix_len);
+            }
+        }
+        self.emitted_stable_len = self.emitted_stable_len.min(self.render.lines.len());
+    }
+
+    fn active_tail_source_start(&self, render_mode: HistoryRenderMode) -> Option<usize> {
+        if render_mode == HistoryRenderMode::Raw {
+            return None;
+        }
+        let table_start = match self.holdback_scanner.state() {
+            TableHoldbackState::Confirmed { table_start }
+            | TableHoldbackState::PendingHeader {
+                header_start: table_start,
+            } => Some(table_start),
+            TableHoldbackState::None => None,
+        };
+        let source = self.state.collector.committed_source();
+        let source = source.strip_suffix('\n').unwrap_or(source);
+        let marker_start = source.rfind('\n').map_or(0, |index| index + 1);
+        let marker = source[marker_start..]
+            .trim()
+            .trim_start_matches(['>', ' ', '\t']);
+        let bare_list_marker = matches!(marker, "-" | "+" | "*")
+            || marker.strip_suffix(['.', ')']).is_some_and(|number| {
+                !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+            });
+        [
+            table_start,
+            self.render.mutable_fence_start,
+            self.render.pending_math_start,
+            bare_list_marker.then_some(marker_start),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// Compute how many rendered lines should be in the stable region.
@@ -438,24 +509,16 @@ impl StreamCore {
         }
         let scan_start = Instant::now();
         let holdback_state = self.holdback_scanner.state();
-        let tail_budget = match holdback_state {
-            TableHoldbackState::Confirmed { table_start: start }
-            | TableHoldbackState::PendingHeader {
-                header_start: start,
-            } => self.tail_budget_from_source_start(start),
-            TableHoldbackState::None => 0,
-        };
+        let tail_budget = self
+            .active_tail_source_start(self.render_mode)
+            .map_or(0, |start| self.tail_budget_from_source_start(start));
         tracing::trace!(
             state = ?holdback_state,
             tail_budget,
             elapsed_us = scan_start.elapsed().as_micros(),
             "table holdback decision",
         );
-        let math_budget = self
-            .render
-            .pending_math_start
-            .map_or(0, |start| self.tail_budget_from_source_start(start));
-        tail_budget.max(math_budget)
+        tail_budget
     }
 
     /// Convert a raw-source boundary into the number of rendered tail lines.
@@ -493,11 +556,12 @@ impl StreamCore {
 
         let render_start = Instant::now();
         let source = self.state.collector.committed_source();
-        let stable_prefix_render = render_markdown_agent_with_links_cwd_and_visualizations(
+        let stable_prefix_render = render_markdown_agent_with_list_spacing(
             &source[..source_start.min(source.len())],
             self.width,
             Some(self.cwd.as_path()),
             self.inline_visualization_context.as_ref(),
+            self.render.list_spacing,
         );
         let stable_prefix_len = stable_prefix_render.len();
         tracing::trace!(
@@ -525,6 +589,12 @@ pub(crate) struct StreamController {
 }
 
 impl StreamController {
+    /// Select spacing before the first delta; final source-backed cells choose their own layout.
+    pub(crate) fn with_list_spacing(mut self, list_spacing: ListSpacing) -> Self {
+        self.core.render.list_spacing = list_spacing;
+        self
+    }
+
     /// Create a controller whose markdown renderer shortens local file links relative to `cwd`.
     ///
     /// `width` is the content width available to markdown rendering, not necessarily the full
@@ -651,6 +721,12 @@ pub(crate) struct PlanStreamController {
 }
 
 impl PlanStreamController {
+    /// Select spacing before the first delta; no list-specific holdback is needed.
+    pub(crate) fn with_list_spacing(mut self, list_spacing: ListSpacing) -> Self {
+        self.core.render.list_spacing = list_spacing;
+        self
+    }
+
     /// Create a plan-stream controller whose markdown renderer shortens local file links relative
     /// to `cwd`.
     ///
@@ -1292,8 +1368,8 @@ mod tests {
             "   This paragraph belongs to the same list item.".to_string(),
             "".to_string(),
             "4. Second loose item with a nested list after a blank line.".to_string(),
-            "    - Nested bullet under a loose item".to_string(),
-            "    - Another nested bullet".to_string(),
+            "    • Nested bullet under a loose item".to_string(),
+            "    • Another nested bullet".to_string(),
         ];
         assert_eq!(
             streamed, expected,
@@ -2017,3 +2093,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "rendering_preferences_tests.rs"]
+mod rendering_preferences_tests;

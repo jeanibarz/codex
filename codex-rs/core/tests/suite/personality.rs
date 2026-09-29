@@ -1,6 +1,5 @@
 use codex_config::types::Personality;
 use codex_core::TurnInputRequest;
-use codex_features::Feature;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
@@ -23,8 +22,6 @@ use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use test_case::test_case;
 
-const LOCAL_FRIENDLY_TEMPLATE: &str =
-    "You optimize for team morale and being a supportive teammate as much as code quality.";
 const BUNDLED_FRIENDLY_TEMPLATE: &str = "You have a vivid inner life as Codex:";
 const CUSTOM_INSTRUCTIONS: &str = "Custom instructions\n# Personality\nThis must remain\n## Writing Style\nThis must also remain\n# General\nGeneral instructions";
 
@@ -64,10 +61,6 @@ async fn config_personality_none_sends_no_personality() -> anyhow::Result<()> {
     let server = start_mock_server().await;
     let resp_mock = mount_sse_once(&server, sse_completed("resp-1")).await;
     let mut builder = test_codex().with_model("gpt-5.5").with_config(|config| {
-        config
-            .features
-            .enable(Feature::Personality)
-            .expect("test config should allow feature update");
         config.personality = Some(Personality::None);
     });
     let test = builder.build(&server).await?;
@@ -106,8 +99,13 @@ async fn config_personality_none_sends_no_personality() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test_case(None; "without feature config")]
+#[test_case(Some(false); "with removed feature disabled")]
+#[test_case(Some(true); "with removed feature enabled")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn config_personality_none_strips_baked_personality_section() -> anyhow::Result<()> {
+async fn config_personality_none_strips_baked_personality_section(
+    legacy_feature_setting: Option<bool>,
+) -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -119,14 +117,14 @@ async fn config_personality_none_strips_baked_personality_section() -> anyhow::R
                 model_messages.instructions_variables = None;
             }
         })
-        .with_config(|config| {
-            config
-                .features
-                .enable(Feature::Personality)
-                .expect("test config should allow feature update");
-            config.personality = Some(Personality::None);
+        .with_pre_build_hook(move |home| {
+            let mut config = "personality = \"none\"\n".to_string();
+            if let Some(value) = legacy_feature_setting {
+                config.push_str(&format!("[features]\npersonality = {value}\n"));
+            }
+            std::fs::write(home.join("config.toml"), config).expect("write personality config");
         });
-    let test = builder.build(&server).await?;
+    let test = builder.build_with_auto_env(&server).await?;
 
     test.codex
         .start_or_steer_turn(read_only_text_turn(
@@ -152,7 +150,7 @@ async fn config_personality_none_strips_baked_personality_section() -> anyhow::R
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn config_personality_none_preserves_explicit_base_instructions(
     custom_instructions: &'static str,
-    personality_enabled: bool,
+    legacy_feature_setting: bool,
 ) -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -160,12 +158,13 @@ async fn config_personality_none_preserves_explicit_base_instructions(
     let resp_mock = mount_sse_once(&server, sse_completed("resp-1")).await;
     let mut builder = test_codex()
         .with_model("gpt-5.5")
+        .with_pre_build_hook(move |home| {
+            let config = format!(
+                "personality = \"none\"\n[features]\npersonality = {legacy_feature_setting}\n"
+            );
+            std::fs::write(home.join("config.toml"), config).expect("write personality config");
+        })
         .with_config(move |config| {
-            config
-                .features
-                .set_enabled(Feature::Personality, personality_enabled)
-                .expect("test config should allow feature update");
-            config.personality = Some(Personality::None);
             config.base_instructions = Some(custom_instructions.to_string());
         });
     let test = builder.build_with_auto_env(&server).await?;
@@ -198,12 +197,7 @@ async fn default_instructions_are_friendly_without_config_toml() -> anyhow::Resu
 
     let server = start_mock_server().await;
     let resp_mock = mount_sse_once(&server, sse_completed("resp-1")).await;
-    let mut builder = test_codex().with_model("gpt-5.5").with_config(|config| {
-        config
-            .features
-            .enable(Feature::Personality)
-            .expect("test config should allow feature update");
-    });
+    let mut builder = test_codex().with_model("gpt-5.5");
     let test = builder.build(&server).await?;
     assert_eq!(test.config.personality, None);
 
@@ -229,13 +223,8 @@ async fn default_instructions_are_friendly_without_config_toml() -> anyhow::Resu
     Ok(())
 }
 
-#[test_case("gpt-5.4", LOCAL_FRIENDLY_TEMPLATE; "gpt_5_4")]
-#[test_case("gpt-5.5", BUNDLED_FRIENDLY_TEMPLATE; "gpt_5_5")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fixed_friendly_personality_ignores_pragmatic_update(
-    model: &str,
-    friendly_template: &str,
-) -> anyhow::Result<()> {
+async fn fixed_friendly_personality_ignores_pragmatic_update() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -244,11 +233,7 @@ async fn fixed_friendly_personality_ignores_pragmatic_update(
         vec![sse_completed("resp-1"), sse_completed("resp-2")],
     )
     .await;
-    let mut builder = test_codex().with_model(model).with_config(|config| {
-        config
-            .features
-            .enable(Feature::Personality)
-            .expect("test config should allow feature update");
+    let mut builder = test_codex().with_model("gpt-5.5").with_config(|config| {
         config.personality = Some(Personality::Friendly);
     });
     let test = builder.build_with_auto_env(&server).await?;
@@ -267,7 +252,11 @@ async fn fixed_friendly_personality_ignores_pragmatic_update(
 
     let requests = responses.requests();
     assert_eq!(requests.len(), 2);
-    assert!(requests[0].instructions_text().contains(friendly_template));
+    assert!(
+        requests[0]
+            .instructions_text()
+            .contains(BUNDLED_FRIENDLY_TEMPLATE)
+    );
     assert_eq!(
         requests[1].instructions_text(),
         requests[0].instructions_text()

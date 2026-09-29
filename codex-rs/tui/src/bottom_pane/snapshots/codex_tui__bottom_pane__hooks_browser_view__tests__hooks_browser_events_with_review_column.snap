@@ -9,7 +9,8 @@ expression: "render_lines(&view, 112)"
   ⚠ 1 hook needs review before it can run.                                                                      
                                                                                                                 
   Event                 Installed   Active      Review      Description                                         
-  PreToolUse            1           0           1           Before a tool executes                              
+                                                                                                                
+› PreToolUse            1           0           1           Before a tool executes                              
   PermissionRequest     0           0           0           When permission is requested                        
   PostToolUse           0           0           0           After a tool executes                               
   PreCompact            0           0           0           Before context compaction                           
@@ -25,5 +26,6 @@ expression: "render_lines(&view, 112)"
   StopFailure           0           0           0           When Codex's turn ends with a failure               
   FileChanged           0           0           0           After a file is changed                             
   Interrupt             0           0           0           Right before an interrupted turn is aborted         
+↓                                                                                                               
                                                                                                                 
-  Press t to trust all; enter to review hooks; esc to close
+  t trust all · enter review · esc close

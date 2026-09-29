@@ -3,6 +3,8 @@
 use super::*;
 use crate::app::reconnect::ReconnectPresentation;
 use crate::app::reconnect::reconnect;
+use codex_config::types::KeybindingSpec;
+use codex_config::types::KeybindingsSpec;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use tokio::net::TcpListener;
@@ -10,7 +12,7 @@ use tokio::net::TcpListener;
 use super::disconnect::serve_reconnect_requests;
 
 #[tokio::test]
-async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> Result<()> {
+async fn reconnect_restores_history_permissions_and_resumes_unsent_input() -> Result<()> {
     for (recovered_queue, edit_offline, resume_error_code, deferred_notice, notice_enabled) in [
         (true, false, -32603, false, false),
         (true, false, -32603, false, true),
@@ -24,6 +26,9 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
         let pending_profile = !recovered_queue && resume_error_code == -32600;
         let (mut app, mut events, mut ops) = make_test_app_with_channels().await;
         app.local_settings.tui.show_server_version_notice = notice_enabled;
+        // Reconstructed widgets should use the same hint on every test terminal.
+        app.local_settings.tui.keymap.chat.edit_queued_message =
+            Some(KeybindingsSpec::One(KeybindingSpec("alt-up".into())));
         let id = ThreadId::new();
         let cwd = app.config.cwd.clone();
         app.config.model = Some("gpt-test".into());
@@ -138,9 +143,9 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
                     "thread/list" | "thread/loaded/list" => Some(json!({"result": {"data": [], "nextCursor": null}})),
                     "thread/goal/get" => Some(json!({"result": {"goal": null}})),
                     "turn/start" => {
-                        assert!(!recovered_queue);
+                        assert!(!edit_offline);
                         let params = request.params.as_ref().unwrap();
-                        assert_eq!(params["input"][0]["text"], "fresh follow-up");
+                        assert_eq!(params["input"][0]["text"], if recovered_queue { "old queued input" } else { "fresh follow-up" });
                         assert_eq!(params["approvalPolicy"], if pending_profile { "never" } else { "on-request" });
                         assert_eq!(params["sandboxPolicy"]["type"], if pending_profile { json!(null) } else { json!("readOnly") });
                         assert_eq!(params["collaborationMode"], json!(expected_submitted_mode));
@@ -200,6 +205,7 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
             );
         let mut tui = crate::tui::test_support::make_test_tui()?;
         if pending_profile {
+            app.runtime_approvals_reviewer_override = Some(ApprovalsReviewer::User);
             app.pending_server_profiles.insert(
                 id,
                 PermissionProfileSelection {
@@ -209,6 +215,10 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
                     display_label: "server-only".into(),
                 },
             );
+        }
+        if edit_offline {
+            let view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
+            app.chat_widget.show_bottom_pane_view(Box::new(view));
         }
         app.begin_reconnect();
         if deferred_notice {
@@ -222,6 +232,12 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
             );
         }
         if edit_offline {
+            for key in [KeyCode::Esc, KeyCode::Enter] {
+                app.handle_tui_event(&mut tui, &mut session, TuiEvent::Key(key.into()))
+                    .await?;
+            }
+            assert!(!app.chat_widget.has_active_view());
+            assert_eq!(app.chat_widget.composer_text_with_pending(), "kept draft");
             app.handle_tui_event(
                 &mut tui,
                 &mut session,
@@ -275,7 +291,27 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
         );
         app.finish_reconnect(&mut tui, &mut session, &mut events, connected, "2.1.0")
             .await?;
+        if edit_offline {
+            assert!(!app.chat_widget.has_active_view());
+            assert!(
+                app.agents_overview
+                    .view_state
+                    .lock()
+                    .unwrap()
+                    .connection_notice
+                    .is_none()
+            );
+        }
         assert!(app.pending_server_profiles.is_empty());
+        if pending_profile {
+            assert_eq!(
+                app.resume_permission_overrides(&app.config),
+                crate::resume_permissions::ResumePermissions {
+                    approvals_reviewer: true,
+                    ..Default::default()
+                }
+            );
+        }
         assert!(!app.pending_managed_worktree_creation);
         assert!(
             !app.agents_overview
@@ -353,42 +389,41 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
         let notices = history
             .lines()
             .filter(|line| {
-                line.contains("Reconnected.") || line.contains("background Codex service")
+                line.contains("Couldn't confirm whether")
+                    || line.contains("background Codex service")
             })
             .collect::<Vec<_>>()
             .join("\n");
         if deferred_notice {
             assert_snapshot!(notices, @r###"
-• Reconnected. No input was resent. Review uncertain submissions before retrying; recovered queues remain paused.
 ⚠ A background Codex service is running v2.0.0, older than your Codex CLI
 "###);
+        } else if edit_offline {
+            assert!(notices.contains("unacknowledged prompt"));
         } else {
-            insta::allow_duplicates! {
-                assert_snapshot!(notices, @"• Reconnected. No input was resent. Review uncertain submissions before retrying; recovered queues remain paused.");
-            }
+            assert_eq!(notices, "");
         }
         assert_eq!(history.matches("only once").count(), 1);
-        if recovered_queue {
+        if edit_offline {
             assert!(app.chat_widget.has_queued_follow_up_messages());
             assert!(!app.chat_widget.maybe_send_next_queued_input());
-            if edit_offline {
-                app.handle_tui_event(
-                    &mut tui,
-                    &mut session,
-                    TuiEvent::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)),
-                )
-                .await?;
-                assert_eq!(
-                    app.chat_widget.composer_text_with_pending(),
-                    "unacknowledged prompt"
-                );
-                assert!(ops.try_recv().is_err());
-            } else {
-                assert_snapshot!(
-                    "restored_conversation",
-                    render_bottom_popup(&app.chat_widget, /*width*/ 80)
-                );
-            }
+            app.handle_tui_event(
+                &mut tui,
+                &mut session,
+                TuiEvent::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)),
+            )
+            .await?;
+            assert_eq!(
+                app.chat_widget.composer_text_with_pending(),
+                "unacknowledged prompt"
+            );
+            assert!(ops.try_recv().is_err());
+        } else if recovered_queue {
+            assert!(!app.chat_widget.has_queued_follow_up_messages());
+            assert_snapshot!(
+                "restored_conversation",
+                render_bottom_popup(&app.chat_widget, /*width*/ 80)
+            );
         } else {
             app.chat_widget
                 .handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
@@ -399,6 +434,9 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
             while let Ok(event) = events.try_recv() {
                 app.handle_event(&mut tui, &mut session, event).await?;
             }
+        }
+        while let Ok(event) = events.try_recv() {
+            app.handle_event(&mut tui, &mut session, event).await?;
         }
         session.shutdown().await?;
         let methods = server.await??;
@@ -414,7 +452,7 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
                 .iter()
                 .filter(|method| *method == "turn/start")
                 .count(),
-            usize::from(!recovered_queue)
+            usize::from(!edit_offline)
         );
     }
     Ok(())
@@ -490,7 +528,7 @@ async fn reconnect_reconciles_offscreen_pending_profile_before_restoring_permiss
                 "thread/read" => json!({"result": {"thread": thread(primary)}}),
                 "turn/start" => {
                     let params = request.params.as_ref().unwrap();
-                    assert_eq!(params["permissions"], "server-only");
+                    assert_eq!(params["permissions"], serde_json::Value::Null);
                     assert_eq!(params["approvalPolicy"], "on-request");
                     assert_eq!(params["sandboxPolicy"], json!(null));
                     json!({"result": {"turn": {"id": "fresh", "items": [], "status": "inProgress"}}})
@@ -592,7 +630,7 @@ async fn reconnect_exhaustion_and_unknown_initial_thread_stay_offline() -> Resul
             .is_err()
         );
     }
-    assert!((15..=65).contains(&start.elapsed().as_secs()));
+    assert_eq!(start.elapsed().as_secs(), 120);
     app.begin_reconnect();
     app.chat_widget.reconnect_failed();
     assert_snapshot!(
@@ -716,13 +754,10 @@ pub(super) async fn drain_history(
     events: &mut mpsc::UnboundedReceiver<AppEvent>,
 ) -> Result<String> {
     while let Ok(event) = events.try_recv() {
-        assert!(!matches!(
-            event,
-            AppEvent::CodexOp(AppCommand::UserTurn { .. })
-        ));
         if matches!(
             event,
             AppEvent::InsertHistoryCell(_)
+                | AppEvent::CodexOp(AppCommand::UserTurn { .. })
                 | AppEvent::BeginThreadSwitchHistoryReplayBuffer
                 | AppEvent::EndInitialHistoryReplayBuffer
         ) {
@@ -732,7 +767,7 @@ pub(super) async fn drain_history(
     Ok(lines_to_single_string(
         &app.transcript_cells
             .iter()
-            .flat_map(|cell| cell.display_lines(/*width*/ 80))
+            .flat_map(|cell| cell.transcript_lines(/*width*/ 80))
             .collect::<Vec<_>>(),
     ))
 }

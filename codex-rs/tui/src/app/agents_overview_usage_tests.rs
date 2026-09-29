@@ -102,6 +102,7 @@ async fn selected_usage_is_cached_and_account_changes_discard_old_results() -> R
             threads: HashMap::from([(selected, Some(threads[0].clone()))]),
             last_messages: HashMap::new(),
             recent_seed_complete: true,
+            discovery: None,
         }),
     );
     assert_eq!(
@@ -200,6 +201,7 @@ async fn selected_usage_is_cached_and_account_changes_discard_old_results() -> R
     app.agents_overview.usage_disabled = true;
     app.agents_overview.pending_usage = Some((thread_id, request_id));
     app.app_server_target = AppServerTarget::LocalDaemon {
+        allow_embedded_fallback: true,
         endpoint: crate::RemoteAppServerEndpoint::UnixSocket {
             socket_path: test_path_buf("/tmp/test.sock").abs(),
         },

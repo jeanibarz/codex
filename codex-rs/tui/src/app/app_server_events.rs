@@ -14,6 +14,7 @@ use crate::app_info::app_info_from_api;
 use crate::app_server_session::AppServerSession;
 use crate::app_server_session::status_account_display_from_auth_mode;
 use codex_app_server_client::AppServerEvent;
+use codex_app_server_client::TypedRequestError;
 use codex_app_server_protocol::AuthMode;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::RateLimitReachedType;
@@ -25,8 +26,10 @@ use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadReadParams;
 use codex_app_server_protocol::ThreadReadResponse;
 use codex_app_server_protocol::ThreadSource;
+use codex_app_server_protocol::ThreadStatus;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::SubAgentSource;
+use std::time::Duration;
 
 impl App {
     pub(super) fn refresh_mcp_startup_expected_servers_from_config(&mut self) {
@@ -75,6 +78,7 @@ impl App {
                 }
                 self.agents_overview.request_id = None;
                 self.agents_overview.refresh_pending = false;
+                self.agents_overview.initialized = false;
                 self.agents_overview.refresh_notifications.clear();
                 self.agents_overview.activity.clear();
                 self.agents_overview.last_messages.clear();
@@ -116,6 +120,62 @@ impl App {
         app_server_client: &AppServerSession,
         notification: ServerNotification,
     ) {
+        // A picker can leave an old runtime's close notification queued while the same thread
+        // is resumed. Thread IDs survive reloads, so confirm that the displayed thread is still
+        // unloaded before routing a close that would exit the TUI or switch away from it.
+        if let ServerNotification::ThreadClosed(closed) = &notification
+            && let Ok(thread_id) = ThreadId::from_string(&closed.thread_id)
+            && self.current_displayed_thread_id() == Some(thread_id)
+        {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(/*secs*/ 5);
+            for attempt in 0..2 {
+                let result = tokio::time::timeout_at(
+                    deadline,
+                    app_server_client
+                        .request_handle()
+                        .request_typed::<ThreadReadResponse>(ClientRequest::ThreadRead {
+                            request_id: RequestId::String(format!(
+                                "thread-closed-{thread_id}-{attempt}"
+                            )),
+                            params: ThreadReadParams {
+                                thread_id: closed.thread_id.clone(),
+                                include_turns: false,
+                            },
+                        }),
+                )
+                .await;
+                match result {
+                    Ok(Ok(response))
+                        if !matches!(response.thread.status, ThreadStatus::NotLoaded) =>
+                    {
+                        return;
+                    }
+                    Ok(Ok(_)) => break,
+                    // Unpersisted closed threads can no longer be read. Preserve that close
+                    // and compatibility with servers that do not support this request.
+                    Ok(Err(TypedRequestError::Server { source, .. }))
+                        if matches!(source.code, -32602..=-32600) =>
+                    {
+                        break;
+                    }
+                    Ok(Err(TypedRequestError::Server { source, .. }))
+                        if source.code == -32603 && attempt == 0 =>
+                    {
+                        continue;
+                    }
+                    Ok(Err(_)) | Err(_) => {
+                        // A failed read does not confirm closure. Remote connections recover
+                        // through the normal reconnect path, rather than exiting the TUI.
+                        tracing::warn!("could not confirm displayed thread closure");
+                        if self.begin_reconnect() {
+                            return;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
         if let ServerNotification::ThreadStatusChanged(status) = &notification {
             let _ = self.dynamic_tool_status_updates.send(status.clone());
         }
@@ -124,7 +184,7 @@ impl App {
             && started.thread.ephemeral
             && matches!(
                 started.thread.thread_source.as_ref(),
-                Some(ThreadSource::Feature(feature)) if feature == "system"
+                Some(ThreadSource::Feature(feature)) if matches!(feature.as_str(), "system" | "thread_title")
             )
         {
             return;
@@ -161,6 +221,18 @@ impl App {
                 .or_default();
         }
         self.track_agents_overview_notification(&notification);
+        // Retained blank sessions stay subscribed after their event channels are cleared.
+        if let ServerNotification::ThreadSettingsUpdated(settings) = &notification
+            && let Ok(thread_id) = ThreadId::from_string(&settings.thread_id)
+            && self.agents_overview.blank_sessions.contains_key(&thread_id)
+            && !self.thread_event_channels.contains_key(&thread_id)
+        {
+            self.apply_thread_settings_to_cached_session(thread_id, &settings.thread_settings)
+                .await;
+            if let Some(input) = self.agents_overview.input_states.get_mut(&thread_id) {
+                input.pending_thread_settings = Some(settings.clone());
+            }
+        }
         if matches!(
             &notification,
             ServerNotification::ThreadStarted(_)
@@ -206,6 +278,25 @@ impl App {
             ServerNotification::McpServerStatusUpdated(_) => {
                 self.refresh_mcp_startup_expected_servers_from_config();
             }
+            ServerNotification::McpServerOauthLoginCompleted(notification) => {
+                // The start response identifies the new attempt. Hold completions until then
+                // so a replacement's cancellation cannot appear as a fresh login failure.
+                if let Some(pending) = self.pending_mcp_login_start.as_mut()
+                    && pending.name == notification.name
+                {
+                    pending.completions.push(notification.clone());
+                    return;
+                }
+                if notification.login_id.is_some() {
+                    if notification.login_id.as_ref()
+                        != self.active_mcp_login_ids.get(&notification.name)
+                    {
+                        return;
+                    }
+                    self.active_mcp_login_ids.remove(&notification.name);
+                }
+            }
+
             ServerNotification::AccountRateLimitsUpdated(notification) => {
                 let workspace_hard_stop = matches!(
                     notification.rate_limits.rate_limit_reached_type,
@@ -235,6 +326,12 @@ impl App {
                 self.agents_overview.usage_disabled = false;
                 self.repaint_agents_overview();
                 self.chat_widget.cyber_policy_notice = Default::default();
+                if let Some(crate::pager_overlay::Overlay::Analytics(view)) = &mut self.overlay {
+                    view.refresh();
+                }
+                if let Some(view) = &mut self.retained_analytics {
+                    view.cancel_loads();
+                }
                 self.rate_limit_hard_stop_generation =
                     self.rate_limit_hard_stop_generation.wrapping_add(1);
                 self.rate_limit_refresh_state.invalidate_recovery();
@@ -272,9 +369,11 @@ impl App {
                 return;
             }
             ServerNotification::ExternalAgentConfigImportCompleted(notification) => {
-                let should_report_completion =
-                    app_server_client.consume_external_agent_config_import_completion();
-                if let Err(err) = self.refresh_in_memory_config_from_disk().await {
+                let should_report_completion = app_server_client
+                    .consume_external_agent_config_import_completion(&notification.import_id);
+                if !app_server_client.uses_remote_workspace()
+                    && let Err(err) = self.refresh_in_memory_config_from_disk().await
+                {
                     tracing::warn!(
                         error = %err,
                         "failed to refresh config after external agent config import"
@@ -338,7 +437,13 @@ impl App {
                         }
                     }
                 }
-                if self.primary_thread_id.is_none() && !self.pending_startup_thread_start {
+                let background_voice = self.background_voice.as_ref().is_some_and(|owner| {
+                    owner.thread_id() == Some(thread_id) && owner.realtime_conversation_is_running()
+                });
+                if self.primary_thread_id.is_none()
+                    && !self.pending_startup_thread_start
+                    && !background_voice
+                {
                     return;
                 }
                 if self.primary_thread_id.is_some()
@@ -363,9 +468,7 @@ impl App {
                 {
                     return;
                 }
-                let result = if self.primary_thread_id == Some(thread_id)
-                    || self.primary_thread_id.is_none()
-                {
+                let result = if self.primary_thread_id.is_none() && !background_voice {
                     self.enqueue_primary_thread_notification(notification).await
                 } else {
                     self.enqueue_thread_notification(thread_id, notification)
@@ -535,6 +638,11 @@ impl App {
         }
 
         let thread_id = server_request_thread_id(&request);
+        let background_voice = self.background_voice.as_ref().is_some_and(|owner| {
+            owner.realtime_conversation_is_running()
+                && owner.thread_id().is_some()
+                && owner.thread_id() == thread_id
+        });
         if thread_id.is_some_and(|thread_id| self.abandoned_side_threads.contains(&thread_id)) {
             if let Err(err) = self
                 .reject_app_server_request(
@@ -550,6 +658,7 @@ impl App {
         }
         if thread_id.is_some()
             && self.primary_thread_id.is_none()
+            && !background_voice
             && self.pending_startup_thread_start
         {
             self.pending_primary_events
@@ -573,6 +682,7 @@ impl App {
         if let Some(thread_id) = thread_id
             && self.primary_thread_id != Some(thread_id)
             && !unsupported_request
+            && !background_voice
             && let Some(requests) = self.agents_overview.dispatched_requests.get_mut(&thread_id)
         {
             requests.push(request);
@@ -580,6 +690,7 @@ impl App {
         }
         if thread_id.is_some()
             && self.primary_thread_id.is_none()
+            && !background_voice
             && !self.pending_startup_thread_start
             && !unsupported_request
         {
@@ -660,12 +771,11 @@ impl App {
             return;
         };
 
-        let result =
-            if self.primary_thread_id == Some(thread_id) || self.primary_thread_id.is_none() {
-                self.enqueue_primary_thread_request(request).await
-            } else {
-                self.enqueue_thread_request(thread_id, request).await
-            };
+        let result = if self.primary_thread_id.is_none() && !background_voice {
+            self.enqueue_primary_thread_request(request).await
+        } else {
+            self.enqueue_thread_request(thread_id, request).await
+        };
         if let Err(err) = result {
             tracing::warn!("failed to enqueue app-server request: {err}");
         }

@@ -464,6 +464,7 @@ mod tests {
             builtin: false,
             event_name: HookEventName::UserPromptSubmit,
             matcher: None,
+            claude_conditions: Vec::new(),
             timeout_sec: 5,
             status_message: None,
             additional_context_limit: Default::default(),

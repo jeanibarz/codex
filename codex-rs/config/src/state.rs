@@ -5,7 +5,7 @@ use crate::format_config_layer_source;
 
 use super::fingerprint::record_origins;
 use super::fingerprint::version_for_toml;
-use super::key_aliases::normalized_with_key_aliases;
+use super::key_aliases::normalize_key_aliases;
 use super::merge::merge_toml_values;
 use crate::CloudConfigBundleLoader;
 use crate::ConfigLayer;
@@ -243,8 +243,10 @@ impl ConfigLayerEntry {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default)]
 pub struct ConfigLayerStack {
+    /// Runtime-only EMA authority; it does not change the configuration's contents.
+    cloud_config_binding: Option<crate::CloudConfigBundleBinding>,
     /// Cached TOML projection derived only from `requirements_toml`.
     /// Construction validates provider definitions and reports serialization errors,
     /// so `effective_config()` can replace complete entries without a fallible conversion.
@@ -270,6 +272,30 @@ pub struct ConfigLayerStack {
     /// `None` means the loader did not check for stack-level warnings, while
     /// `Some(vec![])` means it checked and found nothing to report.
     startup_warnings: Option<Vec<String>>,
+    pub(crate) is_projectless: bool,
+}
+
+impl PartialEq for ConfigLayerStack {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            cloud_config_binding: _,
+            model_provider_requirements,
+            layers,
+            requirements,
+            requirements_toml,
+            ignore_user_and_project_exec_policy_rules,
+            startup_warnings,
+            is_projectless,
+        } = self;
+        model_provider_requirements == &other.model_provider_requirements
+            && layers == &other.layers
+            && requirements == &other.requirements
+            && requirements_toml == &other.requirements_toml
+            && *ignore_user_and_project_exec_policy_rules
+                == other.ignore_user_and_project_exec_policy_rules
+            && startup_warnings == &other.startup_warnings
+            && is_projectless == &other.is_projectless
+    }
 }
 
 impl ConfigLayerStack {
@@ -284,12 +310,14 @@ impl ConfigLayerStack {
             &requirements_toml,
         )?);
         Ok(Self {
+            cloud_config_binding: None,
             model_provider_requirements,
             layers,
             requirements,
             requirements_toml,
             ignore_user_and_project_exec_policy_rules: false,
             startup_warnings: None,
+            is_projectless: false,
         })
     }
 
@@ -305,6 +333,33 @@ impl ConfigLayerStack {
         self.ignore_user_and_project_exec_policy_rules
     }
 
+    pub fn with_cloud_config_binding(
+        mut self,
+        binding: Option<crate::CloudConfigBundleBinding>,
+    ) -> Self {
+        self.cloud_config_binding = binding;
+        self
+    }
+
+    pub fn cloud_config_binding(&self) -> Option<&crate::CloudConfigBundleBinding> {
+        self.cloud_config_binding.as_ref()
+    }
+
+    /// Retains session layers while adopting current MCP, plugin, and feature restrictions.
+    /// Rejected refreshes must not restore an earlier policy on the next user reload.
+    pub fn with_mcp_requirements_from(&self, incoming: &Self) -> Self {
+        let mut stack = self.clone();
+        stack.requirements.mcp_servers = incoming.requirements.mcp_servers.clone();
+        stack.requirements.plugins = incoming.requirements.plugins.clone();
+        stack.requirements.feature_requirements =
+            incoming.requirements.feature_requirements.clone();
+        stack.requirements_toml.mcp_servers = incoming.requirements_toml.mcp_servers.clone();
+        stack.requirements_toml.plugins = incoming.requirements_toml.plugins.clone();
+        stack.requirements_toml.feature_requirements =
+            incoming.requirements_toml.feature_requirements.clone();
+        stack
+    }
+
     pub(crate) fn with_startup_warnings(mut self, startup_warnings: Vec<String>) -> Self {
         self.startup_warnings = Some(startup_warnings);
         self
@@ -312,6 +367,12 @@ impl ConfigLayerStack {
 
     pub fn startup_warnings(&self) -> Option<&[String]> {
         self.startup_warnings.as_deref()
+    }
+
+    /// Whether discovery found no project markers or project-local configuration.
+    /// Returns false when project discovery was skipped.
+    pub fn is_projectless(&self) -> bool {
+        self.is_projectless
     }
 
     /// Returns the active raw user config layer, if any.
@@ -414,12 +475,14 @@ impl ConfigLayerStack {
         }
         Ok(Self {
             layers,
+            cloud_config_binding: self.cloud_config_binding.clone(),
             model_provider_requirements: self.model_provider_requirements.clone(),
             requirements: self.requirements.clone(),
             requirements_toml: self.requirements_toml.clone(),
             ignore_user_and_project_exec_policy_rules: self
                 .ignore_user_and_project_exec_policy_rules,
             startup_warnings: self.startup_warnings.clone(),
+            is_projectless: self.is_projectless,
         })
     }
 
@@ -449,12 +512,14 @@ impl ConfigLayerStack {
         }
         Self {
             layers,
+            cloud_config_binding: self.cloud_config_binding.clone(),
             model_provider_requirements: self.model_provider_requirements.clone(),
             requirements: self.requirements.clone(),
             requirements_toml: self.requirements_toml.clone(),
             ignore_user_and_project_exec_policy_rules: self
                 .ignore_user_and_project_exec_policy_rules,
             startup_warnings: self.startup_warnings.clone(),
+            is_projectless: self.is_projectless,
         }
     }
 
@@ -496,7 +561,7 @@ impl ConfigLayerStack {
         let mut provider_paths = vec!["features.network_proxy.credentials.".to_string()];
 
         for layer in self.layers_low_to_high() {
-            let config = normalized_with_key_aliases(&layer.config, &[]);
+            let config = normalize_key_aliases(&layer.config);
             if let Some(profiles) = config.get("profiles").and_then(TomlValue::as_table) {
                 provider_paths.extend(
                     profiles

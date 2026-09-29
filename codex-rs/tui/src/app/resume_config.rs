@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::onboarding::onboarding_screen::check_directory_trust;
+use crate::startup_draft::StartupDraftPump;
 use crate::startup_hooks_review::StartupHooksReviewOutcome;
 use crate::startup_hooks_review::load_startup_hooks_review_entry;
 use crate::startup_hooks_review::maybe_run_startup_hooks_review;
@@ -134,10 +135,14 @@ impl App {
             app_server,
             &mut resume_config.0,
             &trust_cwd,
-            resumed_thread.as_ref(),
+            crate::onboarding::DirectoryTrustOptions {
+                resumed_thread: resumed_thread.as_ref(),
+                ..Default::default()
+            },
+            /*startup_draft*/ None,
         )
         .await?;
-        resume_config.1 = crate::local_settings::LocalSettings::from(&resume_config.0);
+        resume_config.1 = self.local_settings.reloaded(&resume_config.0);
         Ok(resume_config)
     }
 
@@ -147,7 +152,8 @@ impl App {
         app_server: &mut AppServerSession,
         config: &mut Config,
         cwd: &Path,
-        resumed_thread: Option<&codex_app_server_protocol::Thread>,
+        options: crate::onboarding::DirectoryTrustOptions<'_>,
+        mut startup_draft: Option<&mut StartupDraftPump>,
     ) -> std::result::Result<(), AppRunControl> {
         // Keep the existing explicit remote --cd gate, including retries after cancellation.
         // Other remote destinations await authoritative trust-root metadata.
@@ -165,8 +171,8 @@ impl App {
             config,
             &self.app_server_target,
             cwd,
-            resumed_thread,
-            /*startup_draft*/ None,
+            options,
+            startup_draft.as_deref_mut(),
         )
         .await
         .map_err(|error| {
@@ -174,6 +180,9 @@ impl App {
             AppRunControl::Continue
         })?;
         if result.should_exit {
+            if options.cancel == Some(crate::onboarding::TrustCancelAction::CurrentTask) {
+                return Err(AppRunControl::Continue);
+            }
             if matches!(self.app_server_target, AppServerTarget::Embedded) {
                 return Err(AppRunControl::Exit(ExitReason::UserRequested));
             }
@@ -186,22 +195,48 @@ impl App {
             }
             return Err(AppRunControl::Continue);
         }
-        if result.directory_trust_persisted && !app_server.uses_remote_workspace() {
-            *config = self
-                .rebuild_config_for_cwd(config.cwd.to_path_buf())
-                .await
-                .map_err(|error| {
-                    self.add_session_picker_error(format!(
-                        "Failed to reload trusted folder settings: {error}"
-                    ));
-                    AppRunControl::Continue
-                })?;
-            if resumed_thread.is_none() {
-                let hooks = load_startup_hooks_review_entry(
+        if !app_server.uses_remote_workspace()
+            && (result.directory_trust_persisted
+                || options.cancel == Some(crate::onboarding::TrustCancelAction::CurrentTask))
+        {
+            *config = StartupDraftPump::run_with_optional_draft(
+                startup_draft.as_deref_mut(),
+                tui,
+                self.rebuild_config_for_cwd(config.cwd.to_path_buf()),
+            )
+            .await
+            .map_err(|error| {
+                self.add_session_picker_error(format!(
+                    "Failed to reload trusted folder settings: {error}"
+                ));
+                AppRunControl::Continue
+            })?;
+            // Directory changes review hooks once, after attaching the destination.
+            if result.directory_trust_persisted
+                && options.resumed_thread.is_none()
+                && options.cancel != Some(crate::onboarding::TrustCancelAction::CurrentTask)
+            {
+                let load_hooks = load_startup_hooks_review_entry(
                     app_server.request_handle(),
                     config.cwd.to_path_buf(),
-                )
-                .await;
+                );
+                let hooks = if let Some(draft) = startup_draft {
+                    draft.apply_config(config);
+                    async {
+                        let hooks = draft.run_until(tui, load_hooks).await?;
+                        draft.flush_pending_events(tui).await?;
+                        Ok::<_, std::io::Error>(hooks)
+                    }
+                    .await
+                    .map_err(|error| {
+                        self.add_session_picker_error(format!(
+                            "Unable to load folder hooks: {error}"
+                        ));
+                        AppRunControl::Continue
+                    })?
+                } else {
+                    load_hooks.await
+                };
                 match maybe_run_startup_hooks_review(
                     app_server,
                     tui,

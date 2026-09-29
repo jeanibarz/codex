@@ -68,6 +68,7 @@ use tracing::instrument;
 
 use crate::context::ContextualUserFragment;
 use crate::context::HookAdditionalContext;
+use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::event_mapping::parse_turn_item;
 use crate::guardian::GuardianReviewContext;
 use crate::session::TurnInput;
@@ -210,7 +211,7 @@ pub(crate) async fn run_pre_tool_use_hooks(
         session_id: sess.session_id().into(),
         turn_id: turn_context.sub_id.clone(),
         subagent: thread_spawn_subagent_hook_context(sess, turn_context),
-        cwd: hook_cwd(turn_context),
+        cwd: tool_hook_cwd(&step_context.environments, turn_context),
         transcript_path: sess.hook_transcript_path().await,
         model: step_context.settings.model_info.slug.clone(),
         permission_mode: hook_permission_mode(step_context.settings.approval_policy()),
@@ -257,6 +258,14 @@ pub(crate) async fn run_pre_tool_use_hooks(
     }
 }
 
+#[allow(deprecated)]
+fn tool_hook_cwd(environments: &TurnEnvironmentSnapshot, turn: &TurnContext) -> AbsolutePathBuf {
+    // Hooks run on the host, so a remote workspace cannot replace the local fallback.
+    environments
+        .local_environment_cwd()
+        .unwrap_or_else(|| turn.cwd.clone())
+}
+
 // PermissionRequest hooks share the same preview/start/completed event flow as
 // other hook types, but they return an optional decision instead of mutating
 // tool input or post-run state.
@@ -271,7 +280,7 @@ pub(crate) async fn run_permission_request_hooks(
         session_id: sess.session_id().into(),
         turn_id: turn_context.sub_id.clone(),
         subagent: thread_spawn_subagent_hook_context(sess, turn_context),
-        cwd: hook_cwd(turn_context).into_path_buf(),
+        cwd: tool_hook_cwd(review_context.environments(), turn_context).to_path_buf(),
         transcript_path: sess.hook_transcript_path().await,
         model: review_context.model_info.slug.clone(),
         permission_mode: hook_permission_mode(review_context.approval_policy),
@@ -313,7 +322,7 @@ pub(crate) async fn run_post_tool_use_hooks(
         session_id: sess.session_id().into(),
         turn_id: turn_context.sub_id.clone(),
         subagent: thread_spawn_subagent_hook_context(sess, turn_context),
-        cwd: hook_cwd(turn_context),
+        cwd: tool_hook_cwd(&step_context.environments, turn_context),
         transcript_path: sess.hook_transcript_path().await,
         model: step_context.settings.model_info.slug.clone(),
         permission_mode: hook_permission_mode(step_context.settings.approval_policy()),
@@ -751,14 +760,14 @@ pub(crate) async fn record_pending_input(
         TurnInput::UserInput {
             content,
             client_id,
-            acceptance_order,
+            metadata,
         } => {
             sess.record_user_prompt_and_emit_turn_item(
                 turn_context.as_ref(),
                 model_info,
                 content.as_slice(),
                 client_id,
-                acceptance_order,
+                metadata,
                 persist_context,
             )
             .await;
@@ -768,7 +777,7 @@ pub(crate) async fn record_pending_input(
                 .await;
         }
         TurnInput::FunctionCallOutput(item) => {
-            sess.record_conversation_items(turn_context, model_info, std::slice::from_ref(&item))
+            sess.record_annotated_conversation_items(turn_context, model_info, vec![item.clone()])
                 .await;
             if let ResponseItem::FunctionCallOutput {
                 id: Some(id),
@@ -776,7 +785,7 @@ pub(crate) async fn record_pending_input(
                 namespace,
                 output,
                 ..
-            } = item
+            } = item.item
             {
                 let item = TurnItem::FunctionCallOutput(FunctionCallOutputItem {
                     id: id.to_string(),
@@ -792,6 +801,7 @@ pub(crate) async fn record_pending_input(
         TurnInput::InterAgentCommunication(communication) => {
             sess.record_inter_agent_communication(turn_context, model_info, communication)
                 .await;
+            sess.ensure_rollout_materialized(persist_context).await;
         }
     }
     record_additional_contexts(sess, turn_context, additional_contexts).await;
@@ -995,6 +1005,7 @@ fn hook_run_analytics_payload(
                 .clone()
                 .unwrap_or_else(|| turn_context.sub_id.clone()),
             turn_context.originator.clone(),
+            /*turn_metadata*/ None,
         ),
         HookRunFact {
             event_name: completed.run.event_name,

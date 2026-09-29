@@ -696,6 +696,7 @@ mod tests {
             builtin: false,
             event_name: HookEventName::Stop,
             matcher: None,
+            claude_conditions: Vec::new(),
             timeout_sec: 600,
             status_message: None,
             additional_context_limit: Default::default(),
