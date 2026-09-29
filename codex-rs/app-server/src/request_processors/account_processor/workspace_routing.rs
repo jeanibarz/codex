@@ -202,7 +202,7 @@ impl AccountRequestProcessor {
                             .load_retained_session_config(
                                 &session.config_layer_stack,
                                 &session.cwd,
-                                session.cli_plugin_dirs.clone(),
+                                Vec::new(),
                             )
                             .await
                     }

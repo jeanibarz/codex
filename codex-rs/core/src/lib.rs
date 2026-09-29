@@ -136,7 +136,6 @@ pub(crate) mod mentions {
 mod sandbox_tags;
 pub mod sandboxing;
 mod session_prefix;
-mod session_startup_prewarm;
 mod skill_env_var_dependencies;
 mod skills;
 pub(crate) use skills::collect_env_var_dependencies;

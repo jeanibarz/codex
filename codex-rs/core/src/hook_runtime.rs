@@ -91,11 +91,7 @@ pub(crate) enum PreToolUseHookResult {
 }
 
 fn hook_cwd(turn_context: &TurnContext) -> AbsolutePathBuf {
-    turn_context
-        .environments
-        .primary()
-        .and_then(|environment| environment.cwd().to_abs_path().ok())
-        .unwrap_or_else(|| turn_context.config.cwd.clone())
+    tool_hook_cwd(&turn_context.initial_environments, turn_context)
 }
 
 struct ContextInjectingHookOutcome {
