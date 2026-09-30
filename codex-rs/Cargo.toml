@@ -160,7 +160,9 @@ resolver = "2"
 [workspace.package]
 # Claude-compat fork: base version tracks the most recent upstream tag.
 # build.rs appends `+kookr.<git-sha>` (plus `.dirty` when applicable) at build time.
-version = "0.154.0"
+# ChatGPT's /models catalog is gated on this version (0.154.0 hid GPT-6 Luna
+# and GPT-6.1 Sol; both appear at 0.159.0+). Latest stable tag: rust-v0.159.2.
+version = "0.159.2"
 # Track the edition for all workspace crates in one place. Individual
 # crates can still override this value, but keeping it here means new
 # crates created with `cargo new -w ...` automatically inherit the 2024
