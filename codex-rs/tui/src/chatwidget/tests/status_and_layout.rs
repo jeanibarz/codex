@@ -1,3 +1,4 @@
+use super::helpers::drain_insert_history_transcript;
 use super::*;
 use crate::bottom_pane::goal_status_indicator_line;
 use crate::chatwidget::ThreadUsageOutcome;
@@ -12,7 +13,7 @@ use ratatui::backend::TestBackend;
 use serial_test::serial;
 
 #[tokio::test]
-async fn voice_live_transcript_renders_beside_the_streamed_cell() {
+async fn finalized_voice_transcript_renders_beside_the_streamed_cell() {
     let (mut chat, _rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.local_settings.tui.animations = false;
     activate_voice_for_thread(&mut chat, ThreadId::new());
@@ -22,17 +23,21 @@ async fn voice_live_transcript_renders_beside_the_streamed_cell() {
         /*is_first_line*/ true,
     )));
     chat.on_realtime_transcript_delta("user".into(), "pick a number".into());
-
-    let width = 60;
-    let height = chat.desired_height(width);
-    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("create terminal");
-    terminal
-        .draw(|frame| chat.render(frame.area(), frame.buffer_mut()))
-        .expect("render live voice transcript");
-    let rendered = normalized_backend_snapshot(terminal.backend());
-    assert!(rendered.contains("Agent answer arriving"), "{rendered}");
-    assert!(rendered.contains("pick a number"), "{rendered}");
-    assert_chatwidget_snapshot!("voice_live_transcript_and_stream", rendered);
+    for (finalized, snapshot) in [
+        (false, "voice_partial_transcript_hidden"),
+        (true, "voice_live_transcript_and_stream"),
+    ] {
+        if finalized {
+            chat.on_realtime_transcript_done("user".into(), "pick a number".into());
+        }
+        let width = 60;
+        let height = chat.desired_height(width);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("create terminal");
+        terminal
+            .draw(|frame| chat.render(frame.area(), frame.buffer_mut()))
+            .expect("render voice transcript");
+        assert_chatwidget_snapshot!(snapshot, normalized_backend_snapshot(terminal.backend()));
+    }
 }
 
 fn enable_test_ambient_pet(chat: &mut ChatWidget) {
@@ -146,7 +151,7 @@ async fn app_server_model_verification_renders_warning() {
         vec![AppServerModelVerification::TrustedAccessForCyber],
     );
 
-    let cells = drain_insert_history(&mut rx);
+    let cells = drain_insert_history_transcript(&mut rx);
     assert_eq!(cells.len(), 1);
     let rendered = lines_to_single_string(&cells[0]);
     assert!(rendered.contains("multiple flags for possible cybersecurity risk"));
@@ -495,7 +500,7 @@ async fn completed_plan_table_tail_skips_provisional_history_insert() {
 async fn configured_pet_load_is_deferred_until_after_construction() {
     let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
     let tx = AppEventSender::new(tx_raw);
-    let mut cfg = test_config().await;
+    let (_codex_home, mut cfg) = test_config().await;
     cfg.tui_pet = Some(crate::pets::DEFAULT_PET_ID.to_string());
     crate::pets::write_test_pack(&cfg.codex_home);
     let resolved_model = get_model_offline_for_tests(cfg.model.as_deref());
@@ -609,13 +614,13 @@ async fn rate_limit_usage_warnings_early_threshold_is_scoped_and_deduplicated() 
         usage.plan_type = plan_type;
         usage.primary.as_mut().unwrap().window_duration_mins = window_minutes;
         chat.on_rate_limit_snapshot(Some(usage.clone()));
-        assert!(drain_insert_history(&mut rx).is_empty());
+        assert!(drain_insert_history_transcript(&mut rx).is_empty());
 
         // Rolling updates retain the plan learned from the account usage response.
         usage.plan_type = None;
         usage.primary.as_mut().unwrap().used_percent = 50;
         chat.on_rolling_rate_limit_snapshot(usage.clone());
-        let warnings = drain_insert_history(&mut rx);
+        let warnings = drain_insert_history_transcript(&mut rx);
         assert_eq!(!warnings.is_empty(), should_warn_early);
         if should_warn_early {
             insta::allow_duplicates! {
@@ -627,13 +632,13 @@ async fn rate_limit_usage_warnings_early_threshold_is_scoped_and_deduplicated() 
         }
 
         chat.on_rolling_rate_limit_snapshot(usage.clone());
-        assert!(drain_insert_history(&mut rx).is_empty());
+        assert!(drain_insert_history_transcript(&mut rx).is_empty());
         for used_percent in [75, 90, 95] {
             usage.primary.as_mut().unwrap().used_percent = used_percent;
             chat.on_rolling_rate_limit_snapshot(usage.clone());
-            assert_eq!(drain_insert_history(&mut rx).len(), 1);
+            assert_eq!(drain_insert_history_transcript(&mut rx).len(), 1);
             chat.on_rolling_rate_limit_snapshot(usage.clone());
-            assert!(drain_insert_history(&mut rx).is_empty());
+            assert!(drain_insert_history_transcript(&mut rx).is_empty());
         }
     }
 }
@@ -2372,47 +2377,6 @@ async fn commentary_completion_restores_status_indicator_before_exec_begin() {
     assert_eq!(chat.bottom_pane.status_indicator_visible(), true);
 }
 
-#[tokio::test]
-async fn fast_status_indicator_requires_chatgpt_auth() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
-    set_fast_mode_test_catalog(&mut chat);
-    assert!(get_available_model(&chat, "gpt-5.4").supports_fast_mode());
-    chat.set_service_tier(Some(ServiceTier::Fast.request_value().to_string()));
-
-    assert!(!chat.should_show_fast_status(chat.current_model(), chat.current_service_tier(),));
-
-    set_chatgpt_auth(&mut chat);
-    set_fast_mode_test_catalog(&mut chat);
-    assert!(get_available_model(&chat, "gpt-5.4").supports_fast_mode());
-
-    assert!(chat.should_show_fast_status(chat.current_model(), chat.current_service_tier(),));
-}
-
-#[tokio::test]
-async fn fast_status_indicator_is_hidden_for_models_without_fast_support() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.2")).await;
-    set_fast_mode_test_catalog(&mut chat);
-    assert!(!get_available_model(&chat, "gpt-5.2").supports_fast_mode());
-    chat.set_service_tier(Some(ServiceTier::Fast.request_value().to_string()));
-    set_chatgpt_auth(&mut chat);
-    set_fast_mode_test_catalog(&mut chat);
-    assert!(!get_available_model(&chat, "gpt-5.2").supports_fast_mode());
-
-    assert!(!chat.should_show_fast_status(chat.current_model(), chat.current_service_tier(),));
-}
-
-#[tokio::test]
-async fn fast_status_indicator_is_hidden_when_fast_mode_is_off() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
-    set_fast_mode_test_catalog(&mut chat);
-    assert!(get_available_model(&chat, "gpt-5.4").supports_fast_mode());
-    set_chatgpt_auth(&mut chat);
-    set_fast_mode_test_catalog(&mut chat);
-    assert!(get_available_model(&chat, "gpt-5.4").supports_fast_mode());
-
-    assert!(!chat.should_show_fast_status(chat.current_model(), chat.current_service_tier(),));
-}
-
 // Snapshot test: ChatWidget at very small heights (idle)
 // Ensures overall layout behaves when terminal height is extremely constrained.
 #[tokio::test]
@@ -2839,7 +2803,7 @@ async fn warning_event_adds_warning_history_cell() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     handle_warning(&mut chat, "test warning message");
 
-    let cells = drain_insert_history(&mut rx);
+    let cells = drain_insert_history_transcript(&mut rx);
     assert_eq!(cells.len(), 1, "expected one warning history cell");
     let rendered = lines_to_single_string(&cells[0]);
     assert!(
@@ -2856,7 +2820,7 @@ async fn unsupported_code_mode_warning_renders_as_warning_history_cell() {
         "Code Mode is enabled in configuration, but model `gpt-5.4` does not advertise Code Mode support. This may degrade model performance. Disable `features.code_mode` and `features.code_mode_only`, or select a model whose metadata enables Code Mode.",
     );
 
-    let cells = drain_insert_history(&mut rx);
+    let cells = drain_insert_history_transcript(&mut rx);
     assert_eq!(cells.len(), 1, "expected one warning history cell");
     insta::assert_snapshot!(
         "unsupported_code_mode_warning",
@@ -2872,7 +2836,7 @@ async fn repeated_model_metadata_warning_is_hidden_for_same_slug() {
     handle_warning(&mut chat, warning);
     handle_warning(&mut chat, warning);
 
-    let cells = drain_insert_history(&mut rx);
+    let cells = drain_insert_history_transcript(&mut rx);
     assert_eq!(cells.len(), 1, "expected one warning history cell");
     let rendered = lines_to_single_string(&cells[0]);
     assert!(
@@ -2904,7 +2868,7 @@ async fn status_line_invalid_items_warn_once() {
     chat.thread_id = Some(ThreadId::new());
 
     chat.refresh_status_line();
-    let cells = drain_insert_history(&mut rx);
+    let cells = drain_insert_history_transcript(&mut rx);
     assert_eq!(cells.len(), 1, "expected one warning history cell");
     let rendered = lines_to_single_string(&cells[0]);
     assert!(
@@ -2913,7 +2877,7 @@ async fn status_line_invalid_items_warn_once() {
     );
 
     chat.refresh_status_line();
-    let cells = drain_insert_history(&mut rx);
+    let cells = drain_insert_history_transcript(&mut rx);
     assert!(
         cells.is_empty(),
         "expected invalid status line warning to emit only once"
@@ -4018,11 +3982,14 @@ async fn status_line_model_with_reasoning_includes_fast_for_fast_capable_models(
 
 #[tokio::test]
 async fn terminal_title_model_updates_on_model_change_without_manual_refresh() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
     chat.local_settings.tui.terminal_title = Some(vec!["model".to_string()]);
     chat.refresh_terminal_title();
 
-    assert_eq!(chat.last_terminal_title, Some("gpt-5.4".to_string()));
+    assert_chatwidget_snapshot!(
+        "terminal_title_model_display_name",
+        chat.last_terminal_title.as_deref().expect("terminal title")
+    );
 
     chat.set_model("gpt-5.2");
 
@@ -4220,7 +4187,7 @@ async fn status_line_goal_active_token_budget_footer_snapshot() {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
     chat.set_feature_enabled(Feature::Goals, /*enabled*/ true);
     chat.show_welcome_banner = false;
     chat.local_settings.tui.status_line = Some(vec!["model-name".to_string()]);
@@ -4257,7 +4224,7 @@ async fn status_line_goal_complete_elapsed_footer_snapshot() {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
     chat.set_feature_enabled(Feature::Goals, /*enabled*/ true);
     chat.show_welcome_banner = false;
     chat.local_settings.tui.status_line = Some(vec!["model-name".to_string()]);
@@ -4321,6 +4288,7 @@ async fn session_configured_clears_goal_status_footer() {
 
     let rollout_file = NamedTempFile::new().unwrap();
     chat.handle_thread_session(crate::session_state::ThreadSessionState {
+        windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
         thread_id: ThreadId::new(),
         forked_from_id: None,
         fork_parent_title: None,
@@ -5669,6 +5637,7 @@ async fn chatwidget_exec_and_status_layout_vt100_snapshot() {
         &mut chat,
         AppServerThreadItem::CommandExecution {
             model_context: None,
+            sandbox_type: None,
             id: "c1".into(),
             command: codex_shell_command::parse_command::shlex_join(&command),
             cwd: cwd.clone().into(),
@@ -5687,6 +5656,7 @@ async fn chatwidget_exec_and_status_layout_vt100_snapshot() {
         &mut chat,
         AppServerThreadItem::CommandExecution {
             model_context: None,
+            sandbox_type: None,
             id: "c1".into(),
             command: codex_shell_command::parse_command::shlex_join(&command),
             cwd: cwd.into(),
@@ -5805,16 +5775,14 @@ printf 'fenced within fenced\n'
 
     // Finalize the stream without sending a final AgentMessage, to flush any tail.
     handle_turn_completed(&mut chat, "turn-1", /*duration_ms*/ None);
-    for lines in drain_insert_history(&mut rx) {
+    for lines in drain_insert_history_normalized(&mut rx) {
         crate::insert_history::insert_history_lines(&mut term, lines)
             .expect("Failed to insert history lines in test");
     }
 
     assert_chatwidget_snapshot!(
         "chatwidget_markdown_code_blocks_vt100_snapshot",
-        normalize_completion_timestamps(normalize_snapshot_paths(
-            term.backend().vt100().screen().contents()
-        ))
+        normalize_snapshot_paths(term.backend().vt100().screen().contents())
     );
 }
 

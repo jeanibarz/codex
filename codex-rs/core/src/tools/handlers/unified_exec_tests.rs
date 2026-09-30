@@ -130,7 +130,7 @@ fn test_get_command_resolves_powershell_by_type() -> anyhow::Result<()> {
         resolved.command,
         expected_shell.derive_exec_args("echo hello", /*use_login_shell*/ true)
     );
-    assert_eq!(resolved.shell_type, expected_shell.shell_type);
+    assert_eq!(resolved.shell.shell, expected_shell);
     Ok(())
 }
 
@@ -180,7 +180,7 @@ async fn exec_command_rejects_login_when_selected_environment_disallows_it() {
     let (session, mut turn) = make_session_and_context().await;
     assert!(turn.config.permissions.allow_login_shell);
     let TurnEnvironmentState::Ready(environment) = turn
-        .environments
+        .initial_environments
         .environments
         .first_mut()
         .expect("primary environment")
@@ -325,7 +325,7 @@ async fn exec_command_reuses_foreign_windows_grant() {
     {
         let turn = Arc::get_mut(&mut turn).expect("turn should be uniquely owned");
         let TurnEnvironmentState::Ready(environment) = turn
-            .environments
+            .initial_environments
             .environments
             .first_mut()
             .expect("primary environment")

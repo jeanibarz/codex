@@ -25,6 +25,7 @@ doctest = false
 workspace = true
 
 [dependencies]
+codex-utils-process = { workspace = true }
 anyhow = { workspace = true }
 base64 = { workspace = true }
 axum = { workspace = true, default-features = false, features = [
@@ -73,12 +74,14 @@ codex-login = { workspace = true }
 codex-image-generation-extension = { workspace = true }
 codex-memories-extension = { workspace = true }
 codex-web-search-extension = { workspace = true }
+codex-websocket-auth = { workspace = true }
 codex-memories-write = { workspace = true }
 codex-mcp = { workspace = true }
 codex-mcp-extension = { workspace = true }
 codex-model-provider = { workspace = true }
 codex-model-provider-info = { workspace = true }
 codex-models-manager = { workspace = true }
+codex-prompts = { workspace = true }
 codex-protocol = { workspace = true }
 codex-queue-extension = { workspace = true }
 codex-app-server-protocol = { workspace = true }
@@ -137,9 +140,11 @@ core_test_support = { workspace = true }
 flate2 = { workspace = true }
 hmac = { workspace = true }
 http = { workspace = true }
+keyring = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 pretty_assertions = { workspace = true }
+rcgen = { workspace = true }
 rmcp = { workspace = true, default-features = false, features = [
     "elicitation",
     "server",
@@ -150,6 +155,7 @@ shlex = { workspace = true }
 sqlx = { workspace = true }
 tar = { workspace = true }
 test-case = "3.3.1"
+tokio-rustls = { workspace = true }
 tokio-tungstenite = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 wiremock = { workspace = true }

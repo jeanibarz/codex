@@ -1769,6 +1769,7 @@ async fn load_config_layers_includes_cloud_config_bundle() -> anyhow::Result<()>
         Some(cwd),
         &[] as &[(String, TomlValue)],
         ConfigLoadOptions {
+            loader_overrides: LoaderOverrides::without_managed_config_for_tests(),
             cloud_config_bundle,
             ..Default::default()
         },
@@ -3804,7 +3805,7 @@ profile = "ignored"
         &codex_home_untrusted,
         Some(cwd.clone()),
         &[] as &[(String, TomlValue)],
-        LoaderOverrides::default(),
+        LoaderOverrides::without_managed_config_for_tests(),
         &codex_config::NoopThreadConfigLoader,
     )
     .await?;
@@ -3846,7 +3847,7 @@ profile = "ignored"
         &codex_home_unknown,
         Some(cwd),
         &[] as &[(String, TomlValue)],
-        LoaderOverrides::default(),
+        LoaderOverrides::without_managed_config_for_tests(),
         &codex_config::NoopThreadConfigLoader,
     )
     .await?;

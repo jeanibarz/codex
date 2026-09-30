@@ -21,9 +21,12 @@ use windows_sys::Win32::Security::ACE_HEADER;
 use windows_sys::Win32::Security::ACL;
 use windows_sys::Win32::Security::ACL_SIZE_INFORMATION;
 use windows_sys::Win32::Security::AclSizeInformation;
+use windows_sys::Win32::Security::Authorization::ACCESS_MODE;
 use windows_sys::Win32::Security::Authorization::EXPLICIT_ACCESS_W;
+use windows_sys::Win32::Security::Authorization::GRANT_ACCESS;
 use windows_sys::Win32::Security::Authorization::GetNamedSecurityInfoW;
 use windows_sys::Win32::Security::Authorization::GetSecurityInfo;
+use windows_sys::Win32::Security::Authorization::SET_ACCESS;
 use windows_sys::Win32::Security::Authorization::SetEntriesInAclW;
 use windows_sys::Win32::Security::Authorization::SetNamedSecurityInfoW;
 use windows_sys::Win32::Security::Authorization::SetSecurityInfo;
@@ -68,6 +71,8 @@ const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
 const ACCESS_DENIED_ACE_TYPE: u8 = 1;
 const GENERIC_READ_MASK: u32 = 0x8000_0000;
 const GENERIC_WRITE_MASK: u32 = 0x4000_0000;
+const GENERIC_EXECUTE_MASK: u32 = 0x2000_0000;
+const GENERIC_ALL_MASK: u32 = 0x1000_0000;
 const DENY_ACCESS: i32 = 3;
 // TrustedInstaller is a deterministic service SID, not a machine-local account SID.
 const TRUSTED_INSTALLER_SID: &str =
@@ -94,23 +99,18 @@ fn acl_api_result(path: &Path, operation: &str, code: u32) -> Result<()> {
 /// # Safety
 /// Caller must free the returned security descriptor with `LocalFree` and pass an existing path.
 pub unsafe fn fetch_dacl_handle(path: &Path) -> Result<(*mut ACL, *mut c_void)> {
-    let wpath = to_wide(path);
-    let h = CreateFileW(
-        wpath.as_ptr(),
-        READ_CONTROL,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        std::ptr::null_mut(),
-        OPEN_EXISTING,
-        FILE_FLAG_BACKUP_SEMANTICS,
-        0,
-    );
-    if h == INVALID_HANDLE_VALUE {
-        return Err(anyhow!("CreateFileW failed for {}", path.display()));
-    }
+    // Rust's file opening supports extended-length paths without changing the
+    // caller's spelling or resolving links before the existing reparse checks.
+    let handle = OpenOptions::new()
+        .access_mode(READ_CONTROL)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .with_context(|| format!("open ACL target {}", path.display()))?;
     let mut p_sd: *mut c_void = std::ptr::null_mut();
     let mut p_dacl: *mut ACL = std::ptr::null_mut();
     let code = GetSecurityInfo(
-        h,
+        handle.as_raw_handle() as _,
         1, // SE_FILE_OBJECT
         DACL_SECURITY_INFORMATION,
         std::ptr::null_mut(),
@@ -119,7 +119,6 @@ pub unsafe fn fetch_dacl_handle(path: &Path) -> Result<(*mut ACL, *mut c_void)> 
         std::ptr::null_mut(),
         &mut p_sd,
     );
-    CloseHandle(h);
     if code != ERROR_SUCCESS {
         return Err(anyhow!(
             "GetSecurityInfo failed for {}: {}",
@@ -444,6 +443,19 @@ pub unsafe fn dacl_has_write_deny_for_sid(p_dacl: *mut ACL, psid: *mut c_void) -
 }
 
 pub unsafe fn dacl_has_read_deny_for_sid(p_dacl: *mut ACL, psid: *mut c_void) -> bool {
+    dacl_has_deny_mask(
+        p_dacl,
+        DenyAceScope::EffectiveForSid(psid),
+        FILE_GENERIC_READ | GENERIC_READ_MASK,
+    )
+}
+
+enum DenyAceScope {
+    EffectiveForSid(*mut c_void),
+    Any,
+}
+
+unsafe fn dacl_has_deny_mask(p_dacl: *mut ACL, scope: DenyAceScope, deny_mask: u32) -> bool {
     if p_dacl.is_null() {
         return false;
     }
@@ -457,7 +469,6 @@ pub unsafe fn dacl_has_read_deny_for_sid(p_dacl: *mut ACL, psid: *mut c_void) ->
     if ok == 0 {
         return false;
     }
-    let deny_read_mask = FILE_GENERIC_READ | GENERIC_READ_MASK;
     for i in 0..info.AceCount {
         let mut p_ace: *mut c_void = std::ptr::null_mut();
         if GetAce(p_dacl as *const ACL, i, &mut p_ace) == 0 {
@@ -467,14 +478,14 @@ pub unsafe fn dacl_has_read_deny_for_sid(p_dacl: *mut ACL, psid: *mut c_void) ->
         if hdr.AceType != ACCESS_DENIED_ACE_TYPE {
             continue; // ACCESS_DENIED_ACE_TYPE
         }
-        if (hdr.AceFlags & INHERIT_ONLY_ACE) != 0 {
+        let ace = &*(p_ace as *const ACCESS_DENIED_ACE);
+        if let DenyAceScope::EffectiveForSid(psid) = scope
+            && ((hdr.AceFlags & INHERIT_ONLY_ACE) != 0
+                || EqualSid(std::ptr::addr_of!(ace.SidStart) as *mut c_void, psid) == 0)
+        {
             continue;
         }
-        let ace = &*(p_ace as *const ACCESS_DENIED_ACE);
-        let base = p_ace as usize;
-        let sid_ptr =
-            (base + std::mem::size_of::<ACE_HEADER>() + std::mem::size_of::<u32>()) as *mut c_void;
-        if EqualSid(sid_ptr, psid) != 0 && (ace.Mask & deny_read_mask) != 0 {
+        if (ace.Mask & deny_mask) != 0 {
             return true;
         }
     }
@@ -522,17 +533,33 @@ unsafe fn ensure_allow_mask_aces_with_inheritance_impl(
     sids: &[*mut c_void],
     allow_mask: u32,
     disallow_mask: u32,
+    access_mode: ACCESS_MODE,
     inheritance: u32,
 ) -> Result<bool> {
     let (p_dacl, p_sd) = fetch_dacl_handle(path)?;
     let mut entries: Vec<EXPLICIT_ACCESS_W> = Vec::new();
     for sid in sids {
+        // A new allow can outrank another trustee's inherited deny, including a
+        // file-only deny on children. Without the complete token, preserve every deny.
+        if access_mode == GRANT_ACCESS
+            && dacl_has_deny_mask(
+                p_dacl,
+                DenyAceScope::Any,
+                allow_mask
+                    | GENERIC_READ_MASK
+                    | GENERIC_WRITE_MASK
+                    | GENERIC_EXECUTE_MASK
+                    | GENERIC_ALL_MASK,
+            )
+        {
+            continue;
+        }
         if !dacl_allow_mask_needs_refresh(p_dacl, *sid, allow_mask, disallow_mask) {
             continue;
         }
         entries.push(EXPLICIT_ACCESS_W {
             grfAccessPermissions: allow_mask,
-            grfAccessMode: 2, // SET_ACCESS
+            grfAccessMode: access_mode,
             grfInheritance: inheritance,
             Trustee: TRUSTEE_W {
                 pMultipleTrustee: std::ptr::null_mut(),
@@ -543,50 +570,51 @@ unsafe fn ensure_allow_mask_aces_with_inheritance_impl(
             },
         });
     }
-    let mut added = false;
-    if !entries.is_empty() {
-        let mut p_new_dacl: *mut ACL = std::ptr::null_mut();
+    let mut p_new_dacl: *mut ACL = std::ptr::null_mut();
+    // Collect errors before releasing either allocation so every update path
+    // shares the same cleanup, including failure to open the write handle.
+    let result = (|| -> Result<bool> {
+        if entries.is_empty() {
+            return Ok(false);
+        }
         let code2 = SetEntriesInAclW(
             entries.len() as u32,
             entries.as_ptr(),
             p_dacl,
             &mut p_new_dacl,
         );
-        if code2 == ERROR_SUCCESS {
-            let code3 = SetNamedSecurityInfoW(
-                to_wide(path).as_ptr() as *mut u16,
-                1,
-                DACL_SECURITY_INFORMATION,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                p_new_dacl,
-                std::ptr::null_mut(),
-            );
-            if code3 == ERROR_SUCCESS {
-                added = true;
-                if !p_new_dacl.is_null() {
-                    LocalFree(p_new_dacl as HLOCAL);
-                }
-            } else {
-                if !p_new_dacl.is_null() {
-                    LocalFree(p_new_dacl as HLOCAL);
-                }
-                if !p_sd.is_null() {
-                    LocalFree(p_sd as HLOCAL);
-                }
-                return Err(anyhow!("SetNamedSecurityInfoW failed: {code3}"));
-            }
-        } else {
-            if !p_sd.is_null() {
-                LocalFree(p_sd as HLOCAL);
-            }
+        if code2 != ERROR_SUCCESS {
             return Err(anyhow!("SetEntriesInAclW failed: {code2}"));
         }
+        // Keep no-op checks read-only; request ACL-write access only when
+        // a grant actually needs updating. Use the same long-path support.
+        let handle = OpenOptions::new()
+            .access_mode(READ_CONTROL | WRITE_DAC)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+            .context("open ACL target for update")?;
+        let code3 = SetSecurityInfo(
+            handle.as_raw_handle() as _,
+            1,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            p_new_dacl,
+            std::ptr::null_mut(),
+        );
+        if code3 != ERROR_SUCCESS {
+            return Err(anyhow!("SetSecurityInfo failed: {code3}"));
+        }
+        Ok(true)
+    })();
+    if !p_new_dacl.is_null() {
+        LocalFree(p_new_dacl as HLOCAL);
     }
     if !p_sd.is_null() {
         LocalFree(p_sd as HLOCAL);
     }
-    Ok(added)
+    result
 }
 
 /// Ensure all provided SIDs have an allow ACE with the requested mask on the path.
@@ -605,6 +633,27 @@ pub unsafe fn ensure_allow_mask_aces_with_inheritance(
         sids,
         allow_mask,
         /*disallow_mask*/ 0,
+        SET_ACCESS,
+        inheritance,
+    )
+}
+
+/// Ensure read/execute grants without replacing existing entries or overriding denies.
+/// Returns true if any ACE was added.
+///
+/// # Safety
+/// Caller must pass valid SID pointers and an existing path.
+pub(crate) unsafe fn grant_read_execute_aces(
+    path: &Path,
+    sids: &[*mut c_void],
+    inheritance: u32,
+) -> Result<bool> {
+    ensure_allow_mask_aces_with_inheritance_impl(
+        path,
+        sids,
+        FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,
+        /*disallow_mask*/ 0,
+        GRANT_ACCESS,
         inheritance,
     )
 }
@@ -638,6 +687,7 @@ pub unsafe fn ensure_allow_write_aces(path: &Path, sids: &[*mut c_void]) -> Resu
         sids,
         WRITE_ALLOW_MASK,
         FILE_DELETE_CHILD,
+        SET_ACCESS,
         CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE,
     )
 }

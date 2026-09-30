@@ -81,7 +81,9 @@ fn handler(matcher: Option<&str>) -> ConfiguredHandler {
     ConfiguredHandler {
         builtin: false,
         event_name: HookEventName::SessionEnd,
-        matcher: matcher.map(str::to_string),
+        matcher: matcher
+            .map(|pattern| crate::engine::HookMatcher::new(pattern).expect("valid matcher")),
+        claude_conditions: Vec::new(),
         timeout_sec: 2,
         status_message: None,
         additional_context_limit: Default::default(),

@@ -1,4 +1,5 @@
 //! Interactive recovery when starting an archived session.
+//! Retries preserve the launch-resolved local presentation settings from the first attempt.
 
 use crate::app::AppExitInfo;
 use crate::app::ExitReason;
@@ -7,6 +8,7 @@ use crate::app_server_session::AppServerStartedThread;
 use crate::app_server_session::ForkPermissionMode;
 use crate::app_server_session::ResumeModelSettings;
 use crate::legacy_core::config::Config;
+use crate::local_settings::LocalSettings;
 use crate::resume_picker::SessionTarget;
 use crate::unarchive_prompt::UnarchiveChoice;
 use color_eyre::Result;
@@ -14,14 +16,17 @@ use color_eyre::eyre::WrapErr;
 
 #[derive(Clone, Copy)]
 pub(crate) enum SessionStartAction {
-    Resume(ResumeModelSettings),
+    Resume(
+        ResumeModelSettings,
+        crate::resume_permissions::ResumePermissions,
+    ),
     Fork(ForkPermissionMode),
 }
 
 impl SessionStartAction {
     pub(crate) fn verb(self) -> &'static str {
         match self {
-            Self::Resume(_) => "resume",
+            Self::Resume(..) => "resume",
             Self::Fork(_) => "fork",
         }
     }
@@ -30,19 +35,25 @@ impl SessionStartAction {
         self,
         app_server: &mut AppServerSession,
         config: &Config,
+        local_settings: &LocalSettings,
         target: &SessionTarget,
     ) -> Result<AppServerStartedThread> {
-        let local_settings = crate::local_settings::LocalSettings::from(config);
         match self {
-            Self::Resume(settings) => {
+            Self::Resume(settings, permissions) => {
                 app_server
-                    .resume_thread(&local_settings, config.clone(), target.thread_id, settings)
+                    .resume_thread_with_permission_overrides(
+                        local_settings,
+                        config.clone(),
+                        target.thread_id,
+                        settings,
+                        permissions,
+                    )
                     .await
             }
             Self::Fork(permission_mode) => {
                 app_server
                     .fork_thread_with_permission_mode(
-                        &local_settings,
+                        local_settings,
                         config.clone(),
                         target.thread_id,
                         permission_mode,
@@ -60,9 +71,16 @@ pub(crate) enum SessionStartOutcome {
     Exit,
 }
 
+/// The first attempt's session configuration and launch-resolved presentation settings.
+/// Archived-session retries must reuse both so thread configuration cannot change ownership.
+pub(crate) struct SessionStartConfig<'a> {
+    pub(crate) config: &'a Config,
+    pub(crate) local_settings: &'a LocalSettings,
+}
+
 pub(crate) async fn complete_session_start(
     app_server: &mut AppServerSession,
-    config: &Config,
+    config: SessionStartConfig<'_>,
     app_server_target: &crate::AppServerTarget,
     target: &SessionTarget,
     action: SessionStartAction,
@@ -101,7 +119,7 @@ pub(crate) async fn complete_session_start(
         .wrap_err_with(|| format!("Failed to unarchive session {}", target.thread_id))?;
     // Retry by ID, not by the old rollout path, which unarchiving may have moved.
     action
-        .start(app_server, config, target)
+        .start(app_server, config.config, config.local_settings, target)
         .await
         .map(|started| SessionStartOutcome::Started(Box::new(started)))
         .map_err(|err| session_start_error(action.verb(), target, err))

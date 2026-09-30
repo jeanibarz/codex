@@ -136,6 +136,7 @@ impl McpConnectionSet {
             McpServerView {
                 tool_filter: ToolFilter::default(),
                 protocol_mode: crate::McpProtocolMode::Legacy,
+                startup_readiness: Default::default(),
                 connection: Arc::new(McpServerConnection {
                     identity: None,
                     client,
@@ -1996,6 +1997,74 @@ fn codex_apps_env_bearer_token_bypasses_shared_tools_cache() {
 }
 
 #[tokio::test]
+async fn read_only_apps_discovery_never_uses_a_shared_writable_catalog() -> anyhow::Result<()> {
+    let codex_home = tempdir()?;
+    let cache = ConnectorRuntimeManager::new_without_cache();
+    let cache_key = ConnectorRuntimeContextKey::personal(
+        /*account_id*/ None, /*chatgpt_user_id*/ None,
+    );
+    let cache_context = cache.context(codex_home.path().to_path_buf(), cache_key.clone());
+    store_current_tools(
+        &cache_context,
+        vec![create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "write")],
+    );
+    let server_config: McpServerConfig = serde_json::from_value(serde_json::json!({
+        "url": "http://127.0.0.1:1/mcp",
+        "http_headers": {"authorization": "Bearer fixture"},
+    }))?;
+    for read_only in [false, true] {
+        let mut config = crate::mcp::tests::test_mcp_config(codex_home.path().to_path_buf());
+        config.requires_read_only_mcp_tools = read_only;
+        let mut catalog = crate::ResolvedMcpCatalog::builder();
+        catalog.register(crate::McpServerRegistration::from_hosted_apps(
+            "fixture",
+            /*contribution_order*/ 0,
+            server_config.clone(),
+        ));
+        config.mcp_server_catalog = catalog.build();
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let manager = McpConnectionSet::new(
+            /*previous*/ None,
+            McpPublicationGate::already_published(),
+            McpRuntimeInput {
+                startup_policy: McpStartupPolicy::Eager,
+                config: Arc::new(config),
+                plugins_available: false,
+                ready_selected_capability_roots: Vec::new(),
+                mcp_servers: HashMap::from([(
+                    CODEX_APPS_MCP_SERVER_NAME.to_string(),
+                    EffectiveMcpServer::from_host_config(server_config.clone()),
+                )]),
+                submit_id: "test".to_string(),
+                tx_event: None,
+                startup_cancellation_token: cancellation,
+                runtime_context: reusable_server_runtime_context(),
+                codex_apps_tools_cache: cache.clone(),
+                tool_catalog_cache: McpToolCatalogCache::default(),
+                codex_apps_tools_cache_key: cache_key.clone(),
+                client_mcp_extensions: ClientMcpExtensions::default(),
+                auth: None,
+                auth_manager: None,
+                elicitation_reviewer: None,
+                elicitation_lifecycle: None,
+            },
+            ElicitationRequestRouter::default(),
+        )
+        .await;
+        let tools = manager.list_all_tools().await;
+        assert_eq!(
+            tools
+                .iter()
+                .map(|tool| tool.callable_name.as_str())
+                .collect::<Vec<_>>(),
+            if read_only { vec![] } else { vec!["write"] },
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn hosted_apps_protocol_mode_is_independent_of_generic_mode() -> anyhow::Result<()> {
     let codex_home = tempdir()?;
     let server_config: McpServerConfig =
@@ -2039,11 +2108,11 @@ async fn hosted_apps_protocol_mode_is_independent_of_generic_mode() -> anyhow::R
                 mcp_servers: HashMap::from([
                     (
                         CODEX_APPS_MCP_SERVER_NAME.to_string(),
-                        EffectiveMcpServer::configured(server_config.clone()),
+                        EffectiveMcpServer::from_host_config(server_config.clone()),
                     ),
                     (
                         "third_party".to_string(),
-                        EffectiveMcpServer::configured(server_config.clone()),
+                        EffectiveMcpServer::from_host_config(server_config.clone()),
                     ),
                 ]),
                 submit_id: "protocol-mode-scope".to_string(),
@@ -2144,7 +2213,7 @@ async fn codex_apps_extension_does_not_share_host_owned_tools_cache() -> anyhow:
                 ready_selected_capability_roots: Vec::new(),
                 mcp_servers: HashMap::from([(
                     CODEX_APPS_MCP_SERVER_NAME.to_string(),
-                    EffectiveMcpServer::configured(server_config.clone()),
+                    EffectiveMcpServer::from_host_config(server_config.clone()),
                 )]),
                 submit_id: "cache-ownership-test".to_string(),
                 tx_event: None,
@@ -2649,7 +2718,7 @@ async fn list_available_server_infos_uses_cache_while_client_is_pending() {
 
     let timeout_result = tokio::time::timeout(
         Duration::from_millis(10),
-        manager.list_available_server_infos(),
+        manager.list_available_server_infos(|_| true),
     )
     .await;
     let server_infos = timeout_result.expect("server info lookup should not block on startup");
@@ -2821,6 +2890,7 @@ async fn capture_binding_skips_pending_optional_servers_after_configured_shared_
         "pending-selected".to_string(),
         crate::McpPluginAttribution::new("selected-plugin".to_string(), "Selected".to_string()),
         /*selection_order*/ 0,
+        codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID,
         serde_json::from_value(serde_json::json!({ "command": "selected-plugin" }))
             .expect("selected plugin MCP config"),
     ));
@@ -3954,7 +4024,7 @@ async fn list_all_tools_uses_shared_codex_apps_cache_when_client_startup_fails()
     assert_eq!(tool.callable_name, "calendar_create_event");
     assert_eq!(
         manager
-            .list_available_server_infos()
+            .list_available_server_infos(|_| true)
             .await
             .get(CODEX_APPS_MCP_SERVER_NAME),
         Some(&server_info)
@@ -4316,7 +4386,7 @@ fn server_metadata_preserves_tool_approval_policy() {
             ..Default::default()
         },
     );
-    let metadata = McpServerMetadata::from(&EffectiveMcpServer::configured(config));
+    let metadata = McpServerMetadata::from(&EffectiveMcpServer::from_host_config(config));
 
     assert_eq!(metadata.environment_id, "remote");
     assert_eq!(metadata.tool_approval_mode("read"), AppToolApproval::Prompt);
@@ -4347,7 +4417,7 @@ fn hosted_actor_credentials_are_only_available_to_host_owned_mcp_servers() {
     );
     local_config.auth = McpServerAuth::ChatGpt;
 
-    let local_server = EffectiveMcpServer::configured(local_config.clone());
+    let local_server = EffectiveMcpServer::from_host_config(local_config.clone());
     let local_provider =
         chatgpt_auth_provider_for_server(&local_server, Some(Arc::clone(&provider)))
             .expect("host-owned Codex Apps must retain hosted authentication");
@@ -4361,7 +4431,7 @@ fn hosted_actor_credentials_are_only_available_to_host_owned_mcp_servers() {
 
     let mut remote_config = local_config;
     remote_config.environment_id = "customer-executor".to_string();
-    let remote_server = EffectiveMcpServer::configured(remote_config);
+    let remote_server = EffectiveMcpServer::from_host_config(remote_config);
     assert!(
         chatgpt_auth_provider_for_server(&remote_server, Some(provider)).is_none(),
         "customer-owned executors must never receive hosted actor credentials"
@@ -4462,6 +4532,13 @@ async fn executor_owned_chatgpt_mcp_accepts_only_safe_explicit_authorization() -
             server_json["env_http_headers"] = serde_json::json!({ name: value });
         }
         let server_config = serde_json::from_value::<McpServerConfig>(server_json)?;
+        let mut runtime_config = runtime_config.clone();
+        let mut catalog = crate::ResolvedMcpCatalog::builder();
+        catalog.register(crate::McpServerRegistration::from_config(
+            "fake-first-party".to_string(),
+            server_config.clone(),
+        ));
+        runtime_config.mcp_server_catalog = catalog.build();
         let mcp_servers = crate::effective_mcp_servers_from_configured(
             HashMap::from([("fake-first-party".to_string(), server_config)]),
             &runtime_config,
@@ -4588,7 +4665,7 @@ async fn no_local_runtime_fails_local_stdio_but_keeps_local_http_server() {
     let mcp_servers = HashMap::from([
         (
             "stdio".to_string(),
-            EffectiveMcpServer::configured(McpServerConfig {
+            EffectiveMcpServer::from_host_config(McpServerConfig {
                 auth: Default::default(),
                 transport: McpServerTransportConfig::Stdio {
                     command: "echo".to_string(),
@@ -4600,7 +4677,9 @@ async fn no_local_runtime_fails_local_stdio_but_keeps_local_http_server() {
                 environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
                 enabled: true,
                 required: false,
+                startup_readiness: Default::default(),
                 supports_parallel_tool_calls: false,
+                tool_input_schema_max_bytes: None,
                 omit_tools_from: None,
                 disabled_reason: None,
                 startup_timeout_sec: None,
@@ -4616,7 +4695,7 @@ async fn no_local_runtime_fails_local_stdio_but_keeps_local_http_server() {
         ),
         (
             "http".to_string(),
-            EffectiveMcpServer::configured(McpServerConfig {
+            EffectiveMcpServer::from_host_config(McpServerConfig {
                 auth: Default::default(),
                 transport: McpServerTransportConfig::StreamableHttp {
                     url: "http://127.0.0.1:1".to_string(),
@@ -4628,7 +4707,9 @@ async fn no_local_runtime_fails_local_stdio_but_keeps_local_http_server() {
                 environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
                 enabled: true,
                 required: false,
+                startup_readiness: Default::default(),
                 supports_parallel_tool_calls: false,
+                tool_input_schema_max_bytes: None,
                 omit_tools_from: None,
                 disabled_reason: None,
                 startup_timeout_sec: None,
@@ -4739,7 +4820,9 @@ fn mcp_init_error_display_prompts_for_github_pat() {
         environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
         enabled: true,
         required: false,
+        startup_readiness: Default::default(),
         supports_parallel_tool_calls: false,
+        tool_input_schema_max_bytes: None,
         omit_tools_from: None,
         disabled_reason: None,
         startup_timeout_sec: None,
@@ -4899,7 +4982,9 @@ fn mcp_init_error_display_reports_generic_errors() {
         environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
         enabled: true,
         required: false,
+        startup_readiness: Default::default(),
         supports_parallel_tool_calls: false,
+        tool_input_schema_max_bytes: None,
         omit_tools_from: None,
         disabled_reason: None,
         startup_timeout_sec: None,
@@ -4978,7 +5063,9 @@ fn reusable_server_config(url: &str) -> McpServerConfig {
         environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
         enabled: true,
         required: false,
+        startup_readiness: Default::default(),
         supports_parallel_tool_calls: false,
+        tool_input_schema_max_bytes: None,
         omit_tools_from: None,
         disabled_reason: None,
         startup_timeout_sec: None,
@@ -5005,7 +5092,7 @@ fn reusable_server_identity(
     config: &McpServerConfig,
     runtime_context: &McpRuntimeContext,
 ) -> McpServerConnectionIdentity {
-    let server = EffectiveMcpServer::configured(config.clone());
+    let server = EffectiveMcpServer::from_host_config(config.clone());
     let resolved_environment = runtime_context.resolve_server_environment(server_name, config);
     McpServerConnectionIdentity::new(
         server_name,
@@ -5037,11 +5124,12 @@ async fn manager_with_reusable_ready_server(
         &permission_profile,
         /*prefix_mcp_tool_names*/ true,
     );
-    let server = EffectiveMcpServer::configured(config.clone());
+    let server = EffectiveMcpServer::from_host_config(config.clone());
     manager.servers.insert(
         "docs".to_string(),
         McpServerView {
             protocol_mode: crate::McpProtocolMode::Legacy,
+            startup_readiness: Default::default(),
             connection: Arc::new(McpServerConnection {
                 identity: Some(reusable_server_identity("docs", config, runtime_context)),
                 client: create_ready_async_managed_client(tools).await,
@@ -5094,7 +5182,7 @@ async fn reconcile_reusable_server_with_mcp_config(
             ready_selected_capability_roots: Vec::new(),
             mcp_servers: HashMap::from([(
                 server_name.to_string(),
-                EffectiveMcpServer::configured(config),
+                EffectiveMcpServer::from_host_config(config),
             )]),
             submit_id: "refresh".to_string(),
             tx_event: Some(tx_event),
@@ -5114,6 +5202,35 @@ async fn reconcile_reusable_server_with_mcp_config(
         ElicitationRequestRouter::default(),
     )
     .await
+}
+
+#[tokio::test]
+async fn read_only_policy_does_not_reuse_a_writable_connection() {
+    let codex_home = tempdir().expect("tempdir");
+    let runtime_context = reusable_server_runtime_context();
+    let config = reusable_server_config("http://127.0.0.1:1");
+    let previous = manager_with_reusable_ready_server(
+        &config,
+        &runtime_context,
+        vec![create_test_tool("docs", "write")],
+    )
+    .await;
+    for read_only in [false, true] {
+        let mut mcp_config = crate::mcp::tests::test_mcp_config(codex_home.path().to_path_buf());
+        mcp_config.requires_read_only_mcp_tools = read_only;
+        let reconciled = reconcile_reusable_server_with_mcp_config(
+            &previous,
+            "docs",
+            config.clone(),
+            runtime_context.clone(),
+            mcp_config,
+        )
+        .await;
+        assert_eq!(
+            previous.shares_test_connection_with(&reconciled, "docs"),
+            !read_only
+        );
+    }
 }
 
 #[tokio::test]
@@ -5433,11 +5550,12 @@ async fn reconciliation_reuses_connection_without_relisting_regular_tools() -> a
         &permission_profile,
         /*prefix_mcp_tool_names*/ true,
     );
-    let server = EffectiveMcpServer::configured(config.clone());
+    let server = EffectiveMcpServer::from_host_config(config.clone());
     previous.servers.insert(
         "docs".to_string(),
         McpServerView {
             protocol_mode: crate::McpProtocolMode::Legacy,
+            startup_readiness: Default::default(),
             connection: Arc::new(McpServerConnection {
                 identity: Some(reusable_server_identity("docs", &config, &runtime_context)),
                 client: AsyncManagedClient {
@@ -5640,6 +5758,79 @@ async fn reconciliation_retries_non_oauth_authentication_failures() {
 }
 
 #[test]
+fn connection_identity_tracks_only_oauth_credentials_when_oauth_is_active() {
+    let runtime_context = reusable_server_runtime_context();
+    for authorization in [None, Some("Bearer configured-token")] {
+        let identity = |oauth: serde_json::Value| {
+            let config: McpServerConfig = serde_json::from_value(serde_json::json!({
+                "url": "http://127.0.0.1:1",
+                "http_headers": authorization.map(|value| HashMap::from([
+                    ("Authorization", value)
+                ])),
+                "oauth": oauth
+            }))
+            .expect("valid OAuth configuration");
+            let debug = format!("{config:?}");
+            assert!(!debug.contains("old-secret"));
+            assert!(!debug.contains("new-secret"));
+            McpServerConnectionIdentity::new(
+                "docs",
+                &EffectiveMcpServer::from_host_config(config),
+                /*host_plugin_root*/ None,
+                OAuthCredentialsStoreMode::File,
+                AuthKeyringBackendKind::Direct,
+                McpOAuthRefreshMode::Legacy,
+                &Ok(None),
+                &runtime_context,
+                /*runtime_auth_provider*/ None,
+                /*auth*/ None,
+                /*codex_apps_cache_identity*/ None,
+                ElicitationCapability::default(),
+                ClientMcpExtensions::default(),
+                /*previous_identity*/ None,
+            )
+        };
+        let original_config = serde_json::json!({
+            "client_id": "client",
+            "client_secret": "old-secret",
+            "callback_url": "http://127.0.0.1:12799/callback/original",
+            "callback_port": 12799,
+        });
+        let original = identity(original_config.clone());
+        assert!(original.has_same_connection_config(&identity(original_config.clone())));
+        for (field, value) in [
+            ("client_secret", serde_json::json!("new-secret")),
+            ("client_id", serde_json::json!("new-client")),
+        ] {
+            let mut changed = original_config.clone();
+            changed[field] = value;
+            assert_eq!(
+                original.has_same_connection_config(&identity(changed)),
+                authorization.is_some(),
+            );
+        }
+        for (field, value) in [
+            (
+                "callback_url",
+                serde_json::json!("http://127.0.0.1:12799/callback/changed"),
+            ),
+            ("callback_port", serde_json::json!(12800)),
+        ] {
+            let mut changed = original_config.clone();
+            changed[field] = value.clone();
+            assert!(original.has_same_connection_config(&identity(changed)));
+
+            let mut callback_only = serde_json::json!({});
+            callback_only[field] = value;
+            assert!(
+                identity(serde_json::Value::Null)
+                    .has_same_connection_config(&identity(callback_only))
+            );
+        }
+    }
+}
+
+#[test]
 fn connection_identity_uses_effective_authorization_headers() {
     let runtime_context = reusable_server_runtime_context();
     let missing_env_var = format!("CODEX_TEST_UNSET_MCP_AUTHORIZATION_{}", std::process::id());
@@ -5662,7 +5853,7 @@ fn connection_identity_uses_effective_authorization_headers() {
                 .map(|value| HashMap::from([("aUtHoRiZaTiOn".to_string(), value.to_string())])),
             http_headers_helper: None,
         };
-        let server = EffectiveMcpServer::configured(config);
+        let server = EffectiveMcpServer::from_host_config(config);
         let identity = |keyring_backend_kind, oauth_refresh_mode| {
             McpServerConnectionIdentity::new(
                 "docs",
@@ -5745,6 +5936,13 @@ async fn reconciliation_replaces_connection_when_auth_mode_changes() -> anyhow::
         let mut config = reusable_server_config("https://chatgpt.com/backend-api/ps/mcp");
         config.environment_id = "customer-executor".to_string();
         config.auth = auth;
+        let mut mcp_config = mcp_config.clone();
+        let mut catalog = crate::ResolvedMcpCatalog::builder();
+        catalog.register(crate::McpServerRegistration::from_config(
+            "docs".to_string(),
+            config.clone(),
+        ));
+        mcp_config.mcp_server_catalog = catalog.build();
         crate::effective_mcp_servers_from_configured(
             HashMap::from([("docs".to_string(), config)]),
             &mcp_config,
@@ -5816,7 +6014,7 @@ async fn reconciliation_replaces_connection_when_protocol_mode_changes() {
             ready_selected_capability_roots: Vec::new(),
             mcp_servers: HashMap::from([(
                 "docs".to_string(),
-                EffectiveMcpServer::configured(config),
+                EffectiveMcpServer::from_host_config(config),
             )]),
             submit_id: "refresh".to_string(),
             tx_event: None,
@@ -5874,7 +6072,7 @@ async fn reconciliation_reuses_legacy_stdio_server_when_modern_protocol_is_enabl
             ready_selected_capability_roots: Vec::new(),
             mcp_servers: HashMap::from([(
                 "docs".to_string(),
-                EffectiveMcpServer::configured(config),
+                EffectiveMcpServer::from_host_config(config),
             )]),
             submit_id: "refresh".to_string(),
             tx_event: None,
@@ -5902,42 +6100,101 @@ async fn reconciliation_reuses_legacy_stdio_server_when_modern_protocol_is_enabl
 async fn reconciliation_updates_elicitation_policy_without_restarting_ready_server() {
     let runtime_context = reusable_server_runtime_context();
     let config = reusable_server_config("http://127.0.0.1:1");
-    let previous = manager_with_reusable_ready_server(
+    let mut previous = manager_with_reusable_ready_server(
         &config,
         &runtime_context,
         vec![create_test_tool("docs", "search")],
     )
     .await;
-    {
-        let mut authority = previous
-            .elicitation_requests
-            .authority
-            .lock()
-            .expect("elicitation authority lock");
-        let config = Arc::make_mut(
-            &mut authority
-                .as_mut()
-                .expect("test manager should have permission authority")
-                .config,
-        );
-        config.approval_policy = Constrained::allow_any(AskForApproval::Never);
-        config.permission_profile = PermissionProfile::Disabled;
+    let router = ElicitationRequestRouter::default();
+    previous.elicitation_requests = ElicitationRequestManager::new(
+        test_elicitation_config("docs", AskForApproval::Never, PermissionProfile::Disabled),
+        /*reviewer*/ None,
+        /*lifecycle*/ None,
+        router.clone(),
+    );
+    let (tx_event, events) = async_channel::unbounded();
+    let sender = previous.elicitation_requests.make_sender(
+        "docs".to_string(),
+        Some(tx_event),
+        &ClientMcpExtensions::default(),
+    );
+    let elicitation =
+        codex_rmcp_client::Elicitation::Mcp(ElicitRequestParams::FormElicitationParams {
+            meta: None,
+            message: "What should I say?".to_string(),
+            requested_schema: requested_user_input_schema(),
+        });
+    let response = ElicitationResponse {
+        action: ElicitationAction::Accept,
+        content: Some(serde_json::json!({"message": "continue"})),
+        meta: None,
+    };
+
+    for approval_policy in [
+        AskForApproval::OnRequest,
+        AskForApproval::Never,
+        AskForApproval::OnRequest,
+    ] {
+        let mcp_config =
+            test_elicitation_config("docs", approval_policy, PermissionProfile::default());
+        let reconciled = reconcile_reusable_server_with_mcp_config(
+            &previous,
+            "docs",
+            config.clone(),
+            runtime_context.clone(),
+            mcp_config.as_ref().clone(),
+        )
+        .await;
+        assert!(previous.shares_test_connection_with(&reconciled, "docs"));
+        {
+            let authority = reconciled
+                .elicitation_requests
+                .authority
+                .lock()
+                .expect("elicitation authority lock");
+            let config = &authority.as_ref().expect("elicitation authority").config;
+            assert_eq!(config.approval_policy.value(), approval_policy);
+            assert_eq!(config.permission_profile, PermissionProfile::default());
+        }
+
+        // A sender captured before reconciliation must observe each policy update.
+        let mut pending = sender(NumberOrString::Number(7), elicitation.clone());
+        if approval_policy == AskForApproval::OnRequest {
+            assert!(futures::poll!(pending.as_mut()).is_pending());
+            let EventMsg::ElicitationRequest(request) =
+                events.try_recv().expect("user-input event").msg
+            else {
+                panic!("expected MCP elicitation");
+            };
+            let codex_protocol::mcp::RequestId::String(request_id) = request.id else {
+                panic!("expected Codex-owned string request ID");
+            };
+            router
+                .resolve(
+                    "docs".to_string(),
+                    NumberOrString::String(request_id.into()),
+                    response.clone(),
+                )
+                .await
+                .expect("user response should resolve the retained sender");
+            assert_eq!(pending.await.expect("elicitation should resolve"), response);
+        } else {
+            assert_eq!(
+                pending
+                    .now_or_never()
+                    .expect("a policy denial must not wait for user input")
+                    .expect("elicitation should receive a response"),
+                ElicitationResponse {
+                    action: ElicitationAction::Decline,
+                    content: None,
+                    meta: None,
+                }
+            );
+        }
+        assert!(events.is_empty());
+        previous = reconciled;
     }
-
-    let reconciled = reconcile_reusable_server(&previous, config, runtime_context).await;
-
-    assert!(previous.shares_test_connection_with(&reconciled, "docs"));
-    let authority = reconciled
-        .elicitation_requests
-        .authority
-        .lock()
-        .expect("elicitation authority lock");
-    let config = &authority
-        .as_ref()
-        .expect("reconciled manager should have permission authority")
-        .config;
-    assert_eq!(config.approval_policy.value(), AskForApproval::OnRequest);
-    assert_eq!(config.permission_profile, PermissionProfile::default());
 }
 
 #[tokio::test]
@@ -6074,7 +6331,7 @@ async fn reconciliation_reconnects_when_host_plugin_root_changes() {
         vec![create_test_tool("docs", "search")],
     )
     .await;
-    let server = EffectiveMcpServer::configured(server_config.clone());
+    let server = EffectiveMcpServer::from_host_config(server_config.clone());
     let resolved_environment = runtime_context.resolve_server_environment("docs", &server_config);
     let original_identity = McpServerConnectionIdentity::new(
         "docs",
@@ -6143,7 +6400,7 @@ async fn reconciliation_reconnects_when_host_plugin_root_changes() {
 async fn connection_identity_distinguishes_accounts_with_the_same_token() -> anyhow::Result<()> {
     let runtime_context = reusable_server_runtime_context();
     let config = reusable_server_config("http://127.0.0.1:1");
-    let server = EffectiveMcpServer::configured(config);
+    let server = EffectiveMcpServer::from_host_config(config);
     let access_token = "header.e30.same";
     let previous_auth = CodexAuth::from_external_chatgpt_tokens(
         access_token,
@@ -6188,7 +6445,7 @@ async fn connection_identity_distinguishes_accounts_with_the_same_token() -> any
 async fn connection_identity_distinguishes_agent_account_runtime_and_task() -> anyhow::Result<()> {
     let runtime_context = reusable_server_runtime_context();
     let config = reusable_server_config("http://127.0.0.1:1");
-    let server = EffectiveMcpServer::configured(config);
+    let server = EffectiveMcpServer::from_host_config(config);
     let record = codex_login::auth::AgentIdentityAuthRecord {
         agent_runtime_id: "agent-a".to_string(),
         agent_private_key: "MC4CAQAwBQYDK2VwBCIEIJ7kFBaOujmoz1gvBNEC+BeM2IX87FFB0xmISOZ/XO0c"

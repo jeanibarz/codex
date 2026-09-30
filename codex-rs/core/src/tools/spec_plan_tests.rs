@@ -25,7 +25,6 @@ use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ToolMode;
 use codex_protocol::openai_models::WebSearchToolType;
 use codex_protocol::protocol::EnvironmentConfigState;
-use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -231,7 +230,7 @@ fn plan_with_model(
     let mut registry = build_core_tool_registry(
         turn,
         model_info,
-        &turn.environments,
+        &turn.initial_environments,
         &mcp,
         inputs.tool_suggest_candidates.as_ref(),
         inputs.wait_for_environment_tool_config.as_ref(),
@@ -403,12 +402,12 @@ impl<'call> ToolExecutor<ExtensionToolCall<'call>> for DeferredExtensionTool {
 
 fn duplicate_primary_environment(turn: &mut TurnContext) {
     let mut second_environment = turn
-        .environments
+        .initial_environments
         .primary()
         .expect("primary environment")
         .clone();
     second_environment.selection.environment_id = "secondary".to_string();
-    turn.environments
+    turn.initial_environments
         .environments
         .push(TurnEnvironmentState::Ready(second_environment));
 }
@@ -516,9 +515,94 @@ fn apply_patch_accepts_environment_id(spec: &ToolSpec) -> bool {
 }
 
 #[tokio::test]
-async fn internal_guardian_sessions_exclude_optional_core_tools() {
-    let (session, mut turn) = make_session_and_context().await;
-    turn.session_source = SessionSource::Internal(InternalSessionSource::Guardian);
+async fn allowed_tools_filter_sources_before_code_mode_and_discovery() {
+    use crate::tools::registry::ToolRegistry;
+    use codex_extension_api::ToolPolicy;
+
+    for allowed in [
+        None,
+        Some(vec![
+            ToolName::namespaced("kept", "lookup"),
+            ToolName::plain("exec"),
+            ToolName::plain("wait"),
+        ]),
+        Some(Vec::new()),
+    ] {
+        let (_, mut turn) = make_session_and_context().await;
+        set_feature(&mut turn, Feature::CodeMode, /*enabled*/ true);
+        set_web_search_mode(&mut turn, WebSearchMode::Live);
+        update_turn_settings_for_test(&mut turn, |settings| {
+            let model = Arc::make_mut(&mut settings.model_info);
+            model.supports_search_tool = true;
+            model.use_responses_lite = false;
+        });
+        let mut registry = ToolRegistry::with_tool_policy(Arc::new(ToolPolicy {
+            allowed_tools: allowed.clone(),
+            ..Default::default()
+        }));
+        registry.add(crate::tools::handlers::PlanHandler);
+        let hosted = append_source_tools(
+            &turn,
+            turn.model_info(),
+            &mut registry,
+            vec![
+                mcp_runtime("kept", "kept", "lookup", ToolExposure::Deferred),
+                mcp_runtime("excluded", "excluded", "lookup", ToolExposure::Deferred),
+            ],
+            [Arc::new(DeferredExtensionTool)
+                as Arc<
+                    dyn for<'call> ToolExecutor<ExtensionToolCall<'call>>,
+                >],
+            &[dynamic_tool(
+                /*namespace*/ None,
+                "dynamic_echo",
+                /*defer_loading*/ false,
+            )],
+        );
+        assert!(!hosted.is_empty(), "exercise hosted tool filtering too");
+        let router = ToolRouter::from_registry(
+            &turn,
+            turn.model_info(),
+            registry,
+            hosted,
+            &Default::default(),
+        );
+        let plan = ToolPlanProbe::from_router(router);
+        match allowed {
+            None => {
+                plan.assert_registered_contains(&["update_plan", "extension_echo", "dynamic_echo"]);
+                plan.assert_visible_contains(&["web_search", "tool_search", "exec", "wait"]);
+            }
+            Some(allowed) if allowed.is_empty() => {
+                assert_eq!(plan.registered_names, Vec::<String>::new());
+                assert_eq!(plan.visible_specs, Vec::<ToolSpec>::new());
+                assert_eq!(plan.code_mode_tool_names, BTreeMap::new());
+            }
+            Some(_) => {
+                assert_eq!(plan.registered_names, vec!["exec", "wait", "keptlookup"]);
+                assert_eq!(
+                    plan.code_mode_tool_names
+                        .values()
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                    vec![ToolName::namespaced("kept", "lookup")]
+                );
+                plan.assert_visible_lacks(&[
+                    "web_search",
+                    "tool_search",
+                    "update_plan",
+                    "dynamic_echo",
+                    "extension_echo",
+                ]);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn reviewer_tool_policy_exclude_optional_core_tools() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    session.tool_policy = Arc::new(codex_guardian_reviewer::reviewer_tool_policy());
     set_feature(&mut turn, Feature::ViewImage, /*enabled*/ true);
     Arc::make_mut(&mut turn.config).update_plan_enabled = true;
     turn.multi_agent_version = MultiAgentVersion::V2;
@@ -528,8 +612,7 @@ async fn internal_guardian_sessions_exclude_optional_core_tools() {
     let router = super::build_tool_router(
         &session,
         step_context.turn.as_ref(),
-        step_context.turn.model_info(),
-        step_context.settings.model_info.model_messages.as_ref(),
+        &step_context.settings.model_info,
         &step_context.environments,
         &step_context.mcp,
         /*apps_enabled*/ false,
@@ -549,14 +632,14 @@ async fn internal_guardian_sessions_exclude_optional_core_tools() {
 }
 
 #[tokio::test]
-async fn internal_guardian_sessions_respect_managed_shell_restrictions() {
+async fn reviewer_tool_policy_respect_managed_shell_restrictions() {
     for (disabled_feature, shell_type) in [
         (Some(Feature::ShellTool), ConfigShellToolType::UnifiedExec),
         (Some(Feature::UnifiedExec), ConfigShellToolType::UnifiedExec),
         (None, ConfigShellToolType::Disabled),
     ] {
-        let (session, mut turn) = make_session_and_context().await;
-        turn.session_source = SessionSource::Internal(InternalSessionSource::Guardian);
+        let (mut session, mut turn) = make_session_and_context().await;
+        session.tool_policy = Arc::new(codex_guardian_reviewer::reviewer_tool_policy());
         set_feature(&mut turn, Feature::ViewImage, /*enabled*/ true);
         set_feature(&mut turn, Feature::CodeMode, /*enabled*/ true);
         if let Some(feature) = disabled_feature {
@@ -581,8 +664,7 @@ async fn internal_guardian_sessions_respect_managed_shell_restrictions() {
         let router = super::build_tool_router(
             &session,
             step_context.turn.as_ref(),
-            step_context.turn.model_info(),
-            step_context.settings.model_info.model_messages.as_ref(),
+            &step_context.settings.model_info,
             &step_context.environments,
             &step_context.mcp,
             /*apps_enabled*/ false,
@@ -608,9 +690,9 @@ async fn internal_guardian_sessions_respect_managed_shell_restrictions() {
 }
 
 #[tokio::test]
-async fn internal_guardian_sessions_preserve_code_mode() {
-    let (session, mut turn) = make_session_and_context().await;
-    turn.session_source = SessionSource::Internal(InternalSessionSource::Guardian);
+async fn reviewer_tool_policy_preserve_code_mode() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    session.tool_policy = Arc::new(codex_guardian_reviewer::reviewer_tool_policy());
     set_feature(&mut turn, Feature::CodeMode, /*enabled*/ true);
     let turn = Arc::new(turn);
     let step_context = StepContext::for_test(Arc::clone(&turn));
@@ -618,8 +700,7 @@ async fn internal_guardian_sessions_preserve_code_mode() {
     let router = super::build_tool_router(
         &session,
         step_context.turn.as_ref(),
-        step_context.turn.model_info(),
-        step_context.settings.model_info.model_messages.as_ref(),
+        &step_context.settings.model_info,
         &step_context.environments,
         &step_context.mcp,
         /*apps_enabled*/ false,
@@ -643,7 +724,7 @@ async fn internal_guardian_sessions_preserve_code_mode() {
 }
 
 #[tokio::test]
-async fn internal_guardian_sessions_require_managed_secondary_environments() {
+async fn reviewer_tool_policy_require_managed_secondary_environments() {
     for (secondary_profile, expected_tools) in [
         (
             codex_protocol::models::PermissionProfile::workspace_write(),
@@ -654,11 +735,11 @@ async fn internal_guardian_sessions_require_managed_secondary_environments() {
             Vec::new(),
         ),
     ] {
-        let (session, mut turn) = make_session_and_context().await;
-        turn.session_source = SessionSource::Internal(InternalSessionSource::Guardian);
+        let (mut session, mut turn) = make_session_and_context().await;
+        session.tool_policy = Arc::new(codex_guardian_reviewer::reviewer_tool_policy());
         set_feature(&mut turn, Feature::ViewImage, /*enabled*/ true);
         let TurnEnvironmentState::Ready(primary) = turn
-            .environments
+            .initial_environments
             .environments
             .first_mut()
             .expect("primary environment")
@@ -673,7 +754,7 @@ async fn internal_guardian_sessions_require_managed_secondary_environments() {
         let secondary_workspace_root =
             codex_utils_path_uri::PathUri::from_abs_path(&turn.config.cwd.join("secondary"));
         let TurnEnvironmentState::Ready(secondary) = turn
-            .environments
+            .initial_environments
             .environments
             .get_mut(1)
             .expect("secondary environment")
@@ -689,8 +770,7 @@ async fn internal_guardian_sessions_require_managed_secondary_environments() {
         let router = super::build_tool_router(
             &session,
             step_context.turn.as_ref(),
-            step_context.turn.model_info(),
-            step_context.settings.model_info.model_messages.as_ref(),
+            &step_context.settings.model_info,
             &step_context.environments,
             &step_context.mcp,
             /*apps_enabled*/ false,
@@ -931,7 +1011,7 @@ async fn exec_command_guidance_follows_executor_platform_and_fallbacks() {
                     ConfigShellToolType::UnifiedExec;
             });
             let TurnEnvironmentState::Ready(environment) = turn
-                .environments
+                .initial_environments
                 .environments
                 .first_mut()
                 .expect("primary environment")
@@ -968,7 +1048,7 @@ async fn login_shell_parameter_follows_selected_environment() {
                     config.permissions.allow_login_shell = !allow_login_shell;
                 });
                 let TurnEnvironmentState::Ready(environment) = turn
-                    .environments
+                    .initial_environments
                     .environments
                     .first_mut()
                     .expect("primary environment")
@@ -1004,7 +1084,12 @@ async fn login_shell_parameter_is_available_when_any_environment_allows_it() {
             config.permissions.allow_login_shell = false;
         });
         duplicate_primary_environment(turn);
-        for (index, environment) in turn.environments.environments.iter_mut().enumerate() {
+        for (index, environment) in turn
+            .initial_environments
+            .environments
+            .iter_mut()
+            .enumerate()
+        {
             let TurnEnvironmentState::Ready(environment) = environment else {
                 panic!("environment should be ready");
             };
@@ -1025,7 +1110,7 @@ async fn disabling_shell_tools_disables_command_tools_for_all_environments() {
         });
 
         let TurnEnvironmentState::Ready(environment) = turn
-            .environments
+            .initial_environments
             .environments
             .first_mut()
             .expect("primary environment")
@@ -1161,12 +1246,12 @@ async fn zsh_fork_unified_exec_keeps_shell_parameter_when_remote_environment_ava
         turn.unified_exec_shell_mode =
             codex_tools::UnifiedExecShellMode::ZshFork(zsh_fork_config_for_spec_plan_tests());
         let remote_cwd = turn
-            .environments
+            .initial_environments
             .primary()
             .expect("primary environment")
             .cwd()
             .clone();
-        turn.environments
+        turn.initial_environments
             .environments
             .push(TurnEnvironmentState::Ready(
                 crate::session::turn_context::TurnEnvironment::new(
@@ -1179,10 +1264,7 @@ async fn zsh_fork_unified_exec_keeps_shell_parameter_when_remote_environment_ava
                                 allow_login_shell: true,
                                 workspace_roots: Vec::new(),
                                 windows_sandbox_level: turn.windows_sandbox_level,
-                                windows_sandbox_private_desktop: turn
-                                    .config
-                                    .permissions
-                                    .windows_sandbox_private_desktop,
+                                windows_sandbox_type: turn.config.permissions.windows_sandbox_type,
                                 use_legacy_landlock: turn.config.features.use_legacy_landlock(),
                                 permission_profile: turn
                                     .config
@@ -1221,7 +1303,7 @@ async fn zsh_fork_unified_exec_keeps_shell_parameter_when_remote_environment_ava
 #[tokio::test]
 async fn environment_count_controls_environment_backed_tools() {
     let no_environment = probe(|turn| {
-        turn.environments.environments.clear();
+        turn.initial_environments.environments.clear();
         set_feature(turn, Feature::ShellTool, /*enabled*/ true);
         set_feature(turn, Feature::RequestPermissionsTool, /*enabled*/ true);
         update_turn_settings_for_test(turn, |settings| {
@@ -1284,8 +1366,8 @@ async fn environment_tools_follow_the_step_context() {
             Some(ApplyPatchToolType::Freeform);
     });
 
-    let environments = turn.environments.clone();
-    turn.environments.environments.clear();
+    let environments = turn.initial_environments.clone();
+    turn.initial_environments.environments.clear();
     let turn = Arc::new(turn);
     let mcp = Arc::new(codex_mcp::McpBinding::empty(mcp_config_for_test(
         &turn.config,

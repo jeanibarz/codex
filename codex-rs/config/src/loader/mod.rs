@@ -1,3 +1,4 @@
+mod application;
 mod layer_io;
 mod local;
 #[cfg(target_os = "macos")]
@@ -6,8 +7,15 @@ mod managed_requirements;
 mod project_discovery;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "projectless_directory_tests.rs"]
+mod projectless_directory_tests;
 #[cfg(windows)]
 mod windows;
+
+pub use application::LocalApplicationRequirements;
+pub use application::load_local_application_requirements;
 
 use self::layer_io::LoadedConfigLayers;
 use crate::CONFIG_TOML_FILE;
@@ -196,22 +204,25 @@ pub async fn load_config_layers_state(
         overrides.ignore_user_and_project_exec_policy_rules;
     let mut bundle_requirements_layers = Vec::new();
     let mut cloud_config_layers = Vec::new();
+    let mut cloud_config_binding = None;
 
-    if !overrides.ignore_managed_requirements
-        && let Some(bundle) = cloud_config_bundle.get().await.map_err(io::Error::other)?
-    {
-        let cloud_config_base_dir = AbsolutePathBuf::from_absolute_path(codex_home)?;
-        let bundle_layers = if strict_config {
-            CloudConfigBundleLayers::from_bundle_strict_config(bundle, &cloud_config_base_dir)?
-        } else {
-            CloudConfigBundleLayers::from_bundle(bundle, &cloud_config_base_dir)?
-        };
-        let CloudConfigBundleLayers {
-            enterprise_managed_config,
-            enterprise_managed_requirements,
-        } = bundle_layers;
-        bundle_requirements_layers = enterprise_managed_requirements;
-        cloud_config_layers = enterprise_managed_config;
+    if !overrides.ignore_managed_requirements {
+        let snapshot = cloud_config_bundle.get_snapshot().await;
+        cloud_config_binding = snapshot.binding;
+        if let Some(bundle) = snapshot.bundle.map_err(io::Error::other)? {
+            let cloud_config_base_dir = AbsolutePathBuf::from_absolute_path(codex_home)?;
+            let bundle_layers = if strict_config {
+                CloudConfigBundleLayers::from_bundle_strict_config(bundle, &cloud_config_base_dir)?
+            } else {
+                CloudConfigBundleLayers::from_bundle(bundle, &cloud_config_base_dir)?
+            };
+            let CloudConfigBundleLayers {
+                enterprise_managed_config,
+                enterprise_managed_requirements,
+            } = bundle_layers;
+            bundle_requirements_layers = enterprise_managed_requirements;
+            cloud_config_layers = enterprise_managed_config;
+        }
     }
 
     let (config_requirements_toml, loaded_config_layers, requirements_layers) =
@@ -324,6 +335,7 @@ pub async fn load_config_layers_state(
         );
     }
 
+    let mut is_projectless = false;
     if !ignore_project_config && let Some(cwd) = cwd {
         let mut merged_so_far = TomlValue::Table(toml::map::Map::new());
         for layer in &layers {
@@ -395,6 +407,9 @@ pub async fn load_config_layers_state(
             strict_config,
         )
         .await?;
+        is_projectless = !project_trust_context.has_project_root_marker
+            && project_trust_context.checkout_root.is_none()
+            && project_layers.layers.is_empty();
         layers.extend(project_layers.layers);
         startup_warnings.extend(project_layers.startup_warnings);
     }
@@ -473,12 +488,14 @@ pub async fn load_config_layers_state(
         return Err(err);
     }
 
-    let config_layer_stack = ConfigLayerStack::new(
+    let mut config_layer_stack = ConfigLayerStack::new(
         layers,
         config_requirements_toml.clone().try_into()?,
         config_requirements_toml.into_toml(),
     )?
+    .with_cloud_config_binding(cloud_config_binding)
     .with_user_and_project_exec_policy_rules_ignored(ignore_user_and_project_exec_policy_rules);
+    config_layer_stack.is_projectless = is_projectless;
     startup_warnings.extend(ignored_config_warning(
         &config_layer_stack,
         &requirements_layers,
@@ -994,6 +1011,7 @@ fn apply_credential_broker_requirements(
 
 struct ProjectTrustContext {
     project_root: AbsolutePathBuf,
+    has_project_root_marker: bool,
     project_root_key: String,
     project_root_lookup_keys: Vec<String>,
     checkout_root: Option<AbsolutePathBuf>,
@@ -1142,8 +1160,17 @@ fn sanitize_project_config(
         {
             ignored_keys.push("features.shell_snapshot".to_string());
         }
-        if features.remove("respect_system_proxy").is_some() {
-            ignored_keys.push("features.respect_system_proxy".to_string());
+        if let Some(multi_agent) = features
+            .get_mut("multi_agent_v2")
+            .and_then(TomlValue::as_table_mut)
+            && multi_agent.remove("message_board_remote").is_some()
+        {
+            ignored_keys.push("features.multi_agent_v2.message_board_remote".to_string());
+        }
+        for key in ["respect_system_proxy", "system_proxy_fallback"] {
+            if features.remove(key).is_some() {
+                ignored_keys.push(format!("features.{key}"));
+            }
         }
         if credential_broker_configured
             && features
@@ -1246,7 +1273,9 @@ async fn project_trust_context(
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?
     };
 
-    let project_root = find_project_root(fs, cwd, project_root_markers).await?;
+    let discovered_root = discover_project_root(fs, cwd, project_root_markers).await?;
+    let has_project_root_marker = discovered_root.is_some();
+    let project_root = discovered_root.unwrap_or_else(|| cwd.clone());
     let projects = project_trust_config.projects.unwrap_or_default();
 
     let project_root_lookup_keys = normalized_project_trust_keys(project_root.as_path());
@@ -1311,6 +1340,7 @@ async fn project_trust_context(
 
     Ok(ProjectTrustContext {
         project_root,
+        has_project_root_marker,
         project_root_key,
         project_root_lookup_keys,
         checkout_root,
@@ -1462,8 +1492,19 @@ pub async fn find_project_root(
     cwd: &AbsolutePathBuf,
     project_root_markers: &[String],
 ) -> io::Result<AbsolutePathBuf> {
+    Ok(discover_project_root(fs, cwd, project_root_markers)
+        .await?
+        .unwrap_or_else(|| cwd.clone()))
+}
+
+/// Find a project marker, preserving absence instead of falling back to cwd.
+pub async fn discover_project_root(
+    fs: &dyn ExecutorFileSystem,
+    cwd: &AbsolutePathBuf,
+    project_root_markers: &[String],
+) -> io::Result<Option<AbsolutePathBuf>> {
     if project_root_markers.is_empty() {
-        return Ok(cwd.clone());
+        return Ok(None);
     }
 
     for ancestor in cwd.ancestors() {
@@ -1489,10 +1530,10 @@ pub async fn find_project_root(
             {
                 continue;
             }
-            return Ok(ancestor);
+            return Ok(Some(ancestor));
         }
     }
-    Ok(cwd.clone())
+    Ok(None)
 }
 
 async fn find_git_checkout_root(

@@ -4,7 +4,6 @@
 use super::*;
 use codex_guardian_reviewer::ReviewerPool;
 use codex_guardian_reviewer::ReviewerRequest;
-use codex_guardian_reviewer::SessionDisposition;
 
 pub struct PreparedGuardianContext {
     parent: Arc<Session>,
@@ -23,27 +22,27 @@ impl PreparedGuardianContext {
         config: Config,
         history: &ContextManager,
         node_repl_policy: &GuardianNodeReplPolicy,
-        compaction_model_hash: Option<&str>,
     ) -> anyhow::Result<Self> {
         let (reset_version, history_reset) = parent.history_reset().await;
         // Preparation may have raced with a history reset before capturing the reviewer context.
         if reset_version != history.reset_version {
             history_reset.cancel();
         }
-        let context_policy =
-            ReviewContextPolicy::for_context(parent.guardian_context_mode, &config.features);
-        let root_authorization_version = context_policy.root_authorization_version(&parent).await;
-        let parent_compaction = context_policy.parent_compaction(history, compaction_model_hash)?;
+        let context_mode =
+            GuardianContextMode::from_history(history.conversation_history_snapshot().as_ref());
+        let context_policy = ReviewContextPolicy::for_context(context_mode, &config.features);
+        let root_review_version = context_policy.root_review_version(&parent).await;
+        let parent_compaction = context_policy.parent_compaction(history)?;
         let mut key = GuardianReviewSessionReuseKey::from_spawn_config(
             &config,
             parent.inherited_instructions().await,
             history.history_version(),
-            parent.guardian_context_mode,
+            context_mode,
         )
         .with_environments(context.environments())
         .with_node_repl_policy_eligibility(context.model_info.computer_use_review_required())
         .with_node_repl_policy(node_repl_policy);
-        key.root_authorization_version = root_authorization_version;
+        key.root_review_version = root_review_version;
         key.parent_reset_version = history.reset_version;
         Ok(Self {
             parent,
@@ -100,12 +99,22 @@ impl PreparedGuardianContext {
             .model_client
             .responses_websocket_enabled();
         let options = crate::StartThreadOptions {
+            history_mode: Some(codex_protocol::protocol::ThreadHistoryMode::Paginated),
             internal_parent: Some(crate::thread_manager::InternalSessionParent {
                 thread_id: self.parent.thread_id(),
                 auth_manager: Arc::clone(&self.parent.services.auth_manager),
-                agent_control: self.parent.services.agent_control.clone(),
+                agent_control: crate::agent::control::AgentControlInit::Provided {
+                    control: Arc::clone(&self.parent.services.agent_control),
+                    runtime: self.parent.services.local_agent_runtime.clone(),
+                },
                 originator: self.context.turn().originator.clone(),
-                inherited_instructions: Some(self.parent.inherited_instructions().await),
+                // Review the same applied instructions captured by the reuse key.
+                // A live provider could advance independently while reviewing this action.
+                inherited_instructions: Some(SessionInstructions {
+                    user: self.key.user_instructions.clone(),
+                    thread: self.key.thread_instructions.clone(),
+                    ..Default::default()
+                }),
             }),
             initial_history: initial_history.unwrap_or(InitialHistory::New),
             environments: Some(self.context.environments().to_selections()),
@@ -181,25 +190,16 @@ impl ReviewerRequest for PreparedReview {
         &self,
         session: &GuardianReviewSession,
         kind: GuardianReviewSessionKind,
-    ) -> (
-        GuardianReviewSessionOutcome,
-        SessionDisposition,
-        GuardianReviewAnalyticsResult,
-    ) {
-        let (outcome, keep_session, analytics) = Box::pin(run_review_on_session(
+    ) -> ReviewSessionResult {
+        let result = Box::pin(run_review_on_session(
             session,
             &self.params,
             kind,
             self.params.deadline,
         ))
         .await;
-        record_failed_review(&session.session, &self.params, &outcome).await;
-        let disposition = if keep_session {
-            SessionDisposition::Reusable
-        } else {
-            SessionDisposition::Discard
-        };
-        (outcome, disposition, analytics)
+        record_failed_review(&session.session, &self.params, &result.outcome).await;
+        result
     }
 }
 
@@ -207,13 +207,22 @@ pub(crate) async fn run_guardian_review_session(
     pool: Arc<ReviewerPool<GuardianReviewSession>>,
     params: GuardianReviewSessionParams,
 ) -> (GuardianReviewSessionOutcome, GuardianReviewAnalyticsResult) {
-    match prepare_review(params).await {
+    let context_mode = GuardianContextMode::from_history(
+        params
+            .parent_history
+            .conversation_history_snapshot()
+            .as_ref(),
+    );
+    let (outcome, mut analytics) = match prepare_review(params).await {
         Ok(prepared) => pool.review(prepared).await,
         Err(error) => (
             GuardianReviewSessionOutcome::PromptBuildFailed(error),
             GuardianReviewAnalyticsResult::without_session(),
         ),
-    }
+    };
+    // Keep the captured mode even when preparation or reviewer startup fails.
+    analytics.guardian_context_mode = Some(context_mode.as_str());
+    (outcome, analytics)
 }
 
 pub(super) async fn prepare_review(
@@ -225,7 +234,6 @@ pub(super) async fn prepare_review(
         params.spawn_config.clone(),
         &params.parent_history,
         &params.node_repl_policy,
-        params.compaction_model_hash.as_deref(),
     )
     .await?;
     Ok(PreparedReview {
@@ -260,7 +268,6 @@ pub(super) fn prepare_prewarm(
             config.spawn_config,
             &history,
             &config.node_repl_policy,
-            config.compaction_model_hash.as_deref(),
         )
         .await
     })

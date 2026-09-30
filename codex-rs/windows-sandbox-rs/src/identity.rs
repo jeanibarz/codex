@@ -1,4 +1,7 @@
 use crate::SandboxRuntimeAccount;
+use crate::WindowsSandboxProvisioningOutcome;
+use crate::WindowsSandboxProvisioningSettings;
+use crate::WindowsSandboxProxyListeners;
 use crate::dpapi;
 use crate::logging::debug_log;
 use crate::resolved_permissions::ResolvedWindowsSandboxPermissions;
@@ -26,11 +29,16 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use std::collections::HashMap;
 use std::fs;
+use std::io;
 use std::os::windows::io::FromRawHandle;
 use std::os::windows::io::OwnedHandle;
 use std::path::Path;
 use std::path::PathBuf;
+use windows_sys::Win32::Foundation::ERROR_LOGON_FAILURE;
+use windows_sys::Win32::Foundation::ERROR_PASSWORD_EXPIRED;
+use windows_sys::Win32::Foundation::ERROR_PASSWORD_MUST_CHANGE;
 use windows_sys::Win32::NetworkManagement::NetManagement::UF_ACCOUNTDISABLE;
+use windows_sys::Win32::NetworkManagement::NetManagement::UF_PASSWORD_EXPIRED;
 use windows_sys::Win32::Security::LOGON32_LOGON_INTERACTIVE;
 use windows_sys::Win32::Security::LOGON32_PROVIDER_DEFAULT;
 use windows_sys::Win32::Security::LogonUserW;
@@ -50,6 +58,18 @@ pub struct SandboxCreds {
     pub username: String,
     pub password: String,
 }
+
+/// Windows rejected the stored sandbox password; credential-file and policy errors are distinct.
+#[derive(Debug)]
+pub struct SandboxAccountCredentialMismatch;
+
+impl std::fmt::Display for SandboxAccountCredentialMismatch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Windows rejected the stored sandbox account password")
+    }
+}
+
+impl std::error::Error for SandboxAccountCredentialMismatch {}
 
 /// Returns true when the on-disk setup artifacts exist and match the current
 /// setup version.
@@ -202,9 +222,22 @@ pub fn logon_existing_sandbox_account(
         )
     } == 0
     {
-        return Err(std::io::Error::last_os_error()).context("log on existing sandbox account");
+        return Err(account_logon_error(io::Error::last_os_error()));
     }
     Ok(unsafe { OwnedHandle::from_raw_handle(token as _) })
+}
+
+fn account_logon_error(error: io::Error) -> anyhow::Error {
+    let bad_password = matches!(
+        error.raw_os_error().map(|code| code as u32),
+        Some(ERROR_LOGON_FAILURE | ERROR_PASSWORD_EXPIRED | ERROR_PASSWORD_MUST_CHANGE)
+    );
+    let error = anyhow::Error::new(error);
+    if bad_password {
+        error.context(SandboxAccountCredentialMismatch)
+    } else {
+        error.context("log on existing sandbox account")
+    }
 }
 
 fn select_identity(
@@ -285,7 +318,7 @@ pub(crate) fn require_sandbox_account(
     require_sandbox_account_with_setup(
         request,
         proxy_settings_mode,
-        run_elevated_setup_with_proxy_settings,
+        run_automatic_setup,
         local_user_flags,
     )
 }
@@ -339,15 +372,19 @@ fn require_sandbox_account_with_setup(
 
     if identity.is_some() {
         // Cleanup may also have removed the group, so repair missing or disabled accounts before ACL
-        // refresh can fail, not only after a later logon reports ERROR_ACCOUNT_DISABLED.
+        // refresh can fail. Expired passwords also require full setup, since an ACL refresh
+        // cannot rotate the account passwords and update the stored DPAPI credentials.
         for username in [OFFLINE_USERNAME, ONLINE_USERNAME] {
             let needs_repair = match read_local_user_flags(username) {
-                Ok(Some(flags)) => flags & UF_ACCOUNTDISABLE != 0,
+                Ok(Some(flags)) => flags & (UF_ACCOUNTDISABLE | UF_PASSWORD_EXPIRED) != 0,
                 Ok(None) => true,
                 Err(_) => false,
             };
             if needs_repair {
-                setup_reason = Some("sandbox account is missing or disabled".to_string());
+                let reason = "sandbox account is missing, disabled, or password expired";
+                // Older services trust these credentials as proof of completed setup.
+                remove_sandbox_users_file(codex_home, reason)?;
+                setup_reason = Some(reason.to_string());
                 identity = None;
                 break;
             }
@@ -373,6 +410,14 @@ fn require_sandbox_account_with_setup(
             },
             &desired_offline_proxy_settings,
         )?;
+        for username in [OFFLINE_USERNAME, ONLINE_USERNAME] {
+            if let Ok(Some(flags)) = read_local_user_flags(username) {
+                anyhow::ensure!(
+                    flags & UF_PASSWORD_EXPIRED == 0,
+                    "Windows sandbox account password is still expired after setup"
+                );
+            }
+        }
         identity = select_identity(network_identity, codex_home)?;
     }
     let identity = identity.ok_or_else(|| {
@@ -387,6 +432,35 @@ fn require_sandbox_account_with_setup(
         },
         desired_offline_proxy_settings,
     ))
+}
+
+// Automatic setup prefers an installed service regardless of the onboarding feature gate.
+// Only an unavailable service may fall back to the UAC helper; service errors propagate.
+fn run_automatic_setup(
+    request: SandboxSetupRequest<'_>,
+    settings: &OfflineProxySettings,
+) -> Result<()> {
+    let mut listeners = WindowsSandboxProxyListeners::from_proxy_environment(request.env_map);
+    // Preserve-mode setup can use saved ports that differ from the current environment.
+    listeners
+        .http_ports
+        .retain(|port| settings.proxy_ports.contains(port));
+    listeners
+        .socks_ports
+        .retain(|port| settings.proxy_ports.contains(port));
+    match crate::provision_windows_sandbox_via_service(
+        request.codex_home,
+        WindowsSandboxProvisioningSettings {
+            proxy_ports: settings.proxy_ports.clone(),
+            allow_local_binding: settings.allow_local_binding,
+        },
+        listeners,
+    )? {
+        WindowsSandboxProvisioningOutcome::Provisioned => Ok(()),
+        WindowsSandboxProvisioningOutcome::Unavailable => {
+            run_elevated_setup_with_proxy_settings(request, settings)
+        }
+    }
 }
 
 fn desired_offline_proxy_settings(

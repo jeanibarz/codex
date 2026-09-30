@@ -38,7 +38,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
-use codex_protocol::protocol::CodexErrorInfo;
+use codex_protocol::error::CodexErr;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::SessionSource;
@@ -263,6 +263,19 @@ async fn create_goal_resets_baseline_before_turn_stop_accounting() -> anyhow::Re
     let thread_id = test_thread_id()?;
     seed_thread_metadata(runtime.as_ref(), thread_id).await?;
     let harness = GoalExtensionHarness::new(runtime.clone(), thread_id).await?;
+    // A missing baseline must not panic or seed accounting with invented token usage.
+    for contributor in harness.registry.turn_lifecycle_contributors() {
+        contributor
+            .on_turn_start(TurnStartInput {
+                turn_id: "missing-baseline",
+                collaboration_mode: &default_collaboration_mode(),
+                token_usage_at_turn_start: None,
+                session_store: &harness.session_store,
+                thread_store: &harness.thread_store,
+                turn_store: &ExtensionData::new("missing-baseline"),
+            })
+            .await;
+    }
     harness
         .start_turn(
             "turn-1",
@@ -773,7 +786,7 @@ async fn turn_error_usage_limit_accounts_progress_and_clears_accounting() -> any
         )
         .await;
     harness
-        .notify_turn_error("turn-1", CodexErrorInfo::UsageLimitExceeded)
+        .notify_turn_error("turn-1", CodexErr::UsageNotIncluded)
         .await;
 
     let goal = runtime
@@ -844,7 +857,7 @@ async fn turn_error_blocks_goal() -> anyhow::Result<()> {
         .await?;
 
     harness
-        .notify_turn_error("turn-1", CodexErrorInfo::Other)
+        .notify_turn_error("turn-1", CodexErr::Fatal("test error".to_string()))
         .await;
 
     let goal = runtime
@@ -1766,7 +1779,7 @@ impl GoalExtensionHarness {
                 .on_turn_start(TurnStartInput {
                     turn_id,
                     collaboration_mode: &collaboration_mode,
-                    token_usage_at_turn_start: usage,
+                    token_usage_at_turn_start: Some(usage),
                     session_store: &self.session_store,
                     thread_store: &self.thread_store,
                     turn_store: &turn_store,
@@ -1874,13 +1887,14 @@ impl GoalExtensionHarness {
         }
     }
 
-    async fn notify_turn_error(&self, turn_id: &str, error: CodexErrorInfo) {
+    async fn notify_turn_error(&self, turn_id: &str, error: CodexErr) {
         let turn_store = ExtensionData::new(turn_id);
         for contributor in self.registry.turn_lifecycle_contributors() {
             contributor
                 .on_turn_error(TurnErrorInput {
                     turn_id,
-                    error: error.clone(),
+                    error: error.to_codex_protocol_error(),
+                    error_details: error.details(),
                     session_store: &self.session_store,
                     thread_store: &self.thread_store,
                     turn_store: &turn_store,

@@ -104,6 +104,7 @@ pub struct ThreadStartParams {
     pub base_instructions: Option<String>,
     #[ts(optional = nullable)]
     pub developer_instructions: Option<String>,
+    /// @deprecated `friendly` and `pragmatic` no longer select a style.
     #[ts(optional = nullable)]
     pub personality: Option<Personality>,
     /// @deprecated Ignored. Use Ultra reasoning effort for proactive multi-agent behavior.
@@ -286,7 +287,8 @@ pub struct ThreadSettingsUpdateParams {
     #[experimental("thread/settings/update.multiAgentMode")]
     #[ts(optional = nullable)]
     pub multi_agent_mode: Option<MultiAgentMode>,
-    /// Override the personality for subsequent turns.
+    /// @deprecated `friendly` and `pragmatic` no longer select a style.
+    /// Changing this does not rewrite the thread's existing instructions.
     #[ts(optional = nullable)]
     pub personality: Option<Personality>,
 }
@@ -318,6 +320,7 @@ pub struct ThreadSettings {
     #[experimental("thread/settings.multiAgentMode")]
     #[serde(default)]
     pub multi_agent_mode: MultiAgentMode,
+    /// @deprecated Reports the saved setting; `friendly` and `pragmatic` no longer select a style.
     pub personality: Option<Personality>,
 }
 
@@ -409,6 +412,8 @@ pub struct ThreadResumeParams {
     pub base_instructions: Option<String>,
     #[ts(optional = nullable)]
     pub developer_instructions: Option<String>,
+    /// @deprecated `friendly` and `pragmatic` no longer select a style.
+    /// Changing this does not rewrite the thread's existing instructions.
     #[ts(optional = nullable)]
     pub personality: Option<Personality>,
     /// When true, return only thread metadata and live-resume state without
@@ -1736,15 +1741,38 @@ pub struct ThreadItemsListParams {
     /// Optional turn id to filter by. When omitted, returns items across the thread.
     #[ts(optional = nullable)]
     pub turn_id: Option<String>,
-    /// Opaque cursor to pass to the next call to continue after the last item.
+    /// Opaque continuation cursor or an exclusive item anchor in the requested visible turn.
+    /// An item anchor requires a non-empty `turnId`; ascending (the default) returns items
+    /// after it, and descending returns items before it. Continue with the returned string cursor.
     #[ts(optional = nullable)]
-    pub cursor: Option<String>,
+    pub cursor: Option<ThreadItemsListCursor>,
     /// Optional item page size.
     #[ts(optional = nullable)]
     pub limit: Option<u32>,
     /// Optional item pagination direction; defaults to ascending.
     #[ts(optional = nullable)]
     pub sort_direction: Option<SortDirection>,
+}
+
+/// Starting position for an item-history page.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(untagged)]
+#[ts(export_to = "v2/")]
+pub enum ThreadItemsListCursor {
+    Opaque(String),
+    Anchor(ThreadItemsListAnchor),
+}
+
+/// An exclusive item position within the requested visible turn.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(tag = "type", rename_all = "camelCase")]
+#[ts(tag = "type", rename_all = "camelCase", export_to = "v2/")]
+pub enum ThreadItemsListAnchor {
+    Item {
+        #[serde(rename = "itemId")]
+        #[ts(rename = "itemId")]
+        item_id: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -1754,6 +1782,12 @@ pub struct ThreadItemEntry {
     /// Turn containing this item.
     pub turn_id: String,
     pub item: ThreadItem,
+    /// Unix timestamp (milliseconds) when the item started, if recorded by the producer.
+    #[ts(type = "number | null")]
+    pub started_at_ms: Option<i64>,
+    /// Unix timestamp (milliseconds) when the item completed, if recorded by the producer.
+    #[ts(type = "number | null")]
+    pub completed_at_ms: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

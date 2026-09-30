@@ -1,6 +1,8 @@
 use super::*;
 #[cfg(target_os = "windows")]
 use anyhow::Context as _;
+use codex_protocol::sandbox::SandboxType;
+use codex_utils_path_uri::PathUri;
 
 #[derive(Clone)]
 pub(crate) struct WindowsSandboxRequestProcessor {
@@ -32,6 +34,7 @@ impl WindowsSandboxRequestProcessor {
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
         #[cfg(target_os = "windows")]
         if codex_windows_sandbox::registered_core_requested()
+            && self.config.effective_local_windows_sandbox_type() != SandboxType::WindowsMxc
             && matches!(
                 WindowsSandboxLevel::from_config(&self.config),
                 WindowsSandboxLevel::Elevated
@@ -113,6 +116,19 @@ impl WindowsSandboxRequestProcessor {
             params.mode,
         )?;
 
+        // Provisioning installs native Windows filesystem permissions. Validate
+        // this boundary before acknowledging that setup has started.
+        let workspace_roots = config
+            .effective_workspace_roots()
+            .iter()
+            .map(PathUri::to_abs_path)
+            .collect::<std::io::Result<Vec<_>>>()
+            .map_err(|err| {
+                invalid_request(format!(
+                    "workspace roots are not native to this host: {err}"
+                ))
+            })?;
+
         self.outgoing
             .send_response(
                 request_id.clone(),
@@ -127,7 +143,7 @@ impl WindowsSandboxRequestProcessor {
             let setup_request = WindowsSandboxSetupRequest {
                 mode: setup_mode,
                 permission_profile: config.permissions.effective_permission_profile(),
-                workspace_roots: config.effective_workspace_roots(),
+                workspace_roots,
                 command_cwd,
                 env_map: std::env::vars().collect(),
                 codex_home: config.codex_home.to_path_buf(),
@@ -176,19 +192,30 @@ impl WindowsSandboxRequestProcessor {
                         let service_setup_request = setup_request.clone();
                         let service_setup_start = Instant::now();
                         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-                            let Ok(permissions) = codex_windows_sandbox::ResolvedWindowsSandboxPermissions::try_from_permission_profile_for_workspace_roots(
+                            if matches!(
                                 &service_setup_request.permission_profile,
-                                &service_setup_request.workspace_roots,
-                            ) else {
-                                anyhow::ensure!(!codex_windows_sandbox::registered_core_requested(),
-                                    "registered Core requires a service-compatible sandbox policy");
-                                // The existing setup path can still succeed for completed
-                                // provisioning without resolving the current profile.
-                                return Ok(());
-                            };
-                            permissions.validate_elevated_filesystem_policy(
-                                &service_setup_request.command_cwd,
-                            )?;
+                                codex_protocol::models::PermissionProfile::Disabled
+                            ) {
+                                // Only registered Core needs service provisioning for full access;
+                                // legacy setup keeps using the shared setup path below.
+                                if !codex_windows_sandbox::registered_core_requested() {
+                                    return Ok(());
+                                }
+                            } else {
+                                let Ok(permissions) = codex_windows_sandbox::ResolvedWindowsSandboxPermissions::try_from_permission_profile_for_workspace_roots(
+                                    &service_setup_request.permission_profile,
+                                    &service_setup_request.workspace_roots,
+                                ) else {
+                                    anyhow::ensure!(!codex_windows_sandbox::registered_core_requested(),
+                                        "registered Core requires a service-compatible sandbox policy");
+                                    // The existing setup path can still succeed for completed
+                                    // provisioning without resolving the current profile.
+                                    return Ok(());
+                                };
+                                permissions.validate_elevated_filesystem_policy(
+                                    &service_setup_request.command_cwd,
+                                )?;
+                            }
                             // The shared setup path below handles helper fallback and
                             // refreshes workspace ACLs after provisioning.
                             codex_windows_sandbox::provision_windows_sandbox_via_service(
@@ -291,6 +318,12 @@ fn determine_windows_sandbox_readiness(config: &Config) -> WindowsSandboxReadine
         };
     }
 
+    if config.effective_local_windows_sandbox_type() == SandboxType::WindowsMxc {
+        return WindowsSandboxReadinessResponse {
+            status: WindowsSandboxReadiness::Ready,
+        };
+    }
+
     determine_windows_sandbox_readiness_from_state(
         WindowsSandboxLevel::from_config(config),
         sandbox_setup_is_complete(config.codex_home.as_path()),
@@ -303,9 +336,7 @@ fn determine_windows_sandbox_readiness_from_state(
 ) -> WindowsSandboxReadinessResponse {
     let status = match windows_sandbox_level {
         WindowsSandboxLevel::Disabled => WindowsSandboxReadiness::NotConfigured,
-        WindowsSandboxLevel::RestrictedToken | WindowsSandboxLevel::Mxc => {
-            WindowsSandboxReadiness::Ready
-        }
+        WindowsSandboxLevel::RestrictedToken => WindowsSandboxReadiness::Ready,
         WindowsSandboxLevel::Elevated => {
             if sandbox_setup_is_complete {
                 WindowsSandboxReadiness::Ready

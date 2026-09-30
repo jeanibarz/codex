@@ -94,6 +94,7 @@ async fn mcp_tool_results_use_command_hook_output_contract() {
         builtin: false,
         event_name: HookEventName::PostToolUse,
         matcher: None,
+        claude_conditions: Vec::new(),
         timeout_sec: 30,
         status_message: None,
         additional_context_limit: Default::default(),

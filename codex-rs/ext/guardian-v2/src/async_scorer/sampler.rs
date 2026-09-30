@@ -15,10 +15,12 @@ use codex_api::ApiError;
 use codex_api::Reasoning;
 use codex_api::ReasoningContext;
 use codex_api::ResponsesApiRequest;
+use codex_context_fragments::RenderedFragment;
 use codex_extension_api::ExtensionMetrics;
 use codex_http_client::HttpClientFactory;
 use codex_login::AgentIdentityAuthPolicy;
 use codex_model_provider::SharedModelProvider;
+use codex_model_provider::WorkspaceRoutingContext;
 use codex_protocol::ResponseItemId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::models::ContentItem;
@@ -40,6 +42,8 @@ const MAX_CONCURRENT_REQUESTS: usize = 16;
 pub struct LunaSamplerConfig {
     /// Provider and credentials selected for the owning thread.
     pub provider: SharedModelProvider,
+    /// Routing scope and retained configuration layers for the owning thread.
+    pub workspace_routing: WorkspaceRoutingContext,
     /// Effective proxy, custom-CA, and cookie configuration.
     pub http_client_factory: HttpClientFactory,
     /// Agent-identity policy selected for the owning thread.
@@ -52,8 +56,6 @@ pub struct LunaSamplerConfig {
     pub thread_id: String,
     /// Optional host-resolved request originator.
     pub originator: Option<String>,
-    /// Whether this thread may use the unmetered Guardian classifier endpoint.
-    pub free_guardian: bool,
     /// Optional inference service tier.
     pub service_tier: Option<String>,
     /// Luna model's host-resolved encrypted-compaction compatibility hash.
@@ -68,8 +70,8 @@ pub struct LunaSamplerConfig {
 pub struct LunaSamplingRequest {
     /// ID of the response handling the classified tool.
     pub parent_response_id: Option<String>,
-    /// Trusted instructions describing the requested classification.
-    pub instructions: String,
+    /// Trusted classifier instructions with their role and content attribution.
+    pub instructions: RenderedFragment,
     /// Composed evidence messages, with roles, annotations and content order intact.
     pub input: Vec<ResponseItem>,
     /// Opaque parent compaction to reuse only for compatible model configurations.
@@ -152,6 +154,17 @@ impl LunaSampler {
 
     /// Sends one tool-less classification request using an available transport.
     pub async fn sample(&self, request: LunaSamplingRequest) -> Result<String, LunaSamplerError> {
+        let auth_owner_generation = self
+            .config
+            .provider
+            .auth_manager()
+            .filter(|_| self.config.provider.info().auth.is_none())
+            .map(|manager| {
+                manager
+                    .auth_change_state_receiver()
+                    .borrow()
+                    .owner_generation
+            });
         if request.parent_compaction.is_some()
             && !self.supports_parent_compaction(request.parent_compaction_hash.as_deref())
         {
@@ -168,15 +181,7 @@ impl LunaSampler {
                 role: "developer".to_owned(),
                 tools: Vec::new(),
             },
-            ResponseItem::Message {
-                id: None,
-                role: "developer".to_owned(),
-                content: vec![ContentItem::InputText {
-                    text: request.instructions,
-                }],
-                phase: None,
-                internal_chat_message_metadata_passthrough: None,
-            },
+            ResponseItem::from(request.instructions),
         ];
         if let Some(parent_compaction) = request.parent_compaction {
             input.push(parent_compaction);
@@ -267,6 +272,7 @@ impl LunaSampler {
             });
         }
         execution::SamplingExecution {
+            auth_owner_generation,
             config: Arc::clone(&self.config),
             connections: Arc::clone(&self.connections),
             request,

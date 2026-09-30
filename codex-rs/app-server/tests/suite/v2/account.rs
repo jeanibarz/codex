@@ -79,7 +79,6 @@ const WORKSPACE_ID_SECOND_ALLOWED: &str = "123e4567-e89b-42d3-a456-426614174001"
 const WORKSPACE_ID_DISALLOWED: &str = "123e4567-e89b-42d3-a456-426614174002";
 const WORKSPACE_ID_EMBEDDED: &str = "123e4567-e89b-42d3-a456-426614174010";
 const WORKSPACE_ID_INITIAL: &str = "123e4567-e89b-42d3-a456-426614174011";
-const WORKSPACE_ID_REFRESHED: &str = "123e4567-e89b-42d3-a456-426614174012";
 const WORKSPACE_ID_DEVICE: &str = "123e4567-e89b-42d3-a456-426614174013";
 const WORKSPACE_ID_STALE: &str = "123e4567-e89b-42d3-a456-426614174014";
 
@@ -92,6 +91,9 @@ fn expected_workspace_routing(
         account_routing_override: codex_app_server_protocol::AccountRoutingOverride::NoConstraint,
     })
 }
+
+#[path = "account_enterprise_tests.rs"]
+mod enterprise_tests;
 
 // Helper to create a minimal config.toml for the app server
 #[derive(Default)]
@@ -282,23 +284,62 @@ async fn mock_oauth_token(server: &MockServer, id_token: &str) {
         .await;
 }
 
+#[test_case(false; "api_key")]
+#[test_case(true; "enterprise_cleanup_failure")]
 #[tokio::test]
-async fn logout_account_removes_auth_and_notifies() -> Result<()> {
+async fn logout_account_removes_auth_and_notifies(enterprise_cleanup_failure: bool) -> Result<()> {
+    let oauth_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/revoke"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(u64::from(enterprise_cleanup_failure))
+        .mount(&oauth_server)
+        .await;
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), CreateConfigTomlParams::default())?;
 
-    login_with_api_key(
-        codex_home.path(),
-        "sk-test-key",
-        AuthCredentialsStoreMode::File,
-        AuthKeyringBackendKind::default(),
-    )?;
+    if enterprise_cleanup_failure {
+        write_chatgpt_auth(
+            codex_home.path(),
+            ChatGptAuthFixture::new("access-token")
+                .account_id(WORKSPACE_ID_INITIAL)
+                .chatgpt_user_id("enterprise-user"),
+            AuthCredentialsStoreMode::File,
+        )?;
+        let mut config = read_config_toml(codex_home.path())?;
+        config.as_table_mut().expect("config table").insert(
+            "mcp_enterprise_managed_auth".into(),
+            toml::toml! {
+                [idp]
+                issuer = "https://idp.example"
+                client_id = "enterprise-client"
+            }
+            .into(),
+        );
+        std::fs::write(
+            codex_home.path().join("config.toml"),
+            toml::to_string(&config)?,
+        )?;
+        // Fail credential cleanup before touching the platform keyring.
+        std::fs::write(codex_home.path().join("mcp-oauth-locks"), "not a directory")?;
+    } else {
+        login_with_api_key(
+            codex_home.path(),
+            "sk-test-key",
+            AuthCredentialsStoreMode::File,
+            AuthKeyringBackendKind::default(),
+        )?;
+    }
     assert!(codex_home.path().join("auth.json").exists());
 
+    let refresh_url = format!("{}/oauth/token", oauth_server.uri());
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .without_auto_env()
-        .with_env_overrides(&[("OPENAI_API_KEY", None)])
+        .with_env_overrides(&[
+            ("OPENAI_API_KEY", None),
+            (REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR, Some(&refresh_url)),
+        ])
         .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
         .await?;
 
@@ -615,17 +656,23 @@ async fn mount_disabled_attribution_settings(mock_server: &MockServer) {
         .await;
 }
 
+#[test_case("/v1"; "responses")]
+#[test_case("/backend-api/codex"; "discovery")]
 #[tokio::test]
 // 401 response triggers account/chatgptAuthTokens/refresh and retries with new tokens.
-async fn external_auth_refreshes_on_unauthorized() -> Result<()> {
+async fn external_auth_refreshes_on_unauthorized(model_path: &str) -> Result<()> {
     let codex_home = TempDir::new()?;
     let mock_server = MockServer::start().await;
+    let backend = MockServer::start().await;
     create_config_toml(
         codex_home.path(),
         CreateConfigTomlParams {
-            requires_openai_auth: Some(true),
-            base_url: Some(format!("{}/v1", mock_server.uri())),
-            chatgpt_base_url: Some(format!("{}/backend-api", mock_server.uri())),
+            model_provider_id: Some("routing".into()),
+            extra_provider_config: Some(format!(
+                "[model_providers.routing]\nname = \"OpenAI\"\nrequires_openai_auth = true\nbase_url = \"{}{model_path}\"\nrequest_max_retries = 0\nstream_max_retries = 0\n",
+                mock_server.uri(),
+            )),
+            chatgpt_base_url: Some(format!("{}/backend-api", backend.uri())),
             ..Default::default()
         },
     )?;
@@ -641,22 +688,29 @@ async fn external_auth_refreshes_on_unauthorized() -> Result<()> {
     }));
     let responses_mock = responses::mount_response_sequence(
         &mock_server,
-        vec![unauthorized, responses::sse_response(success_sse)],
+        if model_path == "/v1" {
+            vec![unauthorized, responses::sse_response(success_sse)]
+        } else {
+            vec![responses::sse_response(success_sse)]
+        },
     )
     .await;
-    mount_disabled_attribution_settings(&mock_server).await;
+    mount_disabled_attribution_settings(&backend).await;
 
     let initial_access_token = encode_id_token(
         &ChatGptIdTokenClaims::new()
             .email("initial@example.com")
+            .chatgpt_user_id("refresh-user")
             .plan_type("pro")
             .chatgpt_account_id(WORKSPACE_ID_INITIAL),
     )?;
+    let refreshed_workspace = WORKSPACE_ID_INITIAL;
     let refreshed_access_token = encode_id_token(
         &ChatGptIdTokenClaims::new()
             .email("refreshed@example.com")
+            .chatgpt_user_id("refresh-user")
             .plan_type("pro")
-            .chatgpt_account_id(WORKSPACE_ID_REFRESHED),
+            .chatgpt_account_id(refreshed_workspace),
     )?;
 
     let mut mcp = TestAppServer::builder()
@@ -691,6 +745,25 @@ async fn external_auth_refreshes_on_unauthorized() -> Result<()> {
     let thread: codex_app_server_protocol::ThreadStartResponse =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(thread_req)).await??;
 
+    if model_path != "/v1" {
+        // Force discovery after login cached the same workspace's route.
+        let config_path = codex_home.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            std::fs::read_to_string(&config_path)?.replace("/backend-api\"", "/backend-api/\""),
+        )?;
+        Mock::given(path("/backend-api/wham/accounts/check"))
+            .and(header(
+                "authorization",
+                format!("Bearer {initial_access_token}"),
+            ))
+            .respond_with(ResponseTemplate::new(/*s*/ 401))
+            .with_priority(/*p*/ 1)
+            .expect(/*r*/ 1)
+            .mount(&backend)
+            .await;
+    }
+
     let turn_req = mcp
         .send_turn_start_request(codex_app_server_protocol::TurnStartParams {
             thread_id: thread.thread.id,
@@ -705,26 +778,26 @@ async fn external_auth_refreshes_on_unauthorized() -> Result<()> {
     respond_to_refresh_request(
         &mut mcp,
         &refreshed_access_token,
-        WORKSPACE_ID_REFRESHED,
+        refreshed_workspace,
         Some("pro"),
     )
     .await?;
     let _: codex_app_server_protocol::TurnStartResponse =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(turn_req)).await??;
-    let _turn_completed = timeout(
+    let turn_completed = timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_notification_message("turn/completed"),
     )
     .await??;
 
+    let completed: TurnCompletedNotification =
+        serde_json::from_value(turn_completed.params.expect("turn/completed params"))?;
+    assert_eq!(completed.turn.status, TurnStatus::Completed);
+
     let requests = responses_mock.requests();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), if model_path == "/v1" { 2 } else { 1 });
     assert_eq!(
-        requests[0].header("authorization"),
-        Some(format!("Bearer {initial_access_token}"))
-    );
-    assert_eq!(
-        requests[1].header("authorization"),
+        requests[requests.len() - 1].header("authorization"),
         Some(format!("Bearer {refreshed_access_token}"))
     );
 
@@ -2523,8 +2596,8 @@ async fn login_account_chatgpt_start_can_be_cancelled() -> Result<()> {
         bail!("unexpected login response: {login:?}");
     };
     assert!(
-        auth_url.contains("redirect_uri=http%3A%2F%2Flocalhost"),
-        "auth_url should contain a redirect_uri to localhost"
+        auth_url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A"),
+        "auth_url should contain a redirect_uri to 127.0.0.1"
     );
 
     let cancel_id = mcp
@@ -2615,6 +2688,7 @@ async fn login_account_chatgpt_uses_oauth_overrides() -> Result<()> {
         .query_pairs()
         .find_map(|(key, value)| (key == "state").then_some(value.into_owned()))
         .ok_or_else(|| anyhow::anyhow!("missing state"))?;
+    let token_redirect_uri = callback_url.clone();
     let mut callback_url = Url::parse(&callback_url)?;
     callback_url
         .query_pairs_mut()
@@ -2650,6 +2724,7 @@ async fn login_account_chatgpt_uses_oauth_overrides() -> Result<()> {
         token_form.get("client_id").map(String::as_str),
         Some("staging-client")
     );
+    assert_eq!(token_form.get("redirect_uri"), Some(&token_redirect_uri));
 
     let notification = timeout(
         DEFAULT_READ_TIMEOUT,
@@ -3246,6 +3321,7 @@ async fn get_account_with_chatgpt() -> Result<()> {
     Ok(())
 }
 
+#[test_case("promax", AccountPlanType::ProMax; "pro_max")]
 #[test_case("self_serve_business_prolite", AccountPlanType::SelfServeBusinessProLite; "business_prolite")]
 #[test_case("edu_plus", AccountPlanType::EduPlus; "edu_plus")]
 #[test_case("edu_pro", AccountPlanType::EduPro; "edu_pro")]

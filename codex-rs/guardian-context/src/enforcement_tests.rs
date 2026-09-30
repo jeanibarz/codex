@@ -172,7 +172,9 @@ fn budget_reserves_existing_context_and_preserves_required_messages() {
             },
             SectionOutput {
                 id: "previous_reviews",
-                delivery: SectionDelivery::Message(Box::new(trusted.clone())),
+                delivery: SectionDelivery::Message(crate::Budgeted::required(Box::new(
+                    trusted.clone(),
+                ))),
             },
             SectionOutput {
                 id: "planned_action",
@@ -236,8 +238,14 @@ fn budget_reserves_existing_context_and_preserves_required_messages() {
 }
 
 #[test]
-fn image_omission_preserves_text_and_later_eviction_policy() {
+fn image_accounting_preserves_later_eviction_policy() {
     let evidence = text(&"optional commentary ".repeat(/*n*/ 100));
+    let file_image = ContentItem::InputImage {
+        image: ImageReference::File {
+            file_id: "file_123".to_owned(),
+        },
+        detail: None,
+    };
     let mut context = ComposedContext {
         sections: vec![SectionOutput {
             id: "evidence",
@@ -251,6 +259,7 @@ fn image_omission_preserves_text_and_later_eviction_policy() {
                     },
                     BudgetPriority::Image,
                 ),
+                Budgeted::optional(file_image.clone(), BudgetPriority::Image),
                 Budgeted::optional(evidence.clone(), BudgetPriority::Commentary),
                 Budgeted::required(text("user restriction")),
             ]),
@@ -261,7 +270,7 @@ fn image_omission_preserves_text_and_later_eviction_policy() {
         .clone()
         .enforce_budget(
             RequestBudget {
-                max_input_tokens: 1_000,
+                max_input_tokens: content_tokens(&file_image).saturating_add(1_000),
                 existing_context_tokens: 0,
             },
             "evidence omitted".to_owned(),
@@ -271,12 +280,12 @@ fn image_omission_preserves_text_and_later_eviction_policy() {
     assert_eq!(
         without_oversized_image.into_messages(),
         vec![user_message(vec![
-            evidence.clone(),
+            file_image.clone(),
             text("user restriction"),
             text("evidence omitted")
         ])]
     );
-    context.retain_images(|_, _| false);
+    context.retain_images(|image, _| matches!(image, ImageReference::File { .. }));
     let available = context.estimated_tokens();
     let retained = context
         .clone()
@@ -291,12 +300,16 @@ fn image_omission_preserves_text_and_later_eviction_policy() {
         .unwrap();
     assert_eq!(
         retained.into_messages(),
-        vec![user_message(vec![evidence, text("user restriction")])]
+        vec![user_message(vec![
+            file_image.clone(),
+            evidence,
+            text("user restriction")
+        ])]
     );
     let smaller = context
         .enforce_budget(
             RequestBudget {
-                max_input_tokens: 100,
+                max_input_tokens: content_tokens(&file_image).saturating_add(100),
                 existing_context_tokens: 0,
             },
             "evidence omitted".to_owned(),
@@ -306,6 +319,7 @@ fn image_omission_preserves_text_and_later_eviction_policy() {
     assert_eq!(
         smaller.into_messages(),
         vec![user_message(vec![
+            file_image,
             text("user restriction"),
             text("evidence omitted")
         ])]

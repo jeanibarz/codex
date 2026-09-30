@@ -9,11 +9,19 @@ use codex_config::ConfigLayerSource;
 
 async fn build_config_on_runtime_worker(
     builder: ConfigBuilder,
+    application_network_policy: codex_http_client::NetworkPolicy,
     error_context: String,
 ) -> Result<Config> {
     // Tokio stores the task output inline even when it boxes the future. Keep the large
     // Config off the caller's stack while Tokio allocates the task during session switches.
-    match tokio::spawn(async move { builder.build().await.map(Box::new) }).await {
+    match tokio::spawn(async move {
+        builder.build().await.map(|mut config| {
+            config.application_network_policy = application_network_policy;
+            Box::new(config)
+        })
+    })
+    .await
+    {
         Ok(build_result) => build_result.map(|config| *config).wrap_err(error_context),
         Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
         Err(err) => Err(err).wrap_err_with(|| format!("{error_context} task failed")),
@@ -50,36 +58,43 @@ pub(super) fn has_explicit_resume_permission_override(
     config: &Config,
     overrides: &ConfigOverrides,
 ) -> bool {
-    overrides.approval_policy.is_some()
-        || overrides.approvals_reviewer.is_some()
-        || overrides.sandbox_mode.is_some()
-        || overrides.permission_profile.is_some()
-        || overrides.default_permissions.is_some()
-        || !overrides.additional_writable_roots.is_empty()
-        || overrides.workspace_roots.is_some()
-        || config.config_layer_stack.layers_high_to_low().any(|layer| {
-            matches!(
-                &layer.name,
-                ConfigLayerSource::SessionFlags
-                    | ConfigLayerSource::User {
-                        profile: Some(_),
-                        ..
-                    }
-            ) && [
-                "approval_policy",
-                "approvals_reviewer",
-                "sandbox_mode",
-                "default_permissions",
-                "permissions",
-                "network",
-                "sandbox_workspace_write",
-            ]
-            .iter()
-            .any(|key| layer.config.get(*key).is_some())
-        })
+    // A directory choice is supported remotely even when permission overrides are not.
+    let selected = crate::resume_permissions::ResumePermissions::from_overrides(
+        config,
+        &ConfigOverrides {
+            cwd: None,
+            ..overrides.clone()
+        },
+    );
+    selected.approval_policy
+        || selected.approvals_reviewer
+        || selected.profile
+        || selected.workspace_roots
 }
 
 impl App {
+    pub(super) fn resume_permission_overrides(
+        &self,
+        config: &Config,
+    ) -> crate::resume_permissions::ResumePermissions {
+        let mut permission_overrides = crate::resume_permissions::ResumePermissions::from_overrides(
+            config,
+            &self.harness_overrides,
+        );
+        permission_overrides.approvals_reviewer |=
+            self.runtime_approvals_reviewer_override.is_some();
+        permission_overrides.approval_policy |= matches!(
+            self.runtime_approval_policy_override,
+            Some(RuntimeApprovalPolicyOverride::Explicit(_))
+        );
+        if let Some(profile) = self.runtime_permission_profile_override.as_ref()
+            && profile.turn_override == RuntimePermissionProfileTurnOverride::LegacySandbox
+        {
+            permission_overrides.profile = true;
+        }
+        permission_overrides
+    }
+
     pub(super) async fn rebuild_config_for_cwd(&self, cwd: PathBuf) -> Result<Config> {
         let mut overrides = self.harness_overrides.clone();
         overrides.cwd = Some(cwd.clone());
@@ -92,6 +107,7 @@ impl App {
             .cloud_config_bundle(self.cloud_config_bundle.clone());
         build_config_on_runtime_worker(
             builder,
+            self.config.application_network_policy.clone(),
             format!("Failed to rebuild config for cwd {cwd_display}"),
         )
         .await
@@ -114,6 +130,7 @@ impl App {
             .cloud_config_bundle(self.cloud_config_bundle.clone());
         build_config_on_runtime_worker(
             builder,
+            self.config.application_network_policy.clone(),
             format!("Failed to rebuild config for permission profile {profile_id}"),
         )
         .await
@@ -217,6 +234,8 @@ impl App {
                 .selected_permission_profiles
                 .insert(thread_id, profile_id.clone());
         }
+        self.runtime_approvals_reviewer_override =
+            approvals_reviewer.or(self.runtime_approvals_reviewer_override);
         self.runtime_permission_profile_override =
             Some(RuntimePermissionProfileOverride::from_config(&self.config));
         self.sync_active_thread_permission_settings_to_cached_session()
@@ -228,7 +247,6 @@ impl App {
                 approvals_reviewer,
                 Some(permission_profile.clone()),
                 active_permission_profile,
-                /*windows_sandbox_level*/ None,
                 /*model*/ None,
                 /*effort*/ None,
                 /*summary*/ None,
@@ -253,7 +271,7 @@ impl App {
         if self.reject_pending_permission_change() {
             return;
         }
-        if selection.profile_id.starts_with(':')
+        if (self.chat_widget.thread_id().is_none() && selection.profile_id.starts_with(':'))
             || (app_server.thread_params_mode()
                 == crate::app_server_session::ThreadParamsMode::Embedded
                 && self
@@ -275,7 +293,9 @@ impl App {
             );
             return;
         };
-        if self.chat_widget.is_user_turn_pending_or_running() {
+        if !selection.profile_id.starts_with(':')
+            && self.chat_widget.is_user_turn_pending_or_running()
+        {
             self.chat_widget
                 .retain_input_after_failed_permission_selection();
             self.chat_widget.add_error_message(
@@ -298,6 +318,7 @@ impl App {
             self.agents_overview
                 .selected_permission_profiles
                 .insert(thread_id, selection.profile_id);
+            self.chat_widget.submit_initial_user_message_if_pending();
             return;
         }
         let params = ThreadSettingsUpdateParams {
@@ -327,13 +348,13 @@ impl App {
                 self.chat_widget
                     .retain_input_after_failed_permission_selection();
                 self.chat_widget
-                    .add_error_message("Named profiles require a newer app server.".into());
+                    .add_error_message("Permission selection requires a newer app server.".into());
             }
             Err(error) => {
                 self.chat_widget
                     .retain_input_after_failed_permission_selection();
                 self.chat_widget
-                    .add_error_message(format!("Failed to select permissions: {error}"));
+                    .add_error_message(format!("Failed to select permissions: {error:#}"));
             }
         }
     }
@@ -350,6 +371,19 @@ impl App {
             return true;
         }
         false
+    }
+
+    pub(super) fn reject_pending_permission_root_switch(&mut self) -> bool {
+        if !self
+            .pending_server_profiles
+            .keys()
+            .any(|thread_id| !self.thread_unavailable(*thread_id))
+        {
+            return false;
+        }
+        self.chat_widget
+            .add_error_message("Wait for permissions to update before switching tasks.".into());
+        true
     }
 
     pub(super) fn confirmed_server_profile(
@@ -384,8 +418,8 @@ impl App {
         let mut config = self
             .rebuild_config_for_cwd(self.chat_widget.config_ref().cwd.to_path_buf())
             .await?;
-        self.apply_runtime_policy_overrides(&mut config, RuntimePolicyOverrideScope::All);
-        self.local_settings = crate::local_settings::LocalSettings::from(&config);
+        self.apply_runtime_policy_overrides(&mut config, RuntimePolicyOverrideScope::All)?;
+        self.local_settings = self.local_settings.reloaded(&config);
         self.refresh_server_version_overview_notice(CODEX_CLI_VERSION);
         // Other preferences have runtime caches and are adopted when the widget is replaced.
         self.chat_widget
@@ -437,7 +471,7 @@ impl App {
     ) -> Result<(Config, crate::local_settings::LocalSettings)> {
         match self.rebuild_config_for_cwd(resume_cwd.clone()).await {
             Ok(config) => {
-                let local_settings = crate::local_settings::LocalSettings::from(&config);
+                let local_settings = self.local_settings.reloaded(&config);
                 Ok((config, local_settings))
             }
             Err(err) => {
@@ -460,7 +494,7 @@ impl App {
         &mut self,
         config: &mut Config,
         scope: RuntimePolicyOverrideScope,
-    ) {
+    ) -> Result<()> {
         if let Some(policy) = self.runtime_approval_policy_override
             && (scope == RuntimePolicyOverrideScope::All
                 || matches!(policy, RuntimeApprovalPolicyOverride::Explicit(_)))
@@ -469,27 +503,38 @@ impl App {
                 .approval_policy
                 .set(policy.policy().to_core())
         {
+            if scope == RuntimePolicyOverrideScope::ExplicitOnly {
+                return Err(err).wrap_err("Failed to carry forward approval policy override");
+            }
             tracing::warn!(%err, "failed to carry forward approval policy override");
             self.chat_widget.add_error_message(format!(
                 "Failed to carry forward approval policy override: {err}"
             ));
         }
-        if let Some(profile_override) = self.runtime_permission_profile_override.as_ref()
-            && (scope == RuntimePolicyOverrideScope::All
-                || profile_override.turn_override
-                    == RuntimePermissionProfileTurnOverride::LegacySandbox)
-        {
-            match config
+        let profile_override =
+            self.runtime_permission_profile_override
+                .as_ref()
+                .filter(|profile| {
+                    scope == RuntimePolicyOverrideScope::All
+                        || profile.turn_override
+                            == RuntimePermissionProfileTurnOverride::LegacySandbox
+                });
+        if let Some(reviewer) = self.runtime_approvals_reviewer_override.or_else(|| {
+            profile_override
+                .filter(|profile| {
+                    profile.turn_override == RuntimePermissionProfileTurnOverride::Preserve
+                })
+                .map(|_| self.config.approvals_reviewer)
+        }) {
+            config
                 .config_layer_stack
                 .requirements()
                 .approvals_reviewer
-                .can_set(&profile_override.approvals_reviewer)
-            {
-                Ok(()) => config.approvals_reviewer = profile_override.approvals_reviewer,
-                Err(error) => self.chat_widget.add_error_message(format!(
-                    "Failed to carry forward approvals reviewer: {error}"
-                )),
-            }
+                .can_set(&reviewer)
+                .wrap_err("Failed to carry forward approvals reviewer")?;
+            config.approvals_reviewer = reviewer;
+        }
+        if let Some(profile_override) = profile_override {
             match config
                 .permissions
                 .set_permission_profile_from_session_snapshot(
@@ -502,6 +547,10 @@ impl App {
                     config.permissions.network = profile_override.network.clone();
                 }
                 Err(err) => {
+                    if scope == RuntimePolicyOverrideScope::ExplicitOnly {
+                        return Err(err)
+                            .wrap_err("Failed to carry forward permission profile override");
+                    }
                     tracing::warn!(%err, "failed to carry forward permission profile override");
                     self.chat_widget.add_error_message(format!(
                         "Failed to carry forward permission profile override: {err}"
@@ -509,6 +558,7 @@ impl App {
                 }
             }
         }
+        Ok(())
     }
 
     pub(super) fn set_approvals_reviewer_in_app_and_widget(&mut self, reviewer: ApprovalsReviewer) {
@@ -588,12 +638,6 @@ impl App {
 
         let auto_review_preset = auto_review_mode();
         let mut next_config = self.config.clone();
-        let windows_sandbox_changed = updates.iter().any(|(feature, _)| {
-            matches!(
-                feature,
-                Feature::WindowsSandbox | Feature::WindowsSandboxElevated
-            )
-        });
         let mut approval_policy_override = None;
         let mut approvals_reviewer_override = None;
         let mut permission_profile_override = None;
@@ -733,9 +777,6 @@ impl App {
                     &feature_updates_to_apply,
                 )
                 .await;
-                if windows_sandbox_changed {
-                    self.propagate_windows_sandbox_turn_context();
-                }
             }
             return;
         }
@@ -754,6 +795,7 @@ impl App {
             self.chat_widget.add_memories_enable_notice();
         }
         if approvals_reviewer_override.is_some() {
+            self.runtime_approvals_reviewer_override = approvals_reviewer_override;
             self.set_approvals_reviewer_in_app_and_widget(self.config.approvals_reviewer);
         }
         if approval_policy_override.is_some() {
@@ -782,6 +824,7 @@ impl App {
                 .add_error_message(format!("Failed to enable Approve for me: {err}"));
         }
         if permission_profile_override.is_some() {
+            self.runtime_approvals_reviewer_override = Some(self.config.approvals_reviewer);
             self.runtime_permission_profile_override =
                 Some(RuntimePermissionProfileOverride::from_config(&self.config));
         }
@@ -803,7 +846,6 @@ impl App {
                 approvals_reviewer_override,
                 permission_profile_override,
                 active_permission_profile_override,
-                /*windows_sandbox_level*/ None,
                 /*model*/ None,
                 /*effort*/ None,
                 /*summary*/ None,
@@ -818,10 +860,6 @@ impl App {
                 self.note_active_thread_outbound_op(op).await;
                 self.refresh_pending_thread_approvals().await;
             }
-        }
-
-        if windows_sandbox_changed {
-            self.propagate_windows_sandbox_turn_context();
         }
 
         if let Some(label) = permissions_history_label {
@@ -850,6 +888,7 @@ impl App {
             Ok(response) => response,
             Err(err) => {
                 tracing::error!(error = %err, "failed to persist memory settings");
+                self.app_event_tx.send(AppEvent::FollowTranscript);
                 self.chat_widget
                     .add_error_message(format!("Failed to save memory settings: {err}"));
                 return false;
@@ -861,6 +900,7 @@ impl App {
                 message,
                 "memory settings config write was overridden by effective config"
             );
+            self.app_event_tx.send(AppEvent::FollowTranscript);
             self.chat_widget.add_error_message(format!(
                 "Memory setting changes were saved but not applied: {message}"
             ));
@@ -911,6 +951,7 @@ impl App {
 
         if let Err(err) = app_server.thread_memory_mode_set(thread_id, mode).await {
             tracing::error!(error = %err, %thread_id, "failed to update thread memory mode");
+            self.app_event_tx.send(AppEvent::FollowTranscript);
             self.chat_widget.add_error_message(format!(
                 "Saved memory settings, but failed to update the current thread: {err}"
             ));
@@ -921,6 +962,7 @@ impl App {
         &mut self,
         app_server: &mut AppServerSession,
     ) {
+        self.app_event_tx.send(AppEvent::FollowTranscript);
         if let Err(err) = app_server.memory_reset().await {
             tracing::error!(error = %err, "failed to reset memories");
             self.chat_widget
@@ -1044,6 +1086,7 @@ impl App {
         }
         let explicitly_selected =
             has_explicit_resume_permission_override(config, &self.harness_overrides)
+                || self.runtime_approvals_reviewer_override.is_some()
                 || matches!(
                     self.runtime_approval_policy_override,
                     Some(RuntimeApprovalPolicyOverride::Explicit(_))
@@ -1193,6 +1236,7 @@ impl App {
             return;
         }
 
+        self.runtime_approvals_reviewer_override = Some(self.config.approvals_reviewer);
         self.runtime_permission_profile_override =
             Some(RuntimePermissionProfileOverride::from_config(&self.config));
         self.sync_active_thread_permission_settings_to_cached_session()
@@ -1205,7 +1249,6 @@ impl App {
             Some(self.config.approvals_reviewer),
             /*permission_profile*/ None,
             Some(auto_review_preset.active_permission_profile),
-            /*windows_sandbox_level*/ None,
             /*model*/ None,
             /*effort*/ None,
             /*summary*/ None,
@@ -1249,53 +1292,21 @@ impl App {
     pub(super) async fn verify_windows_sandbox_mode_after_setup(
         &mut self,
         app_server: &mut AppServerSession,
-        requested_mode: codex_config::types::WindowsSandboxModeToml,
+        requested_mode: codex_app_server_protocol::WindowsSandboxSetupMode,
     ) -> bool {
-        let cwd = self.chat_widget.config_ref().cwd.display().to_string();
-        let mode = crate::config_update::read_effective_config(app_server.request_handle(), cwd)
-            .await
-            .ok()
-            .and_then(|config| windows_sandbox_mode_from_effective_config(&config));
-        let Some(mode) = mode else {
-            self.chat_widget.add_error_message(
-                "Windows sandbox setup completed, but Codex could not verify the effective sandbox mode."
-                    .to_string(),
-            );
+        if !self.refresh_windows_sandbox_config(app_server).await {
             return false;
-        };
-        self.config.permissions.windows_sandbox_mode = Some(mode);
-        if mode == requested_mode {
+        }
+        if self.chat_widget.windows_sandbox_config.mode == Some(requested_mode)
+            && self
+                .chat_widget
+                .windows_sandbox_config
+                .allows(requested_mode)
+        {
             return true;
         }
-        self.chat_widget.set_windows_sandbox_mode(Some(mode));
-        self.propagate_windows_sandbox_turn_context();
-        self.chat_widget.add_error_message(
-            "Windows sandbox setup completed, but its mode was overridden by the effective configuration."
-                .to_string(),
-        );
+        self.chat_widget.add_error_message("Windows sandbox setup completed, but its mode was overridden by the effective configuration.".to_string());
         false
-    }
-
-    fn propagate_windows_sandbox_turn_context(&self) {
-        #[cfg(target_os = "windows")]
-        {
-            let windows_sandbox_level = crate::windows_sandbox::level_from_config(&self.config);
-            self.app_event_tx
-                .send(AppEvent::CodexOp(AppCommand::override_turn_context(
-                    /*cwd*/ None,
-                    /*approval_policy*/ None,
-                    /*approvals_reviewer*/ None,
-                    /*permission_profile*/ None,
-                    /*active_permission_profile*/ None,
-                    Some(windows_sandbox_level),
-                    /*model*/ None,
-                    /*effort*/ None,
-                    /*summary*/ None,
-                    /*service_tier*/ None,
-                    /*collaboration_mode*/ None,
-                    /*personality*/ None,
-                )));
-        }
     }
 }
 
@@ -1355,23 +1366,6 @@ fn features_toml_from_json(value: &serde_json::Value) -> Option<FeaturesToml> {
     serde_json::from_value(value.clone()).ok()
 }
 
-#[cfg(target_os = "windows")]
-fn windows_sandbox_mode_from_effective_config(
-    effective_config: &ConfigReadResponse,
-) -> Option<codex_config::types::WindowsSandboxModeToml> {
-    let root_windows = effective_config
-        .config
-        .additional
-        .get("windows")
-        .and_then(windows_toml_from_json);
-    root_windows.and_then(|windows| windows.sandbox)
-}
-
-#[cfg(target_os = "windows")]
-fn windows_toml_from_json(value: &serde_json::Value) -> Option<WindowsToml> {
-    serde_json::from_value(value.clone()).ok()
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -1426,7 +1420,7 @@ mod tests {
 
             let default_effort =
                 app.on_apply_advanced_reasoning("gpt-5.5", ReasoningEffortConfig::Ultra);
-            let new_thread_config = app.fresh_session_config();
+            let new_thread_config = &app.config;
 
             assert_eq!(default_effort, Some(expected_default_effort.clone()));
             assert_eq!(app.chat_widget.current_model(), "gpt-5.5");
@@ -1437,7 +1431,7 @@ mod tests {
             assert_eq!(
                 (
                     new_thread_config.model.as_deref(),
-                    new_thread_config.model_reasoning_effort,
+                    new_thread_config.model_reasoning_effort.clone(),
                 ),
                 (Some("gpt-5.5"), Some(expected_default_effort))
             );
@@ -1466,7 +1460,7 @@ mod tests {
 
         let default_effort =
             app.on_apply_advanced_reasoning("ultra-only", ReasoningEffortConfig::Ultra);
-        let new_thread_config = app.fresh_session_config();
+        let new_thread_config = &app.config;
 
         assert_eq!(default_effort, None);
         assert_eq!(app.chat_widget.current_model(), "ultra-only");
@@ -1477,7 +1471,7 @@ mod tests {
         assert_eq!(
             (
                 new_thread_config.model.as_deref(),
-                new_thread_config.model_reasoning_effort,
+                new_thread_config.model_reasoning_effort.clone(),
             ),
             (Some("gpt-5.5"), Some(ReasoningEffortConfig::Low))
         );
@@ -1723,7 +1717,7 @@ enabled = false
         )?;
 
         let assert_cloud_requirements = |app: &App| {
-            let config = app.fresh_session_config();
+            let config = &app.config;
             assert_eq!(
                 config
                     .config_layer_stack
@@ -1747,6 +1741,78 @@ enabled = false
             Some(false)
         );
         assert_cloud_requirements(&app);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn new_session_and_config_rebuilds_keep_the_live_application_network_policy() -> Result<()>
+    {
+        use codex_http_client::ClientRouteClass;
+        use codex_http_client::DestinationPolicy;
+        use codex_http_client::HttpError;
+        use codex_http_client::NetworkPolicyController;
+        use codex_http_client::NetworkPolicyDenied;
+        use wiremock::Mock;
+        use wiremock::MockServer;
+        use wiremock::ResponseTemplate;
+        use wiremock::matchers::method;
+
+        let mut app = make_test_app().await;
+        let codex_home = tempdir()?;
+        app.config.codex_home = codex_home.path().to_path_buf().abs();
+        let controller = NetworkPolicyController::default();
+        let denied = DestinationPolicy::Restricted {
+            allowed_hosts: Default::default(),
+        };
+        assert!(controller.publish(controller.policy().revision(), denied.clone()));
+        app.config.application_network_policy = controller.policy();
+        let app_server = crate::start_embedded_app_server_for_picker(&app.config).await?;
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        app.refresh_in_memory_config_from_disk().await?;
+        let new_config = app.load_new_session_config(&app_server).await?;
+        let permission_config = app
+            .rebuild_config_for_permission_profile(":workspace")
+            .await?;
+        let pet_url =
+            "https://persistent.oaistatic.com/codex/pets/v1/dewey-spritesheet-v4.webp".parse()?;
+        for config in [&app.config, &new_config, &permission_config] {
+            assert_eq!(config.application_network_policy, controller.policy());
+            assert_eq!(
+                config
+                    .http_client_factory()
+                    .network_policy()
+                    .acquire(&pet_url)
+                    .map(|_| ()),
+                Err(NetworkPolicyDenied::Destination),
+            );
+        }
+        let client = new_config
+            .http_client_factory()
+            .build_client(&server.uri(), ClientRouteClass::Other)?;
+        assert!(matches!(
+            client.get(server.uri()).send().await,
+            Err(HttpError::Policy(NetworkPolicyDenied::Destination))
+        ));
+        assert!(server.received_requests().await.unwrap().is_empty());
+
+        assert!(controller.publish(
+            controller.policy().revision(),
+            DestinationPolicy::Unrestricted
+        ));
+        assert!(client.get(server.uri()).send().await?.status().is_success());
+        assert!(controller.publish(controller.policy().revision(), denied));
+        assert!(matches!(
+            client.get(server.uri()).send().await,
+            Err(HttpError::Policy(NetworkPolicyDenied::Destination))
+        ));
+        server.verify().await;
+        app_server.shutdown().await?;
         Ok(())
     }
 
@@ -1775,6 +1841,7 @@ enabled = false
 
         app.chat_widget
             .handle_thread_session(crate::session_state::ThreadSessionState {
+                windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
                 thread_id: ThreadId::new(),
                 forked_from_id: None,
                 fork_parent_title: None,
@@ -1929,6 +1996,8 @@ theme = "dracula"
         let mut tui = crate::tui::test_support::make_test_tui()?;
         app.sync_tui_theme_selection("dracula".to_string());
         app.chat_widget.requires_openai_auth = false;
+        crate::markdown_render::preferences::init(Default::default());
+        app.local_settings.tui.rendering.math = false;
         let mut legacy_config = app.config.clone();
         legacy_config.tui_theme = Some("nord".to_string());
         legacy_config.model_provider.requires_openai_auth = true;
@@ -1940,6 +2009,12 @@ theme = "dracula"
         let replacement = ChatWidget::new_with_app_event(init);
         assert_eq!(replacement.local_settings, app.local_settings);
         assert!(!replacement.requires_openai_auth);
+        app.replace_chat_widget(replacement);
+        let source = r"Math: \(x^2\)";
+        assert_eq!(
+            crate::markdown_render::render_markdown_text(source).to_string(),
+            source
+        );
         Ok(())
     }
 
